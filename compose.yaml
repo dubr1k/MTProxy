@@ -1,0 +1,66 @@
+name: mtproxy
+
+services:
+  mask:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /config
+      - /data
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/unicorndubr1k.org:/var/www/unicorndubr1k.org:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --no-check-certificate --header='Host: mtproxy.5-129-216-58.nip.io' --spider https://mtproxy.5-129-216-58.nip.io:443/"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    networks:
+      default:
+        aliases:
+          - mtproxy.5-129-216-58.nip.io
+
+  mtproxy:
+    build:
+      context: .
+      args:
+        MTPROXY_COMMIT: f36d8af769ffaeac36978d38c2c0f6d1104c2137
+    image: dubr1k/mtproxy:f36d8af
+    container_name: mtproxy
+    restart: unless-stopped
+    depends_on:
+      mask:
+        condition: service_healthy
+    environment:
+      FAKE_TLS_DOMAIN: mtproxy.5-129-216-58.nip.io
+      PROXY_PORT: "443"
+      STATS_PORT: "2398"
+      WORKERS: "0"
+      SECRETS_FILE: /run/secrets/mtproxy-secrets
+    secrets:
+      - mtproxy-secrets
+    ports:
+      - "127.0.0.1:8445:443/tcp"
+      - "127.0.0.1:2398:2398/tcp"
+    read_only: true
+    tmpfs:
+      - /run/mtproxy:size=1m,mode=0750,uid=0,gid=999
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 3 http://127.0.0.1:2398/stats >/dev/null"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+secrets:
+  mtproxy-secrets:
+    file: ./secrets/users.conf

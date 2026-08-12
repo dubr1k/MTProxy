@@ -13,3 +13,8 @@ Desktop.ini
 # Agent
 .gemini/
 .agent/
+
+# Local deployment secrets and logs
+secrets/users.conf
+.env
+*.log
