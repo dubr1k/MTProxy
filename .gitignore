@@ -18,3 +18,5 @@ Desktop.ini
 secrets/users.conf
 .env
 *.log
+__pycache__/
+*.py[cod]
