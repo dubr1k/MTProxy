@@ -2,7 +2,9 @@ name: mtproxy
 
 services:
   mask:
-    image: caddy:2.10-alpine
+    image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    environment:
+      MTPROXY_DOMAIN: ${MTPROXY_DOMAIN}
     restart: unless-stopped
     read_only: true
     tmpfs:
@@ -10,18 +12,18 @@ services:
       - /data
     volumes:
       - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
-      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - ${MTPROXY_LETSENCRYPT_ROOT:-/etc/letsencrypt}:/etc/letsencrypt:ro
       # Cover-site content is intentionally stored outside Git.
-      - /var/www/tga.unicorndubr1k.org:/srv/tga:ro
+      - ${MTPROXY_COVER_ROOT}:/srv/tga:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --no-check-certificate --header='Host: tga.unicorndubr1k.org' --spider https://tga.unicorndubr1k.org:443/"]
+      test: ["CMD-SHELL", "wget -q --no-check-certificate --header='Host: ${MTPROXY_DOMAIN}' --spider https://${MTPROXY_DOMAIN}:443/"]
       interval: 15s
       timeout: 3s
       retries: 3
     networks:
       default:
         aliases:
-          - tga.unicorndubr1k.org
+          - ${MTPROXY_DOMAIN}
 
   mtproxy:
     image: ghcr.io/samnet-dev/mtproxymax-telemt@sha256:ab27edbceb9f8c042911a7d9a44835318d1db5943ff50f276792fa29601ff856
@@ -32,12 +34,12 @@ services:
       mask:
         condition: service_healthy
     environment:
-      FAKE_TLS_DOMAIN: tga.unicorndubr1k.org
+      FAKE_TLS_DOMAIN: ${MTPROXY_DOMAIN}
       SECRETS_FILE: /run/secrets/mtproxy-secrets
     secrets:
       - mtproxy-secrets
     ports:
-      - "127.0.0.1:8445:443/tcp"
+      - "127.0.0.1:${MTPROXY_BACKEND_PORT}:443/tcp"
     read_only: true
     volumes:
       - ./docker/telemt-entrypoint.sh:/usr/local/bin/telemt-entrypoint.sh:ro

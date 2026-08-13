@@ -1,0 +1,31 @@
+name: deployment-tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax
+        run: bash -n install.sh uninstall.sh scripts/check-deployment.sh docker/telemt-entrypoint.sh
+      - name: Python tests
+        run: python3 -m unittest -v tests/test_deploy.py
+      - name: Compose render
+        run: |
+          cat > .env <<'EOF'
+          MTPROXY_DOMAIN=proxy.example.com
+          MTPROXY_BACKEND_PORT=18445
+          MTPROXY_COVER_ROOT=/tmp/cover
+          MTPROXY_LETSENCRYPT_ROOT=/tmp/letsencrypt
+          EOF
+          mkdir -p secrets
+          printf 'ci=0123456789abcdef0123456789abcdef\n' > secrets/users.conf
+          docker compose config -q
+      - name: Diff hygiene
+        run: git diff --check

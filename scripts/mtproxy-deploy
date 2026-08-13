@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""Deterministic, secret-safe deployment file generator for shared-443 MTProxy."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import sys
+
+REPO = Path(__file__).resolve().parents[1]
+REAL_ROOT = Path(os.environ.get("MTPROXY_TEST_ROOT", "/"))
+DEFAULT_INSTALL = "/opt/mtproxy-shared443"
+DOMAIN_RE = re.compile(r"(?=^.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
+USER_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+MARKER = "mtproxy-shared443"
+
+
+def rooted(path: str) -> Path:
+    p = Path(path)
+    if REAL_ROOT == Path("/"):
+        return p
+    return REAL_ROOT / p.relative_to("/")
+
+
+def valid_domain(value: str) -> str:
+    value = value.rstrip(".").lower()
+    if not DOMAIN_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError(f"invalid DNS hostname: {value}")
+    return value
+
+
+def valid_port(value: str) -> int:
+    port = int(value)
+    if not 1024 <= port <= 65535:
+        raise argparse.ArgumentTypeError("backend port must be between 1024 and 65535")
+    return port
+
+
+def users(value: str) -> list[str]:
+    names = [x.strip() for x in value.split(",") if x.strip()]
+    if not names or len(names) != len(set(names)) or any(not USER_RE.fullmatch(x) for x in names):
+        raise argparse.ArgumentTypeError("users must be unique comma-separated names matching [A-Za-z0-9_-]{1,64}")
+    return names
+
+
+def atomic_write(path: Path, content: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(content)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def render(args: argparse.Namespace) -> None:
+    install = rooted(args.install_dir)
+    install.mkdir(parents=True, exist_ok=True)
+    for name in ("compose.yaml", "uninstall.sh"):
+        shutil.copy2(REPO / name, install / name)
+    os.chmod(install / "uninstall.sh", 0o755)
+    target_docker = install / "docker"
+    target_docker.mkdir(exist_ok=True)
+    for name in ("Caddyfile", "telemt-entrypoint.sh", "links.py"):
+        shutil.copy2(REPO / "docker" / name, target_docker / name)
+    os.chmod(target_docker / "telemt-entrypoint.sh", 0o755)
+    target_scripts = install / "scripts"
+    target_scripts.mkdir(exist_ok=True)
+    for name in ("mtproxy-deploy", "check-deployment.sh"):
+        shutil.copy2(REPO / "scripts" / name, target_scripts / name)
+        os.chmod(target_scripts / name, 0o755)
+
+    cover_root = f"/var/www/{args.domain}"
+    env = (
+        f"MTPROXY_DOMAIN={args.domain}\n"
+        f"MTPROXY_BACKEND_PORT={args.backend_port}\n"
+        f"MTPROXY_COVER_ROOT={cover_root}\n"
+        "MTPROXY_LETSENCRYPT_ROOT=/etc/letsencrypt\n"
+    )
+    atomic_write(install / ".env", env, 0o600)
+
+    secret_file = install / "secrets/users.conf"
+    existing: dict[str, str] = {}
+    if secret_file.exists():
+        for line in secret_file.read_text().splitlines():
+            if "=" in line:
+                name, secret = line.split("=", 1)
+                if USER_RE.fullmatch(name) and re.fullmatch(r"[0-9a-f]{32}", secret):
+                    existing[name] = secret
+    secret_text = "".join(f"{name}={existing.get(name, secrets.token_hex(16))}\n" for name in args.users)
+    atomic_write(secret_file, secret_text, 0o600)
+
+    webroot = rooted(cover_root)
+    webroot.mkdir(parents=True, exist_ok=True)
+    if args.cover_file:
+        shutil.copyfile(args.cover_file, webroot / "index.html")
+        os.chmod(webroot / "index.html", 0o644)
+    elif not (webroot / "index.html").exists():
+        atomic_write(webroot / "index.html", "<!doctype html><meta charset=utf-8><title>Welcome</title><h1>Welcome</h1>\n")
+
+    state = {
+        "schema": 1,
+        "domain": args.domain,
+        "email": args.email,
+        "backend_port": args.backend_port,
+        "install_dir": args.install_dir,
+        "cover_root": cover_root,
+        "users": args.users,
+    }
+    atomic_write(install / "state.json", json.dumps(state, indent=2, sort_keys=True) + "\n", 0o600)
+
+
+def route_paths(args: argparse.Namespace) -> tuple[Path, str]:
+    return rooted(args.route_file), args.route_file
+
+
+def add_route(args: argparse.Namespace) -> None:
+    path, _ = route_paths(args)
+    if not path.is_file():
+        raise SystemExit(f"route file does not exist: {args.route_file}")
+    text = path.read_text()
+    begin = f"# BEGIN {MARKER} {args.domain}"
+    if begin in text:
+        return
+    if re.search(rf"(?m)^\s*{re.escape(args.domain)}\s+", text):
+        raise SystemExit(f"domain already exists in Nginx route map: {args.domain}")
+    matches = list(re.finditer(r"(?m)^(\s*)default\s+[^;]+;", text))
+    if len(matches) != 1:
+        raise SystemExit("selected Nginx route file must contain exactly one default map entry")
+    match = matches[0]
+    indent = match.group(1)
+    block = (
+        f"{indent}{begin}\n"
+        f"{indent}{args.domain} 127.0.0.1:{args.backend_port};\n"
+        f"{indent}# END {MARKER} {args.domain}\n"
+    )
+    backup = path.with_name(path.name + ".mtproxy-backup")
+    if not backup.exists():
+        shutil.copy2(path, backup)
+    atomic_write(path, text[:match.start()] + block + text[match.start():])
+
+
+def remove_route(args: argparse.Namespace) -> None:
+    path, _ = route_paths(args)
+    if not path.exists():
+        return
+    text = path.read_text()
+    pattern = re.compile(
+        rf"(?m)^\s*# BEGIN {MARKER} {re.escape(args.domain)}\n"
+        rf".*?^\s*# END {MARKER} {re.escape(args.domain)}\n",
+        re.DOTALL,
+    )
+    atomic_write(path, pattern.sub("", text))
+
+
+def create_router(args: argparse.Namespace) -> None:
+    directory = rooted("/etc/nginx/mtproxy-stream")
+    directory.mkdir(parents=True, exist_ok=True)
+    route_path = directory / "routes.conf"
+    if not route_path.exists():
+        atomic_write(route_path, "# Add more exact SNI routes above default.\ndefault 127.0.0.1:9;\n")
+    route_args = argparse.Namespace(
+        domain=args.domain,
+        backend_port=args.backend_port,
+        route_file="/etc/nginx/mtproxy-stream/routes.conf",
+    )
+    add_route(route_args)
+    router = """map $ssl_preread_server_name $mtproxy_stream_backend {
+    include /etc/nginx/mtproxy-stream/routes.conf;
+}
+
+server {
+    listen 443 reuseport;
+    proxy_connect_timeout 10s;
+    proxy_timeout 1h;
+    proxy_pass $mtproxy_stream_backend;
+    ssl_preread on;
+}
+"""
+    atomic_write(directory / "router.conf", router)
+
+
+def common_route(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--domain", required=True, type=valid_domain)
+    parser.add_argument("--route-file", required=True)
+
+
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__)
+    sub = p.add_subparsers(dest="command", required=True)
+    r = sub.add_parser("render")
+    r.add_argument("--domain", required=True, type=valid_domain)
+    r.add_argument("--email", required=True)
+    r.add_argument("--users", type=users, default=users("default"))
+    r.add_argument("--backend-port", type=valid_port, default=8445)
+    r.add_argument("--install-dir", default=DEFAULT_INSTALL)
+    r.add_argument("--cover-file", type=Path)
+    r.set_defaults(func=render)
+    a = sub.add_parser("nginx-add-route")
+    common_route(a)
+    a.add_argument("--backend-port", type=valid_port, default=8445)
+    a.set_defaults(func=add_route)
+    d = sub.add_parser("nginx-remove-route")
+    common_route(d)
+    d.set_defaults(func=remove_route)
+    f = sub.add_parser("nginx-create-router")
+    f.add_argument("--domain", required=True, type=valid_domain)
+    f.add_argument("--backend-port", type=valid_port, default=8445)
+    f.set_defaults(func=create_router)
+    return p
+
+
+def main() -> None:
+    args = parser().parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
