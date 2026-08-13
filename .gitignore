@@ -16,10 +16,14 @@ Desktop.ini
 
 # Local deployment secrets and logs
 secrets/users.conf
+secrets/telemt-api-token
 .env
 *.log
 __pycache__/
 *.py[cod]
+.venv/
+.pytest_cache/
+panel/*.sqlite3*
 
 # Cover-site content is deployment-specific and must stay outside Git history
 docker/site/
