@@ -1,6 +1,6 @@
 # Docker deployment behind an existing Nginx SNI router
 
-This fork adds a pinned, reproducible Docker deployment for hosts where public TCP/443 is already owned by Nginx `stream` and shared with Xray/3x-ui.
+This fork adds a pinned, reproducible Docker deployment for hosts where public TCP/443 is already owned by Nginx `stream` and shared with Xray/3x-ui. The runtime uses Telemt 3.4.25 pinned by image digest; unlike the legacy official engine, it connects directly to Telegram DC endpoints on TCP/443 and does not depend on the increasingly unreliable Middle-End TCP/8888 path.
 
 ## Topology
 
@@ -11,12 +11,12 @@ Internet :443
   -> mtproxy container :443
 
 Unknown/probe TLS connection
-  -> MTProxy fake-TLS fallback to `tga.unicorndubr1k.org:443`
+  -> Telemt fake-TLS fallback to `mask:443`
   -> Docker DNS alias `mask`
   -> local Caddy mask sidecar serving the same cover-site files and certificate
 ```
 
-The Docker-only DNS alias prevents a routing loop back through public port 443. The cover certificate and static files are mounted read-only. Caddy is used for the internal mask endpoint because its current TLS stack accepts the hybrid `X25519MLKEM768` group used by modern clients. MTProxy and its statistics endpoint bind only to host loopback.
+The internal service name prevents a routing loop back through public port 443. The cover certificate and static files are mounted read-only. Caddy is used for the internal mask endpoint because its current TLS stack accepts the hybrid `X25519MLKEM768` group used by modern clients. Telemt binds only to container TCP/443, published as host loopback `127.0.0.1:8445`.
 
 The public cover site is versioned at `docker/site/index.html`. It is a standalone Russian-language Applied AI practice page and does not claim unverified clients, certifications, or legal identities.
 
@@ -29,7 +29,7 @@ alice=32_hex_characters
 bob=32_hex_characters
 ```
 
-Do not commit this file. One `-S` argument is generated per line.
+Do not commit this file. The entrypoint renders one Telemt user per line into a private tmpfs configuration.
 
 Client links use the Fake-TLS form:
 
@@ -41,11 +41,12 @@ tg://proxy?server=SERVER&port=443&secret=ee<secret><hex(domain)>
 
 ```bash
 docker compose config
-docker compose build
 docker compose up -d
 ```
 
 Then add the selected SNI hostname to the existing host Nginx stream map and route it to `127.0.0.1:8445`. Validate with `nginx -t` before reload.
+
+Do not treat a healthy container or an HTTPS response as proof of MTProto operation. Verify every user secret with a real protocol probe that performs Fake-TLS, sends `req_pq_multi`, and receives Telegram `resPQ`.
 
 ## MEKO review
 

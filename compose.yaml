@@ -23,39 +23,32 @@ services:
           - tga.unicorndubr1k.org
 
   mtproxy:
-    build:
-      context: .
-      args:
-        MTPROXY_COMMIT: f36d8af769ffaeac36978d38c2c0f6d1104c2137
-    image: dubr1k/mtproxy:f36d8af
+    image: ghcr.io/samnet-dev/mtproxymax-telemt@sha256:ab27edbceb9f8c042911a7d9a44835318d1db5943ff50f276792fa29601ff856
     container_name: mtproxy
+    entrypoint: ["/usr/local/bin/telemt-entrypoint.sh"]
     restart: unless-stopped
     depends_on:
       mask:
         condition: service_healthy
     environment:
       FAKE_TLS_DOMAIN: tga.unicorndubr1k.org
-      PROXY_PORT: "443"
-      STATS_PORT: "2398"
-      WORKERS: "0"
       SECRETS_FILE: /run/secrets/mtproxy-secrets
     secrets:
       - mtproxy-secrets
     ports:
       - "127.0.0.1:8445:443/tcp"
-      - "127.0.0.1:2398:2398/tcp"
     read_only: true
+    volumes:
+      - ./docker/telemt-entrypoint.sh:/usr/local/bin/telemt-entrypoint.sh:ro
     tmpfs:
-      - /run/mtproxy:size=1m,mode=0750,uid=0,gid=999
+      - /run/telemt:size=32m,mode=0700
     cap_drop:
       - ALL
-    cap_add:
-      - SETUID
-      - SETGID
+
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS --max-time 3 http://127.0.0.1:2398/stats >/dev/null"]
+      test: ["CMD-SHELL", "test -r /proc/net/tcp && grep -qi ':01BB ' /proc/net/tcp"]
       interval: 20s
       timeout: 5s
       retries: 5
