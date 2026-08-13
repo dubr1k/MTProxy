@@ -9,8 +9,9 @@ BACKEND_PORT=8445
 MODE=""
 ROUTE_FILE=""
 COVER_FILE=""
+RENEW_HOOK=""
 SKIP_DNS=0
-NO_FIREWALL=0
+MANAGE_FIREWALL=0
 
 log() { printf '[mtproxy] %s\n' "$*"; }
 die() { printf '[mtproxy] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -28,7 +29,7 @@ Options:
   --cover-file PATH        private HTML file copied outside Git
   --project-dir PATH       deployment directory (default: /opt/mtproxy-shared443)
   --skip-dns-check         allow installation before DNS points to this VPS
-  --no-firewall            do not adjust active UFW
+  --manage-firewall        opt in to adding exact allow 80/443 rules to active UFW
   -h, --help
 EOF
 }
@@ -44,7 +45,7 @@ while (($#)); do
     --cover-file) COVER_FILE=${2:-}; shift 2 ;;
     --project-dir) PROJECT_DIR=${2:-}; shift 2 ;;
     --skip-dns-check) SKIP_DNS=1; shift ;;
-    --no-firewall) NO_FIREWALL=1; shift ;;
+    --manage-firewall) MANAGE_FIREWALL=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -66,6 +67,8 @@ DEPLOY_CLI="$SCRIPT_DIR/scripts/mtproxy-deploy"
 
 rollback_route=0
 fresh_include_added=0
+ufw_added_80=0
+ufw_added_443=0
 rollback() {
   local rc=$?
   if ((rollback_route)); then
@@ -79,11 +82,14 @@ rollback() {
 from pathlib import Path
 p=Path('/etc/nginx/nginx.conf')
 if p.exists():
-    p.write_text(p.read_text().replace('include /etc/nginx/mtproxy-stream/stream.conf;\n\n',''))
+    p.write_text(p.read_text().replace('# BEGIN mtproxy-shared443 stream include\ninclude /etc/nginx/mtproxy-stream/stream.conf;\n# END mtproxy-shared443 stream include\n\n',''))
 PY
     rm -f /etc/nginx/mtproxy-stream/router.conf /etc/nginx/mtproxy-stream/routes.conf /etc/nginx/mtproxy-stream/stream.conf
     if nginx -t >/dev/null 2>&1; then systemctl reload nginx || true; fi
   fi
+  if ((ufw_added_80)); then ufw delete allow 80/tcp >/dev/null 2>&1 || true; fi
+  if ((ufw_added_443)); then ufw delete allow 443/tcp >/dev/null 2>&1 || true; fi
+  [[ -z $RENEW_HOOK ]] || rm -f "$RENEW_HOOK"
   exit "$rc"
 }
 trap rollback ERR
@@ -109,7 +115,8 @@ docker compose version >/dev/null || die "Docker Compose v2 is unavailable"
 nginx -V 2>&1 | grep -Eq 'stream|dynamic' || die "Nginx stream support is unavailable"
 
 if ss -lntH "sport = :$BACKEND_PORT" | grep -q .; then
-  if ! docker inspect mtproxy >/dev/null 2>&1; then
+  owned_container=$(docker compose --project-directory "$PROJECT_DIR" ps -q mtproxy 2>/dev/null || true)
+  if [[ -z $owned_container ]]; then
     die "127.0.0.1:$BACKEND_PORT is already occupied"
   fi
 fi
@@ -138,6 +145,9 @@ if ((SKIP_DNS == 0)); then
     printf '%s\n' "${local_ips[@]}" | grep -Fxq "$dns_ip" && dns_match=1
   done
   ((dns_match)) || die "DNS for $DOMAIN does not match any detected VPS IPv4 (${local_ips[*]}); use DNS-only and retry"
+  if getent ahostsv6 "$DOMAIN" | grep -q .; then
+    die "AAAA is published for $DOMAIN but this installer configures IPv4 only; remove AAAA or configure IPv6 manually"
+  fi
 fi
 
 render_args=(render --domain "$DOMAIN" --email "$EMAIL" --users "$USERS" --backend-port "$BACKEND_PORT" --install-dir "$PROJECT_DIR")
@@ -172,12 +182,14 @@ docker compose --project-directory "$PROJECT_DIR" pull -q
 docker compose --project-directory "$PROJECT_DIR" up -d
 
 for _ in $(seq 1 45); do
-  [[ $(docker inspect mtproxy --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' 2>/dev/null || true) == healthy ]] && \
-  [[ $(docker inspect mtproxy-mask-1 --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' 2>/dev/null || true) == healthy ]] && break
+  mtproxy_id=$(docker compose --project-directory "$PROJECT_DIR" ps -q mtproxy)
+  mask_id=$(docker compose --project-directory "$PROJECT_DIR" ps -q mask)
+  [[ -n $mtproxy_id && $(docker inspect "$mtproxy_id" --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' 2>/dev/null || true) == healthy ]] && \
+  [[ -n $mask_id && $(docker inspect "$mask_id" --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' 2>/dev/null || true) == healthy ]] && break
   sleep 2
 done
-[[ $(docker inspect mtproxy --format '{{.State.Health.Status}}') == healthy ]] || die "Telemt did not become healthy"
-[[ $(docker inspect mtproxy-mask-1 --format '{{.State.Health.Status}}') == healthy ]] || die "Caddy did not become healthy"
+[[ $(docker inspect "$mtproxy_id" --format '{{.State.Health.Status}}') == healthy ]] || die "Telemt did not become healthy"
+[[ $(docker inspect "$mask_id" --format '{{.State.Health.Status}}') == healthy ]] || die "Caddy did not become healthy"
 
 if [[ $MODE == fresh ]]; then
   python3 "$DEPLOY_CLI" nginx-create-router --domain "$DOMAIN" --backend-port "$BACKEND_PORT"
@@ -195,7 +207,7 @@ p=Path('/etc/nginx/nginx.conf')
 s=p.read_text()
 needle='http {'
 if needle not in s: raise SystemExit('cannot locate http block in nginx.conf')
-s=s.replace(needle, 'include /etc/nginx/mtproxy-stream/stream.conf;\n\n'+needle, 1)
+s=s.replace(needle, '# BEGIN mtproxy-shared443 stream include\ninclude /etc/nginx/mtproxy-stream/stream.conf;\n# END mtproxy-shared443 stream include\n\n'+needle, 1)
 p.write_text(s)
 PY
     fresh_include_added=1
@@ -209,18 +221,35 @@ fi
 nginx -t
 systemctl reload nginx
 
-if ((NO_FIREWALL == 0)) && command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then
-  ufw allow 80/tcp comment 'mtproxy-shared443 ACME' >/dev/null
-  ufw allow 443/tcp comment 'mtproxy-shared443 shared TLS' >/dev/null
+RENEW_HOOK="/etc/letsencrypt/renewal-hooks/deploy/mtproxy-$DOMAIN.sh"
+install -d -m 0755 "$(dirname "$RENEW_HOOK")"
+cat >"$RENEW_HOOK" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+docker compose --project-directory '$PROJECT_DIR' up -d --force-recreate mask
+EOF
+chmod 0755 "$RENEW_HOOK"
+
+if ((MANAGE_FIREWALL)) && command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then
+  if ! ufw status | grep -Eq '^80/tcp\s+ALLOW'; then
+    ufw allow 80/tcp comment 'mtproxy-shared443 ACME' >/dev/null
+    ufw_added_80=1
+  fi
+  if ! ufw status | grep -Eq '^443/tcp\s+ALLOW'; then
+    ufw allow 443/tcp comment 'mtproxy-shared443 shared TLS' >/dev/null
+    ufw_added_443=1
+  fi
 fi
 
-python3 - "$PROJECT_DIR/state.json" "$MODE" "$ROUTE_FILE" "$HTTP_SITE" <<'PY'
+python3 - "$PROJECT_DIR/state.json" "$MODE" "$ROUTE_FILE" "$HTTP_SITE" "$RENEW_HOOK" "$ufw_added_80" "$ufw_added_443" <<'PY'
 import json
 from pathlib import Path
 import sys
 p=Path(sys.argv[1])
 d=json.loads(p.read_text())
-d.update({'mode':sys.argv[2],'route_file':sys.argv[3],'http_site':sys.argv[4]})
+d.update({'mode':sys.argv[2],'route_file':sys.argv[3],'http_site':sys.argv[4],
+          'renew_hook':sys.argv[5], 'ufw_added_80':bool(int(sys.argv[6])),
+          'ufw_added_443':bool(int(sys.argv[7]))})
 p.write_text(json.dumps(d,indent=2,sort_keys=True)+'\n')
 p.chmod(0o600)
 PY
@@ -228,6 +257,8 @@ PY
 "$SCRIPT_DIR/scripts/check-deployment.sh" --project-dir "$PROJECT_DIR" --domain "$DOMAIN" --backend-port "$BACKEND_PORT"
 rollback_route=0
 fresh_include_added=0
+ufw_added_80=0
+ufw_added_443=0
 
 log "installation completed"
 log "client links contain secrets; generate them locally with:"

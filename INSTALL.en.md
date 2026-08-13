@@ -71,10 +71,10 @@ For unusually complex Nginx layouts, add the route manually and use `scripts/mtp
 --cover-file ./site.html private HTML input, never committed to Git
 --project-dir /opt/name  deployment directory
 --skip-dns-check         stage before DNS cutover
---no-firewall            do not allow 80/443 in active UFW
+--manage-firewall        explicitly add allow 80/443 to active UFW
 ```
 
-Secrets are generated locally in `PROJECT_DIR/secrets/users.conf` with mode `0600`. Re-running the installer preserves secrets for unchanged user names.
+Secrets are generated locally in `PROJECT_DIR/secrets/users.conf` with mode `0600`. Re-running the installer preserves secrets for unchanged user names. The firewall is unchanged by default; `--manage-firewall` adds only missing UFW rules and journals ownership for precise removal.
 
 ## What the installer does
 
@@ -117,7 +117,7 @@ Optional destructive cleanup:
 sudo ./uninstall.sh --yes --purge-certificate --purge-cover
 ```
 
-Removal is driven by the mode-`0600` `state.json` file and does not perform broad grep/rm operations over unrelated configuration.
+Removal is driven by the mode-`0600` `state.json` plus an ownership marker. Nginx changes are backed up, applied, validated, and reloaded before containers are stopped. Failures restore the exact previous configuration. The renewal hook and only installer-created UFW rules are removed from recorded state.
 
 ## Sandbox tests
 

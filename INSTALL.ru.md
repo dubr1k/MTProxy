@@ -71,10 +71,10 @@ Installer:
 --cover-file ./site.html приватный HTML-файл; в Git не попадает
 --project-dir /opt/name  каталог развёртывания
 --skip-dns-check         только для предварительной staging-установки
---no-firewall            не добавлять allow 80/443 в активный UFW
+--manage-firewall        явно добавить allow 80/443 в активный UFW
 ```
 
-Секреты генерируются локально в `PROJECT_DIR/secrets/users.conf`, режим `0600`. Повторный запуск сохраняет секреты пользователей с прежними именами.
+Секреты генерируются локально в `PROJECT_DIR/secrets/users.conf`, режим `0600`. Повторный запуск сохраняет секреты пользователей с прежними именами. Firewall по умолчанию не изменяется; `--manage-firewall` добавляет только отсутствующие UFW rules и записывает их в state для точечного удаления.
 
 ## Что installer делает
 
@@ -117,7 +117,7 @@ sudo ./uninstall.sh --yes
 sudo ./uninstall.sh --yes --purge-certificate --purge-cover
 ```
 
-Удаление основано на mode-`0600` `state.json` и не выполняет широких grep/rm над чужой конфигурацией.
+Удаление основано на mode-`0600` `state.json` и ownership marker. Сначала Nginx-изменения резервируются, применяются и проверяются; контейнеры останавливаются только после успешного reload. При ошибке возвращается точная предыдущая конфигурация. Renewal hook и только созданные installer'ом UFW rules удаляются по state.
 
 ## Dry/sandbox-проверка генератора
 
