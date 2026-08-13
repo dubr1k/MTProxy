@@ -35,15 +35,16 @@ services:
     environment:
       FAKE_TLS_DOMAIN: ${MTPROXY_DOMAIN}
       SECRETS_FILE: /run/secrets/mtproxy-secrets
+      API_TOKEN_FILE: /run/secrets/telemt-api-token
     secrets:
       - mtproxy-secrets
+      - telemt-api-token
     ports:
       - "127.0.0.1:${MTPROXY_BACKEND_PORT}:443/tcp"
     read_only: true
     volumes:
       - ./docker/telemt-entrypoint.sh:/usr/local/bin/telemt-entrypoint.sh:ro
-    tmpfs:
-      - /run/telemt:size=32m,mode=0700
+      - telemt-config:/var/lib/telemt
     cap_drop:
       - ALL
 
@@ -56,6 +57,53 @@ services:
       retries: 5
       start_period: 20s
 
+  panel:
+    build:
+      context: ./panel
+    restart: unless-stopped
+    depends_on:
+      mtproxy:
+        condition: service_healthy
+    environment:
+      PANEL_DATABASE: /data/panel.sqlite3
+      PANEL_ALLOWED_HOSTS: ${PANEL_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      PANEL_COOKIE_SECURE: ${PANEL_COOKIE_SECURE:-true}
+      TELEMT_API_URL: http://mtproxy:9091
+      TELEMT_API_TOKEN_SOURCE: /run/secrets/telemt-api-token
+    secrets:
+      - telemt-api-token
+    ports:
+      - "127.0.0.1:8787:8787/tcp"
+    volumes:
+      - panel-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=0700
+      - /run/panel:size=1m,mode=0700
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - DAC_READ_SEARCH
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=2)"]
+      interval: 20s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
 secrets:
   mtproxy-secrets:
     file: ./secrets/users.conf
+  telemt-api-token:
+    file: ./secrets/telemt-api-token
+
+volumes:
+  telemt-config:
+  panel-data:

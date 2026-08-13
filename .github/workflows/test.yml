@@ -13,9 +13,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Shell syntax
-        run: bash -n install.sh uninstall.sh scripts/check-deployment.sh docker/telemt-entrypoint.sh
+        run: |
+          bash -n install.sh uninstall.sh scripts/check-deployment.sh docker/telemt-entrypoint.sh panel/entrypoint.sh
+          shellcheck install.sh uninstall.sh scripts/check-deployment.sh docker/telemt-entrypoint.sh panel/entrypoint.sh
       - name: Python tests
-        run: python3 -m unittest -v tests/test_deploy.py
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r panel/requirements-dev.txt
+          .venv/bin/python -m pytest -q panel/tests
+          python3 -m unittest -v tests/test_deploy.py
       - name: Compose render
         run: |
           cat > .env <<'EOF'
@@ -26,6 +32,7 @@ jobs:
           EOF
           mkdir -p secrets
           printf 'ci=0123456789abcdef0123456789abcdef\n' > secrets/users.conf
+          printf 'Bearer ci-internal-token-0123456789abcdef0123456789abcdef\n' > secrets/telemt-api-token
           docker compose config -q
       - name: Diff hygiene
         run: git diff --check

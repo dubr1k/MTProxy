@@ -4,6 +4,8 @@
 
 > Docker-развёртывание MTProto-прокси для сервера, где публичный TCP/443 уже занят Nginx `stream`, HTTPS-сайтами и Xray/3x-ui.
 
+В Compose включена FastAPI-панель для пользователей Telemt, ролей администраторов и аудита. Она слушает только `127.0.0.1:8787`, а Telemt REST API доступен лишь внутри Compose-сети. Безопасный первый запуск описан в [PANEL.ru.md](PANEL.ru.md).
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Runtime: Telemt 3.4.25](https://img.shields.io/badge/Runtime-Telemt%203.4.25-6f42c1.svg)](https://github.com/telemt/telemt)
 [![Container: digest pinned](https://img.shields.io/badge/Container-digest--pinned-success.svg)](compose.yaml)

@@ -3,3 +3,6 @@
 secrets/
 .env
 *.log
+.venv/
+.pytest_cache/
+panel/tests/
