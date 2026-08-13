@@ -5,6 +5,6 @@
 
 https://tga.unicorndubr1k.org:443 {
     tls /etc/letsencrypt/live/tga.unicorndubr1k.org/fullchain.pem /etc/letsencrypt/live/tga.unicorndubr1k.org/privkey.pem
-    root * /var/www/unicorndubr1k.org
+    root * /srv/tga
     file_server
 }

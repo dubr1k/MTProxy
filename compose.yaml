@@ -11,7 +11,7 @@ services:
     volumes:
       - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
-      - /var/www/unicorndubr1k.org:/var/www/unicorndubr1k.org:ro
+      - ./docker/site:/srv/tga:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q --no-check-certificate --header='Host: tga.unicorndubr1k.org' --spider https://tga.unicorndubr1k.org:443/"]
       interval: 15s
