@@ -19,7 +19,7 @@ secure = false
 tls = true
 
 [general.links]
-show = "*"
+show = []
 public_host = "$DOMAIN"
 public_port = 443
 
@@ -28,6 +28,9 @@ port = 443
 
 [[server.listeners]]
 ip = "0.0.0.0"
+
+[server.api]
+enabled = false
 
 [censorship]
 tls_domain = "$DOMAIN"
