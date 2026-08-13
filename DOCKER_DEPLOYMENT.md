@@ -18,6 +18,8 @@ Unknown/probe TLS connection
 
 The Docker-only DNS alias prevents a routing loop back through public port 443. The cover certificate and static files are mounted read-only. Caddy is used for the internal mask endpoint because its current TLS stack accepts the hybrid `X25519MLKEM768` group used by modern clients. MTProxy and its statistics endpoint bind only to host loopback.
 
+The public cover site is versioned at `docker/site/index.html`. It is a standalone Russian-language Applied AI practice page and does not claim unverified clients, certifications, or legal identities.
+
 ## Secrets
 
 Create `secrets/users.conf` with mode `0600`:
