@@ -13,14 +13,14 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
       - /var/www/unicorndubr1k.org:/var/www/unicorndubr1k.org:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --no-check-certificate --header='Host: mtproxy.5-129-216-58.nip.io' --spider https://mtproxy.5-129-216-58.nip.io:443/"]
+      test: ["CMD-SHELL", "wget -q --no-check-certificate --header='Host: tga.unicorndubr1k.org' --spider https://tga.unicorndubr1k.org:443/"]
       interval: 15s
       timeout: 3s
       retries: 3
     networks:
       default:
         aliases:
-          - mtproxy.5-129-216-58.nip.io
+          - tga.unicorndubr1k.org
 
   mtproxy:
     build:
@@ -34,7 +34,7 @@ services:
       mask:
         condition: service_healthy
     environment:
-      FAKE_TLS_DOMAIN: mtproxy.5-129-216-58.nip.io
+      FAKE_TLS_DOMAIN: tga.unicorndubr1k.org
       PROXY_PORT: "443"
       STATS_PORT: "2398"
       WORKERS: "0"

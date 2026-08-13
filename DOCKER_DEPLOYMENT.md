@@ -6,12 +6,12 @@ This fork adds a pinned, reproducible Docker deployment for hosts where public T
 
 ```text
 Internet :443
-  -> host Nginx stream (dedicated MTProxy SNI)
+  -> host Nginx stream (SNI `tga.unicorndubr1k.org`)
   -> 127.0.0.1:8445
   -> mtproxy container :443
 
 Unknown/probe TLS connection
-  -> MTProxy fake-TLS fallback to the dedicated MTProxy SNI on :443
+  -> MTProxy fake-TLS fallback to `tga.unicorndubr1k.org:443`
   -> Docker DNS alias `mask`
   -> local Caddy mask sidecar serving the same cover-site files and certificate
 ```
