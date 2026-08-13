@@ -8,7 +8,23 @@
 [![Runtime: Telemt 3.4.25](https://img.shields.io/badge/Runtime-Telemt%203.4.25-6f42c1.svg)](https://github.com/telemt/telemt)
 [![Container: digest pinned](https://img.shields.io/badge/Container-digest--pinned-success.svg)](compose.yaml)
 
-Этот форк сохраняет исходные systemd-скрипты проекта, но добавляет отдельный, фактически используемый **Docker production-путь** на современном движке [Telemt](https://github.com/telemt/telemt). Он не требует отдавать MTProxy весь публичный порт `443`: Nginx читает SNI без завершения TLS и направляет только выделенный домен на loopback listener контейнера.
+Этот проект использует **Docker production-путь** на современном движке [Telemt](https://github.com/telemt/telemt). Он не требует отдавать MTProxy весь публичный порт `443`: Nginx читает SNI без завершения TLS и направляет только выделенный домен на loopback listener контейнера.
+
+## Быстрая установка на VPS
+
+Полный installer поддерживает чистый сервер (`fresh`) и безопасное сосуществование с уже настроенным Nginx/Xray (`coexist`):
+
+```bash
+git clone https://github.com/dubr1k/MTProxy.git
+cd MTProxy
+sudo ./install.sh \
+  --mode fresh \
+  --domain proxy.example.com \
+  --email admin@example.com \
+  --users phone,laptop,reserve
+```
+
+Если Nginx уже владеет TCP/443, используйте `--mode coexist --route-file /путь/к/stream-map.conf`. Подробности, rollback и удаление: **[INSTALL.ru.md](INSTALL.ru.md)** · [English](INSTALL.en.md).
 
 ## Зачем заменён старый движок
 
@@ -53,6 +69,8 @@ TCP connect → Fake-TLS → Obfuscated2 → req_pq_multi → Telegram resPQ
 | `docker/telemt-entrypoint.sh` | Безопасно преобразует `users.conf` в runtime TOML |
 | `docker/Caddyfile` | Внутренний HTTPS cover backend |
 | `docker/links.py` | Локальная генерация Fake-TLS ссылок без вывода секретов в логи |
+| `install.sh` / `uninstall.sh` | Идемпотентное VPS-развёртывание и точечное удаление |
+| `scripts/mtproxy-deploy` | Тестируемый генератор файлов и безопасных SNI-маршрутов |
 | `DOCKER_DEPLOYMENT.md` | Краткие эксплуатационные заметки |
 
 ## Требования
@@ -64,12 +82,7 @@ TCP connect → Fake-TLS → Obfuscated2 → req_pq_multi → Telegram resPQ
 - действующий TLS-сертификат для cover backend;
 - свободный loopback-порт `127.0.0.1:8445`.
 
-Текущий `compose.yaml` содержит deployment-specific значения `tga.unicorndubr1k.org` и путь сертификата Let's Encrypt. Перед использованием на другом сервере замените hostname в:
-
-- `compose.yaml`;
-- `docker/Caddyfile`;
-- Nginx stream map;
-- командах генерации ссылок.
+`compose.yaml` параметризован через локальный `.env`; `install.sh` создаёт его автоматически для выбранного домена, сертификата, document root и loopback-порта.
 
 ## 1. Клонирование
 
@@ -264,7 +277,7 @@ docker compose up -d --force-recreate mtproxy
 
 ## Legacy systemd installer
 
-Файлы `install_mtproxy.sh` и `uninstall_mtproxy.sh` сохранены из upstream для совместимости и истории. Они устанавливают старый официальный `TelegramMessenger/MTProxy` напрямую через systemd и **не являются рекомендуемым production-путём этого форка**. Не запускайте legacy installer поверх Docker-развёртывания без отдельного порта и предварительного аудита конфликтов.
+Файлы `install_mtproxy.sh` и `uninstall_mtproxy.sh` сохранены из исходного проекта только для истории. Они устанавливают старый официальный движок и **не являются рекомендуемым путём**. Для этого форка используйте `install.sh` и `uninstall.sh`.
 
 ## Ограничения
 

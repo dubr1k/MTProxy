@@ -3,8 +3,8 @@
     admin off
 }
 
-https://tga.unicorndubr1k.org:443 {
-    tls /etc/letsencrypt/live/tga.unicorndubr1k.org/fullchain.pem /etc/letsencrypt/live/tga.unicorndubr1k.org/privkey.pem
+https://{$MTPROXY_DOMAIN}:443 {
+    tls /etc/letsencrypt/live/{$MTPROXY_DOMAIN}/fullchain.pem /etc/letsencrypt/live/{$MTPROXY_DOMAIN}/privkey.pem
     root * /srv/tga
     file_server
 }

@@ -3,7 +3,7 @@ set -eu
 
 SECRETS_FILE=${SECRETS_FILE:-/run/secrets/mtproxy-secrets}
 CONFIG=/run/telemt/config.toml
-DOMAIN=${FAKE_TLS_DOMAIN:-tga.unicorndubr1k.org}
+DOMAIN=${FAKE_TLS_DOMAIN:?FAKE_TLS_DOMAIN is required}
 
 umask 077
 mkdir -p /run/telemt/tlsfront

@@ -8,7 +8,23 @@
 [![Runtime: Telemt 3.4.25](https://img.shields.io/badge/Runtime-Telemt%203.4.25-6f42c1.svg)](https://github.com/telemt/telemt)
 [![Container: digest pinned](https://img.shields.io/badge/Container-digest--pinned-success.svg)](compose.yaml)
 
-This fork keeps the original systemd scripts, but adds a separate **Docker production path** built around the modern [Telemt](https://github.com/telemt/telemt) engine. It does not require exclusive ownership of public port `443`: Nginx reads SNI without terminating TLS and forwards only the dedicated proxy hostname to a loopback-published container listener.
+This project provides a **Docker production path** based on the modern [Telemt](https://github.com/telemt/telemt) engine. MTProxy does not take exclusive ownership of public port `443`: Nginx reads SNI without terminating TLS and forwards only the dedicated hostname to a loopback container listener.
+
+## Quick VPS installation
+
+The installer supports both a clean server (`fresh`) and safe coexistence with an existing Nginx/Xray deployment (`coexist`):
+
+```bash
+git clone https://github.com/dubr1k/MTProxy.git
+cd MTProxy
+sudo ./install.sh \
+  --mode fresh \
+  --domain proxy.example.com \
+  --email admin@example.com \
+  --users phone,laptop,reserve
+```
+
+When Nginx already owns TCP/443, use `--mode coexist --route-file /path/to/stream-map.conf`. Full instructions, rollback, and removal: **[INSTALL.en.md](INSTALL.en.md)** · [Русский](INSTALL.ru.md).
 
 ## Why the runtime was replaced
 
@@ -53,6 +69,8 @@ Regular browser or active probe
 | `docker/telemt-entrypoint.sh` | Safely converts `users.conf` into runtime TOML |
 | `docker/Caddyfile` | Internal HTTPS cover backend |
 | `docker/links.py` | Generates Fake-TLS links locally without logging secrets |
+| `install.sh` / `uninstall.sh` | Idempotent VPS deployment and precise removal |
+| `scripts/mtproxy-deploy` | Tested file renderer and safe SNI-route editor |
 | `DOCKER_DEPLOYMENT.md` | Short operational notes |
 
 ## Requirements
@@ -64,12 +82,7 @@ Regular browser or active probe
 - a valid TLS certificate for the cover backend;
 - a free loopback port at `127.0.0.1:8445`.
 
-The current `compose.yaml` includes deployment-specific values for `tga.unicorndubr1k.org` and its Let's Encrypt certificate path. For another host, replace the hostname in:
-
-- `compose.yaml`;
-- `docker/Caddyfile`;
-- the Nginx stream map;
-- link-generation commands.
+`compose.yaml` is parameterized through a local `.env`; `install.sh` generates it for the selected hostname, certificate, document root, and loopback port.
 
 ## 1. Clone
 
@@ -264,7 +277,7 @@ Other secrets remain unchanged. Keep a protected backup before editing the secre
 
 ## Legacy systemd installer
 
-`install_mtproxy.sh` and `uninstall_mtproxy.sh` are retained from upstream for compatibility and history. They deploy the old official `TelegramMessenger/MTProxy` engine directly through systemd and are **not the recommended production path in this fork**. Do not run the legacy installer alongside this Docker deployment without a separate port and a conflict audit.
+`install_mtproxy.sh` and `uninstall_mtproxy.sh` are preserved from the original project for historical reference only. They install the old official engine and are **not recommended**. Use `install.sh` and `uninstall.sh` for this project.
 
 ## Limitations
 
