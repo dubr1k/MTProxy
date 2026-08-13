@@ -6,6 +6,17 @@ import pytest
 pytestmark = pytest.mark.anyio
 
 
+async def test_unauthenticated_browser_root_redirects_to_login_but_api_stays_json_401(client):
+    root = await client.get("/", follow_redirects=False)
+    assert root.status_code == 303
+    assert root.headers["location"] == "/login"
+    assert (await client.get("/login")).status_code == 200
+
+    api = await client.get("/api/dashboard")
+    assert api.status_code == 401
+    assert api.json() == {"detail": "authentication required"}
+
+
 async def test_login_uses_opaque_server_side_session_and_security_headers(client, login_user):
     response = await login_user(client)
     assert response.status_code == 204
