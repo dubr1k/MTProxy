@@ -81,6 +81,8 @@ def render(args: argparse.Namespace) -> None:
     for name in ("Caddyfile", "telemt-entrypoint.sh", "links.py"):
         shutil.copy2(REPO / "docker" / name, target_docker / name)
     os.chmod(target_docker / "telemt-entrypoint.sh", 0o755)
+    shutil.copytree(REPO / "panel", install / "panel", dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc", "*.sqlite3*"))
     target_scripts = install / "scripts"
     target_scripts.mkdir(exist_ok=True)
     for name in ("mtproxy-deploy", "check-deployment.sh"):
@@ -106,6 +108,9 @@ def render(args: argparse.Namespace) -> None:
                     existing[name] = secret
     secret_text = "".join(f"{name}={existing.get(name, secrets.token_hex(16))}\n" for name in args.users)
     atomic_write(secret_file, secret_text, 0o600)
+    api_token_file = install / "secrets/telemt-api-token"
+    if not api_token_file.exists():
+        atomic_write(api_token_file, "Bearer " + secrets.token_urlsafe(48) + "\n", 0o600)
 
     webroot = rooted(cover_root)
     webroot.mkdir(parents=True, exist_ok=True)
