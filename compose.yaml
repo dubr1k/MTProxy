@@ -27,7 +27,6 @@ services:
 
   mtproxy:
     image: ghcr.io/samnet-dev/mtproxymax-telemt@sha256:ab27edbceb9f8c042911a7d9a44835318d1db5943ff50f276792fa29601ff856
-    container_name: mtproxy
     entrypoint: ["/usr/local/bin/telemt-entrypoint.sh"]
     restart: unless-stopped
     depends_on:

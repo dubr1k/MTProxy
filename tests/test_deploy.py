@@ -52,6 +52,7 @@ class DeployCliTests(unittest.TestCase):
             self.assertTrue(all(len(line.split("=", 1)[1]) == 32 for line in secrets))
             self.assertEqual((install / ".env").stat().st_mode & 0o777, 0o600)
             self.assertEqual((install / "secrets/users.conf").stat().st_mode & 0o777, 0o600)
+            self.assertTrue((install / ".mtproxy-owned").is_file())
             self.assertTrue((install / "uninstall.sh").is_file())
             self.assertTrue((install / "scripts/check-deployment.sh").is_file())
             self.assertTrue((install / "scripts/mtproxy-deploy").is_file())
@@ -123,6 +124,38 @@ class DeployCliTests(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("exactly one", proc.stderr)
             self.assertNotIn("BEGIN mtproxy-shared443", route_file.read_text())
+
+    def test_coexist_preserves_mode_and_edits_symlink_target(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            canonical = root / "etc/nginx/available/routes.conf"
+            canonical.parent.mkdir(parents=True)
+            canonical.write_text("map $ssl_preread_server_name $backend {\n default 127.0.0.1:7443;\n}\n")
+            canonical.chmod(0o640)
+            enabled = root / "etc/nginx/enabled/routes.conf"
+            enabled.parent.mkdir(parents=True)
+            enabled.symlink_to(canonical)
+            self.run_cli(
+                "nginx-add-route", "--domain", "proxy.example.com", "--backend-port", "18445",
+                "--route-file", "/etc/nginx/enabled/routes.conf", root=root,
+            )
+            self.assertTrue(enabled.is_symlink())
+            self.assertIn("proxy.example.com 127.0.0.1:18445;", canonical.read_text())
+            self.assertEqual(canonical.stat().st_mode & 0o777, 0o640)
+
+    def test_render_refuses_unowned_nonempty_install_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            install = root / "opt/mtproxy-shared443"
+            install.mkdir(parents=True)
+            (install / "foreign.txt").write_text("do not overwrite")
+            proc = self.run_cli(
+                "render", "--domain", "proxy.example.com", "--email", "admin@example.com", "--users", "phone",
+                root=root, check=False,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("not owned", proc.stderr)
+            self.assertEqual((install / "foreign.txt").read_text(), "do not overwrite")
 
     def test_fresh_router_rerender_preserves_additional_services(self):
         with tempfile.TemporaryDirectory() as td:

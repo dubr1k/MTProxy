@@ -9,7 +9,9 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import stat
 import sys
+import uuid
 
 REPO = Path(__file__).resolve().parents[1]
 REAL_ROOT = Path(os.environ.get("MTPROXY_TEST_ROOT", "/"))
@@ -47,17 +49,30 @@ def users(value: str) -> list[str]:
     return names
 
 
-def atomic_write(path: Path, content: str, mode: int = 0o644) -> None:
+def atomic_write(path: Path, content: str, mode: int | None = 0o644) -> None:
+    existing = path.stat() if path.exists() else None
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(content)
-    os.chmod(tmp, mode)
+    actual_mode = stat.S_IMODE(existing.st_mode) if existing and mode is None else (mode or 0o644)
+    os.chmod(tmp, actual_mode)
+    if existing:
+        os.chown(tmp, existing.st_uid, existing.st_gid)
     os.replace(tmp, path)
 
 
 def render(args: argparse.Namespace) -> None:
     install = rooted(args.install_dir)
+    forbidden = {rooted("/"), rooted("/opt"), rooted("/var"), rooted("/etc")}
+    if install in forbidden:
+        raise SystemExit(f"unsafe install directory: {args.install_dir}")
+    marker = install / ".mtproxy-owned"
+    if install.exists() and any(install.iterdir()) and not marker.is_file():
+        raise SystemExit(f"install directory exists and is not owned by mtproxy-shared443: {args.install_dir}")
     install.mkdir(parents=True, exist_ok=True)
+    if not marker.exists():
+        atomic_write(marker, str(uuid.uuid4()) + "\n", 0o600)
+    install_id = marker.read_text().strip()
     for name in ("compose.yaml", "uninstall.sh"):
         shutil.copy2(REPO / name, install / name)
     os.chmod(install / "uninstall.sh", 0o755)
@@ -102,6 +117,7 @@ def render(args: argparse.Namespace) -> None:
 
     state = {
         "schema": 1,
+        "install_id": install_id,
         "domain": args.domain,
         "email": args.email,
         "backend_port": args.backend_port,
@@ -113,7 +129,10 @@ def render(args: argparse.Namespace) -> None:
 
 
 def route_paths(args: argparse.Namespace) -> tuple[Path, str]:
-    return rooted(args.route_file), args.route_file
+    supplied = rooted(args.route_file)
+    if supplied.is_symlink():
+        supplied = supplied.resolve(strict=True)
+    return supplied, args.route_file
 
 
 def add_route(args: argparse.Namespace) -> None:
@@ -139,7 +158,7 @@ def add_route(args: argparse.Namespace) -> None:
     backup = path.with_name(path.name + ".mtproxy-backup")
     if not backup.exists():
         shutil.copy2(path, backup)
-    atomic_write(path, text[:match.start()] + block + text[match.start():])
+    atomic_write(path, text[:match.start()] + block + text[match.start():], mode=None)
 
 
 def remove_route(args: argparse.Namespace) -> None:
@@ -152,7 +171,7 @@ def remove_route(args: argparse.Namespace) -> None:
         rf".*?^\s*# END {MARKER} {re.escape(args.domain)}\n",
         re.DOTALL,
     )
-    atomic_write(path, pattern.sub("", text))
+    atomic_write(path, pattern.sub("", text), mode=None)
 
 
 def create_router(args: argparse.Namespace) -> None:

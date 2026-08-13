@@ -14,9 +14,12 @@ done
 [[ -n $DOMAIN ]] || { echo "--domain required" >&2; exit 1; }
 
 docker compose --project-directory "$PROJECT_DIR" config -q
-[[ $(docker inspect mtproxy --format '{{.State.Health.Status}}') == healthy ]]
-[[ $(docker inspect mtproxy-mask-1 --format '{{.State.Health.Status}}') == healthy ]]
-[[ $(docker inspect mtproxy --format '{{.RestartCount}}') == 0 ]]
+mtproxy_id=$(docker compose --project-directory "$PROJECT_DIR" ps -q mtproxy)
+mask_id=$(docker compose --project-directory "$PROJECT_DIR" ps -q mask)
+[[ -n $mtproxy_id && -n $mask_id ]]
+[[ $(docker inspect "$mtproxy_id" --format '{{.State.Health.Status}}') == healthy ]]
+[[ $(docker inspect "$mask_id" --format '{{.State.Health.Status}}') == healthy ]]
+[[ $(docker inspect "$mtproxy_id" --format '{{.RestartCount}}') == 0 ]]
 ss -lntH "sport = :$BACKEND_PORT" | grep -q "127.0.0.1:$BACKEND_PORT"
 nginx -t >/dev/null
 systemctl is-active --quiet nginx
