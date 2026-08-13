@@ -3,8 +3,8 @@
     admin off
 }
 
-https://mtproxy.5-129-216-58.nip.io:443 {
-    tls /etc/letsencrypt/live/mtproxy.5-129-216-58.nip.io/fullchain.pem /etc/letsencrypt/live/mtproxy.5-129-216-58.nip.io/privkey.pem
+https://tga.unicorndubr1k.org:443 {
+    tls /etc/letsencrypt/live/tga.unicorndubr1k.org/fullchain.pem /etc/letsencrypt/live/tga.unicorndubr1k.org/privkey.pem
     root * /var/www/unicorndubr1k.org
     file_server
 }
