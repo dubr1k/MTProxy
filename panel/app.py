@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -178,7 +178,10 @@ def create_app(settings: Settings | None = None, *, telemt=None):
         response.delete_cookie("panel_session", path="/"); response.delete_cookie("panel_csrf", path="/")
 
     @app.get("/", response_class=HTMLResponse)
-    async def index(_user=Depends(current)): return (static / "index.html").read_text()
+    async def index(request: Request):
+        if not app.state.store.session(request.cookies.get("panel_session")):
+            return RedirectResponse("/login", status_code=303)
+        return (static / "index.html").read_text()
 
     @app.get("/api/dashboard")
     async def dashboard(_user=Depends(current)):
