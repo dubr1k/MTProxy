@@ -1,6 +1,6 @@
 [Русский](README.md) | **English**
 
-# MTProxy on a shared TCP/443: Telemt, Nginx SNI routing, and a real cover site
+# MTProxy on a shared TCP/443: Telemt, Nginx SNI routing, and an external cover site
 
 > A Docker MTProto proxy deployment for hosts where public TCP/443 is already shared by Nginx `stream`, HTTPS sites, and Xray/3x-ui.
 
@@ -52,7 +52,6 @@ Regular browser or active probe
 | `compose.yaml` | Telemt and Caddy services, loopback publishing, healthchecks, hardening |
 | `docker/telemt-entrypoint.sh` | Safely converts `users.conf` into runtime TOML |
 | `docker/Caddyfile` | Internal HTTPS cover backend |
-| `docker/site/index.html` | Versioned, self-contained cover site |
 | `docker/links.py` | Generates Fake-TLS links locally without logging secrets |
 | `DOCKER_DEPLOYMENT.md` | Short operational notes |
 
@@ -102,7 +101,7 @@ laptop=fedcba9876543210fedcba9876543210
 
 Names may contain ASCII letters, digits, `_`, and `-`. Values must be exactly 32 hexadecimal characters. The file is excluded from Git and the Docker build context.
 
-## 3. Certificate and cover site
+## 3. Certificate and external cover site
 
 Caddy does not issue certificates in this deployment; it reads existing Let's Encrypt files through a read-only mount. The current hostname expects:
 
@@ -111,7 +110,17 @@ Caddy does not issue certificates in this deployment; it reads existing Let's En
 /etc/letsencrypt/live/tga.unicorndubr1k.org/privkey.pem
 ```
 
-For another domain, change both the site address and certificate paths in `docker/Caddyfile`. The cover site lives at `docker/site/index.html`; it should not mention proxying or internal infrastructure.
+For another domain, change both the site address and certificate paths in `docker/Caddyfile`.
+
+Cover-site content is **intentionally not stored in Git**. Provision an external document root before starting the stack:
+
+```bash
+sudo install -d -m 0755 /var/www/tga.unicorndubr1k.org
+sudo install -m 0644 /path/to/private/index.html \
+  /var/www/tga.unicorndubr1k.org/index.html
+```
+
+`compose.yaml` mounts `/var/www/tga.unicorndubr1k.org` at `/srv/tga` read-only. Change the bind mount when using another host path. Do not add production-site content to this repository; `docker/site/` is included in `.gitignore`.
 
 ## 4. Nginx stream SNI routing
 

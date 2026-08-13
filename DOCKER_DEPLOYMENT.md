@@ -13,12 +13,12 @@ Internet :443
 Unknown/probe TLS connection
   -> Telemt fake-TLS fallback to `mask:443`
   -> Docker DNS alias `mask`
-  -> local Caddy mask sidecar serving the same cover-site files and certificate
+  -> local Caddy mask sidecar serving an external cover-site document root
 ```
 
-The internal service name prevents a routing loop back through public port 443. The cover certificate and static files are mounted read-only. Caddy is used for the internal mask endpoint because its current TLS stack accepts the hybrid `X25519MLKEM768` group used by modern clients. Telemt binds only to container TCP/443, published as host loopback `127.0.0.1:8445`.
+The internal service name prevents a routing loop back through public port 443. The certificate and external document root are mounted read-only. Caddy is used for the internal mask endpoint because its current TLS stack accepts the hybrid `X25519MLKEM768` group used by modern clients. Telemt binds only to container TCP/443, published as host loopback `127.0.0.1:8445`.
 
-The public cover site is versioned at `docker/site/index.html`. It is a standalone Russian-language Applied AI practice page and does not claim unverified clients, certifications, or legal identities.
+Cover-site content is deliberately excluded from Git and must be provisioned separately at `/var/www/tga.unicorndubr1k.org/` (or another operator-selected host path). Do not commit production site content to this repository.
 
 ## Secrets
 

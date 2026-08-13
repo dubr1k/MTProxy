@@ -1,6 +1,6 @@
 **Русский** | [English](README.en.md)
 
-# MTProxy за общим TCP/443: Telemt, Nginx SNI и полноценный cover-сайт
+# MTProxy за общим TCP/443: Telemt, Nginx SNI и внешний cover-сайт
 
 > Docker-развёртывание MTProto-прокси для сервера, где публичный TCP/443 уже занят Nginx `stream`, HTTPS-сайтами и Xray/3x-ui.
 
@@ -52,7 +52,6 @@ TCP connect → Fake-TLS → Obfuscated2 → req_pq_multi → Telegram resPQ
 | `compose.yaml` | Telemt и Caddy, loopback-публикация, healthchecks и hardening |
 | `docker/telemt-entrypoint.sh` | Безопасно преобразует `users.conf` в runtime TOML |
 | `docker/Caddyfile` | Внутренний HTTPS cover backend |
-| `docker/site/index.html` | Версионируемый автономный cover-сайт |
 | `docker/links.py` | Локальная генерация Fake-TLS ссылок без вывода секретов в логи |
 | `DOCKER_DEPLOYMENT.md` | Краткие эксплуатационные заметки |
 
@@ -102,7 +101,7 @@ laptop=fedcba9876543210fedcba9876543210
 
 Допустимы имена из латинских букв, цифр, `_` и `-`. Значение должно содержать ровно 32 hex-символа. Файл исключён из Git и Docker build context.
 
-## 3. Сертификат и cover-сайт
+## 3. Сертификат и внешний cover-сайт
 
 Caddy не выпускает сертификат сам: он читает существующие файлы Let's Encrypt в режиме read-only. Для текущего hostname ожидаются:
 
@@ -111,7 +110,17 @@ Caddy не выпускает сертификат сам: он читает с�
 /etc/letsencrypt/live/tga.unicorndubr1k.org/privkey.pem
 ```
 
-Для другого домена измените пути и адрес сайта в `docker/Caddyfile`. Cover-сайт находится в `docker/site/index.html`; он не должен содержать упоминаний прокси или внутренней инфраструктуры.
+Для другого домена измените пути и адрес сайта в `docker/Caddyfile`.
+
+Содержимое cover-сайта **намеренно не хранится в Git**. До запуска создайте внешний document root:
+
+```bash
+sudo install -d -m 0755 /var/www/tga.unicorndubr1k.org
+sudo install -m 0644 /path/to/private/index.html \
+  /var/www/tga.unicorndubr1k.org/index.html
+```
+
+`compose.yaml` монтирует `/var/www/tga.unicorndubr1k.org` в `/srv/tga` только для чтения. Для другого пути измените bind mount. Не добавляйте содержимое production-сайта в этот репозиторий; `docker/site/` включён в `.gitignore`.
 
 ## 4. Nginx stream SNI routing
 
