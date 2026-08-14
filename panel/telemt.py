@@ -57,8 +57,12 @@ class MemoryTelemt:
         user = {"username": username, "enabled": True, "links": {"tls": [link]}}
         self.users[username] = user
         return {"user": user, "secret": secret}
-    async def delete_user(self, username): self.users.pop(username); return {"username": username}
-    async def set_enabled(self, username, enabled): self.users[username]["enabled"] = enabled; return self.users[username]
+    async def delete_user(self, username):
+        self.users.pop(username)
+        return {"username": username}
+    async def set_enabled(self, username, enabled):
+        self.users[username]["enabled"] = enabled
+        return self.users[username]
     async def rotate(self, username):
         secret = secrets.token_hex(16)
         link = f"tg://proxy?server={self.public_host}&port={self.public_port}&secret=ee{secret}"

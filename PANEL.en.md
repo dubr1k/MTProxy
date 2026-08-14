@@ -48,9 +48,21 @@ NAIVE_DATA_DIR=/var/lib/naive-manager
 Before first start, copy the active Caddyfile to `${NAIVE_DATA_DIR}/Caddyfile`, create `secrets/naive-manager-token` with mode `0600`, provide the same token as `${NAIVE_DATA_DIR}/manager-token`, and run the initial import:
 
 ```sh
+NAIVE_DATA_DIR=${NAIVE_DATA_DIR:-/var/lib/naive-manager}
+test ! -L "${NAIVE_DATA_DIR}" || { echo "NAIVE_DATA_DIR must not be a symlink" >&2; exit 1; }
+install -d -o root -g root -m 0700 "${NAIVE_DATA_DIR}"
+for file in Caddyfile manager-token; do
+  test -f "${NAIVE_DATA_DIR}/${file}" && test ! -L "${NAIVE_DATA_DIR}/${file}" || exit 1
+done
+chown -h 10002:101 "${NAIVE_DATA_DIR}/Caddyfile" "${NAIVE_DATA_DIR}/manager-token"
+chmod 0600 "${NAIVE_DATA_DIR}/Caddyfile"
+chmod 0400 "${NAIVE_DATA_DIR}/manager-token"
+chown 10002:101 "${NAIVE_DATA_DIR}"
 docker compose -f compose.yaml -f compose.naive.yaml run --rm --build naive-manager --bootstrap-only
 caddy validate --config /var/lib/naive-manager/Caddyfile
 ```
+
+`${NAIVE_DATA_DIR}`, `Caddyfile`, and the generated `users.json`, `transaction.json`, and `backups/` must be owned by UID/GID `10002:101`. The current production `caddy-naive.service` runs as `root:root`, so it can read the mode-`0700` directory and mode-`0600` Caddyfile. If host Caddy runs as an unprivileged `caddy` user, grant only traverse/read through a dedicated group or ACL and verify access as that user before switching the unit; never make credential-bearing files world-readable.
 
 After validation, point the host Caddy service at that Caddyfile and perform a controlled reload. Every mutation follows paired backup → Caddy adapt with `validate=true` → fsync journal → atomic replace → Caddy `/load` → HTTPS probe. Failure restores both files and requires the restored live configuration to pass reload and probe. An unconfirmed rollback leaves the manager unhealthy and preserves the journal for startup recovery. A restart either restores the previous generation or reloads a completely written new generation according to the journal phase. Create/reveal/rotate responses use `Cache-Control: no-store`; list and audit responses contain no passwords or proxy URLs. Viewers can only see names and status.
 

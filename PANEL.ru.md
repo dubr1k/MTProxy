@@ -54,9 +54,21 @@ NAIVE_DATA_DIR=/var/lib/naive-manager
 Перед первым запуском скопируйте действующий Caddyfile в `${NAIVE_DATA_DIR}/Caddyfile`, создайте `secrets/naive-manager-token` с режимом `0600`, передайте такую же копию как `${NAIVE_DATA_DIR}/manager-token`, затем выполните initial import:
 
 ```sh
+NAIVE_DATA_DIR=${NAIVE_DATA_DIR:-/var/lib/naive-manager}
+test ! -L "${NAIVE_DATA_DIR}" || { echo "NAIVE_DATA_DIR must not be a symlink" >&2; exit 1; }
+install -d -o root -g root -m 0700 "${NAIVE_DATA_DIR}"
+for file in Caddyfile manager-token; do
+  test -f "${NAIVE_DATA_DIR}/${file}" && test ! -L "${NAIVE_DATA_DIR}/${file}" || exit 1
+done
+chown -h 10002:101 "${NAIVE_DATA_DIR}/Caddyfile" "${NAIVE_DATA_DIR}/manager-token"
+chmod 0600 "${NAIVE_DATA_DIR}/Caddyfile"
+chmod 0400 "${NAIVE_DATA_DIR}/manager-token"
+chown 10002:101 "${NAIVE_DATA_DIR}"
 docker compose -f compose.yaml -f compose.naive.yaml run --rm --build naive-manager --bootstrap-only
 caddy validate --config /var/lib/naive-manager/Caddyfile
 ```
+
+Каталог `${NAIVE_DATA_DIR}`, `Caddyfile`, создаваемые `users.json`, `transaction.json` и `backups/` должны принадлежать UID/GID `10002:101`. Текущий production unit `caddy-naive.service` работает как `root:root` и поэтому может прочитать mode-`0700` каталог и mode-`0600` Caddyfile. Если host Caddy запускается непривилегированным пользователем `caddy`, до переключения unit выдайте ему только traverse/read через отдельную группу или ACL и проверьте доступ командой от имени этого пользователя; не делайте credential-файлы world-readable.
 
 После validation переключите host Caddy service на этот Caddyfile и сделайте controlled reload. Manager применяет каждое дальнейшее изменение по схеме paired backup → Caddy adapt с `validate=true` → fsync-журнал → atomic replace → Caddy `/load` → HTTPS probe. При ошибке оба файла восстанавливаются, а восстановленная live-конфигурация обязательно проходит reload и probe; если rollback не подтверждён, manager остаётся unhealthy и сохраняет журнал для startup recovery. Create/reveal/rotate responses имеют `Cache-Control: no-store`; список и аудит не содержат паролей или proxy URL. Viewer видит только имена и статусы.
 

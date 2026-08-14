@@ -60,7 +60,8 @@ class UserCreate(BaseModel):
     @field_validator("username")
     @classmethod
     def valid(cls, value):
-        if not re.fullmatch(r"[A-Za-z0-9.-]+", value): raise ValueError("invalid username")
+        if not re.fullmatch(r"[A-Za-z0-9.-]+", value):
+            raise ValueError("invalid username")
         return value
 
 
@@ -115,7 +116,8 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
 
     def current(request: Request):
         value = app.state.store.session(request.cookies.get("panel_session"))
-        if not value: raise HTTPException(401, "authentication required")
+        if not value:
+            raise HTTPException(401, "authentication required")
         return value
 
     def mutation(request: Request, user=Depends(current)):
@@ -125,7 +127,8 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
 
     def roles(*allowed):
         def check(user=Depends(mutation)):
-            if user["role"] not in allowed: raise HTTPException(403, "insufficient role")
+            if user["role"] not in allowed:
+                raise HTTPException(403, "insufficient role")
             return user
         return check
 
@@ -243,13 +246,15 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
     @app.post("/api/auth/login", status_code=204)
     async def do_login(body: Login, request: Request, response: Response):
         csrf = request.cookies.get("panel_csrf")
-        if not csrf or not secrets.compare_digest(csrf, request.headers.get("X-CSRF-Token", "")): raise HTTPException(403, "CSRF validation failed")
+        if not csrf or not secrets.compare_digest(csrf, request.headers.get("X-CSRF-Token", "")):
+            raise HTTPException(403, "CSRF validation failed")
         scopes = [f"ip:{ip(request)}", f"account:{body.username.casefold()}:{ip(request)}"]
         if app.state.store.login_limited(scopes, settings.login_attempts, settings.login_window_seconds):
             raise HTTPException(429, "too many attempts", headers={"Retry-After": str(settings.login_window_seconds)})
         admin = await asyncio.to_thread(app.state.store.verify_admin, body.username, body.password)
         if not admin:
-            app.state.store.record_login_failure(scopes); raise HTTPException(401, "invalid credentials")
+            app.state.store.record_login_failure(scopes)
+            raise HTTPException(401, "invalid credentials")
         app.state.store.clear_login_failures(scopes)
         session, session_csrf = app.state.store.create_session(admin["id"], settings.session_ttl_seconds)
         response.set_cookie("panel_session", session, secure=settings.session_cookie_secure, httponly=True, samesite="strict", path="/", max_age=settings.session_ttl_seconds)
@@ -260,7 +265,8 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
     async def logout(request: Request, response: Response, user=Depends(mutation)):
         audit(user, "auth.logout", user["username"], request)
         app.state.store.delete_session(request.cookies.get("panel_session"))
-        response.delete_cookie("panel_session", path="/"); response.delete_cookie("panel_csrf", path="/")
+        response.delete_cookie("panel_session", path="/")
+        response.delete_cookie("panel_csrf", path="/")
 
     @app.get("/api/auth/me")
     async def me(user=Depends(current)):
@@ -302,15 +308,18 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
 
     @app.delete("/api/users/{username}", status_code=204)
     async def delete_user(username: str, request: Request, user=Depends(roles("owner", "admin"))):
-        await app.state.telemt.delete_user(username); audit(user, "user.delete", username, request)
+        await app.state.telemt.delete_user(username)
+        audit(user, "user.delete", username, request)
 
     @app.post("/api/users/{username}/{operation}")
     async def user_operation(username: str, operation: Literal["enable", "disable", "rotate"], request: Request, user=Depends(roles("owner", "admin"))):
         if operation == "rotate":
             result = await app.state.telemt.rotate(username)
             data = {"username": username, "reveal_token": reveal(secret_reveal(result), user)}
-        else: data = await app.state.telemt.set_enabled(username, operation == "enable")
-        audit(user, f"user.{operation}", username, request); return data
+        else:
+            data = await app.state.telemt.set_enabled(username, operation == "enable")
+        audit(user, f"user.{operation}", username, request)
+        return data
 
     @app.get("/api/naive/users")
     async def naive_users(_user=Depends(current)):
@@ -370,27 +379,38 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
 
     @app.get("/api/admins")
     async def admins(user=Depends(current)):
-        if user["role"] != "owner": raise HTTPException(403, "insufficient role")
+        if user["role"] != "owner":
+            raise HTTPException(403, "insufficient role")
         return {"items": app.state.store.admins()}
 
     @app.post("/api/admins", status_code=201)
     async def add_admin(body: AdminCreate, request: Request, user=Depends(roles("owner"))):
-        try: admin_id = app.state.store.create_admin(body.username, body.password, body.role)
-        except Exception as exc: raise HTTPException(409, "administrator exists") from exc
-        audit(user, "admin.create", body.username, request, {"role": body.role}); return {"id": admin_id}
+        try:
+            admin_id = app.state.store.create_admin(body.username, body.password, body.role)
+        except Exception as exc:
+            raise HTTPException(409, "administrator exists") from exc
+        audit(user, "admin.create", body.username, request, {"role": body.role})
+        return {"id": admin_id}
 
     @app.patch("/api/admins/{admin_id}")
     async def edit_admin(admin_id: int, body: AdminUpdate, request: Request, user=Depends(roles("owner"))):
-        try: found = app.state.store.update_admin(admin_id, body.role, body.password, body.active)
-        except ConflictError as exc: raise HTTPException(409, "cannot demote last owner") from exc
-        if not found: raise HTTPException(404, "administrator not found")
-        audit(user, "admin.update", str(admin_id), request, {"role": body.role, "active": body.active}); return {"ok": True}
+        try:
+            found = app.state.store.update_admin(admin_id, body.role, body.password, body.active)
+        except ConflictError as exc:
+            raise HTTPException(409, "cannot demote last owner") from exc
+        if not found:
+            raise HTTPException(404, "administrator not found")
+        audit(user, "admin.update", str(admin_id), request, {"role": body.role, "active": body.active})
+        return {"ok": True}
 
     @app.delete("/api/admins/{admin_id}", status_code=204)
     async def remove_admin(admin_id: int, request: Request, user=Depends(roles("owner"))):
-        try: found = app.state.store.delete_admin(admin_id)
-        except ConflictError as exc: raise HTTPException(409, "cannot delete last owner") from exc
-        if not found: raise HTTPException(404, "administrator not found")
+        try:
+            found = app.state.store.delete_admin(admin_id)
+        except ConflictError as exc:
+            raise HTTPException(409, "cannot delete last owner") from exc
+        if not found:
+            raise HTTPException(404, "administrator not found")
         audit(user, "admin.delete", str(admin_id), request)
 
     @app.get("/api/audit")
