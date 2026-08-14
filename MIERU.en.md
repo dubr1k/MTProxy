@@ -35,6 +35,38 @@ The helper verifies the pinned executable SHA-256 before every invocation and ac
 
 For Compose, combine `compose.yaml` and `compose.mieru.yaml`. Set `MIERU_MITA_BIN` to the extracted, executable-digest-verified host binary, `MIERU_MITA_SHA256` to that executable digest, and `MIERU_MITA_GID` to the numeric GID that can connect to `/var/run/mita/mita.sock`. The binary and mita runtime directory are mounted read-only; only manager state and its API runtime directory are writable. The manager health check uses the authenticated Unix API, and the panel waits for it to become healthy.
 
+### Mandatory Compose state provisioning
+
+The container deliberately runs as fixed numeric UID/GID `10003:10003`. Docker creates a missing bind source as host `root:root`, which is not writable by that identity. A host account named `mieru-manager` may have a dynamically allocated UID/GID; its name does not change the container's numeric identity and does not satisfy this contract. Do not share a state directory with a host-systemd manager that uses a different identity.
+
+Before the first `docker compose up`, choose an absolute normalized path and check whether `10003` collides with an unrelated host principal. No output from these `getent` commands means no host-account collision; any output must identify an intentionally trusted `mieru-manager` principal, otherwise stop and resolve the fixed-ID collision before granting access:
+
+```sh
+export MIERU_MANAGER_STATE_DIR=/var/lib/mieru-manager
+getent passwd 10003 || true
+getent group 10003 || true
+sudo ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
+docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
+```
+
+The `prepare` command is mandatory and must run as root. It refuses `/`, relative or non-normalized paths, symlinked path components, non-directories, and non-empty directories. It creates or repairs only an empty state directory, setting exactly numeric owner `10003:10003` and mode `0700`; it never starts a root container or recursively changes restored data. `MIERU_MANAGER_STATE_DIR` defaults to `/var/lib/mieru-manager` in both the script and Compose.
+
+### Restore contract
+
+Stop the Compose services before restoring. Restore the state directory and metadata from trusted backup media, then run the read-only verifier **before** bringing the service up:
+
+```sh
+export MIERU_MANAGER_STATE_DIR=/var/lib/mieru-manager
+docker compose -f compose.yaml -f compose.mieru.yaml stop panel mieru-manager
+# Restore trusted backup media here, preserving numeric ownership and modes.
+sudo ./scripts/prepare-mieru-state.sh verify "$MIERU_MANAGER_STATE_DIR"
+docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
+```
+
+The restored directory must be `10003:10003` mode `0700`. Top-level `state.json`, `writer.lock`, `journal.json`, and `journal.key`, when present, must be regular non-symlink files owned by `10003:10003` with mode `0600`; `journal.key` must be exactly 32 bytes. `backups/` must be a real directory owned by `10003:10003` with mode `0700`, and each direct backup file must be regular, non-symlink, `10003:10003`, and mode `0600`. The verifier checks metadata and key size only: it does not read or print key, journal, state, or backup contents, and it does not chown or chmod restored files.
+
+An active `journal.json` and its original `journal.key` are one recovery unit. Always co-restore them. Never delete or regenerate `journal.key` to make a restored journal start: the manager must authenticate that journal before recovery and intentionally fails closed when the key is absent or changed. If `prepare` reports that a directory is non-empty, use `verify` after restoring correct metadata; do not use a recursive `chown` as a substitute for reviewing the restored recovery set.
+
 ## Listener coexistence
 
 Declare every TCP/UDP Mieru port or range explicitly. **No installer or manager silently takes port 443.** When nginx/MTProxy/NaiveProxy already owns shared 443, choose dedicated Mieru ports (for example 8443 TCP and 8443 UDP), publish them in host/cloud firewalls, and verify both protocols. Loopback management sockets are unrelated to public listeners.
