@@ -8,7 +8,7 @@ Fleet nodes now make **outbound-only HTTPS connections** to a dedicated central 
 - Client identity: a private CA issues one certificate per node with the sole URI SAN `urn:mtproxy-panel:node:<node-id>`. Central authorization additionally requires an active database record matching node ID, certificate serial, SHA-256 fingerprint, and validity interval.
 - TLS: direct TLS 1.2+, mandatory client certificate, no compression. Unknown client CAs fail during the handshake. A certificate for another node, an unregistered serial/fingerprint, or an application-revoked certificate gets HTTP 403.
 - Bounds: 4 KiB request line, 8 KiB headers, configurable body limit capped at 64 KiB (default 16 KiB), no chunked request bodies, maximum 30-second long poll, handshake/request timeout, and per-certificate in-process request rate limit (default 120/minute).
-- Commands carry protocol version, UUID, node ID, monotonic sequence, idempotency key, allowlisted operation, expected Telemt revision, actor, expiry, canonical payload SHA-256, and typed payload. Central states are `queued`, `dispatched`, `succeeded`, `failed`, or `indeterminate`.
+- Commands carry protocol version, UUID, node ID, monotonic sequence, idempotency key, allowlisted operation, expected Telemt revision, actor, expiry, canonical payload SHA-256, and typed payload. Central states are `queued`, `dispatched`, `succeeded`, `failed`, or `indeterminate`. An expired command is still delivered in sequence: the agent journals it as a failed no-op and uploads that durable result before central dispatches the next sequence, so expiry can never execute a mutation or create a sequence gap.
 - The agent journals receipt with SQLite WAL + `synchronous=FULL` before invoking Telemt. Completed results form a durable outbox. A lost upload acknowledgment resends the stored result; it does not repeat the Telemt mutation. Crash residue is marked `indeterminate` at exclusive startup and never re-executed.
 - The only local authority is a fixed loopback Telemt URL and a node-local bearer credential. Every HTTP method/path/body is constructed from the typed allowlist and mutations include `If-Match`.
 
@@ -27,7 +27,7 @@ Run the panel and ingress against the **same** `PANEL_DATABASE`. Back it up befo
    ```
 
 3. Install `deploy/mtproxy-fleet-ingress.service` and `deploy/fleet-ingress.env.example`, adjusting paths and the WebPKI hostname. Expose only the selected TCP ingress port. The listener terminates mTLS directly, so no reverse-proxy client-certificate headers are involved.
-4. Start it and verify the listener and journal. For containers, `compose.fleet-central.yaml` is an equivalent hardened sidecar sharing the external `mtproxy_panel-data` volume. Bind-mounted private keys must be readable only by container UID 10002.
+4. Start it and verify the listener and journal. For containers, `compose.fleet-central.yaml` is an equivalent hardened sidecar sharing the external `mtproxy_panel-data` volume. Bind-mounted ingress private keys must be readable only by container UID/GID 10001. (The separate node-agent image runs as UID 10002.)
 
 ## Enroll `vpn-nl2` without exporting its private key
 

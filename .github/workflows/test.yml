@@ -47,5 +47,7 @@ jobs:
             docker compose -f compose.fleet-central.yaml config -q
           docker build -f deploy/Dockerfile.agent -t mtproxy-agent:test .
           docker build -f deploy/Dockerfile.ingress -t mtproxy-fleet-ingress:test .
+          test "$(docker run --rm --entrypoint id mtproxy-fleet-ingress:test -u)" = 10001
+          test "$(docker run --rm --entrypoint id mtproxy-fleet-ingress:test -g)" = 10001
       - name: Diff hygiene
         run: git diff --check

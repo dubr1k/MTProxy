@@ -214,5 +214,25 @@ class DeployCliTests(unittest.TestCase):
             self.assertNotIn(secret, json.dumps(state))
 
 
+    def test_fleet_ingress_compose_uses_tls_key_owner_identity(self):
+        env = {
+            **os.environ,
+            "FLEET_SERVER_CERT": "/tmp/server.crt",
+            "FLEET_SERVER_KEY": "/tmp/server.key",
+            "FLEET_CLIENT_CA": "/tmp/client-ca.crt",
+        }
+        proc = subprocess.run(
+            ["docker", "compose", "-f", "compose.fleet-central.yaml", "config", "--format", "json"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode:
+            self.fail(f"compose render failed ({proc.returncode}): {proc.stderr}")
+        service = json.loads(proc.stdout)["services"]["fleet-ingress"]
+        self.assertEqual(service["user"], "10001:10001")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

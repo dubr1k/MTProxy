@@ -417,13 +417,6 @@ class FleetStore:
                 AND status IN ('queued','dispatched')""", (node_id, node["last_result_sequence"] + 1)).fetchone()
             if not row:
                 return None
-            if row["expires_at"] <= now:
-                result = _canonical({"message": "command rejected (ProtocolError)"})
-                db.execute("UPDATE fleet_commands SET status='failed',result_json=?,completed_at=? WHERE command_id=?",
-                           (result, now, row["command_id"]))
-                db.execute("UPDATE fleet_nodes SET last_result_sequence=?,updated_at=? WHERE node_id=?",
-                           (row["sequence"], now, node_id))
-                return None
             db.execute("UPDATE fleet_commands SET status='dispatched',dispatched_at=COALESCE(dispatched_at,?) WHERE command_id=?",
                        (now, row["command_id"]))
             return self._command(db.execute("SELECT * FROM fleet_commands WHERE command_id=?", (row["command_id"],)).fetchone())

@@ -3,7 +3,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
 COPY panel/requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt \
- && addgroup --system panel && adduser --system --ingroup panel --uid 10001 panel
+ && addgroup --system --gid 10001 panel \
+ && adduser --system --ingroup panel --uid 10001 panel
 COPY --chown=panel:panel panel /app/panel
 USER panel:panel
 ENTRYPOINT ["python", "-m", "panel.agent_ingress"]

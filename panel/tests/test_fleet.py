@@ -94,6 +94,49 @@ async def test_agent_journal_prevents_reexecution_after_restart_and_rejects_sequ
         await restarted.apply(command(3))
 
 
+def command_envelope(stored):
+    return {key: stored[key] for key in (
+        "protocol_version", "command_id", "node_id", "sequence", "idempotency_key", "operation",
+        "expected_telemt_revision", "actor", "expires_at", "payload_sha256", "payload",
+    )}
+
+
+async def test_expired_command_advances_node_sequence_without_executing_mutation(tmp_path):
+    store = FleetStore(tmp_path / "fleet.sqlite3")
+    store.register_node("edge-01", "edge", {"telemt_version": "3.4.25"})
+    expired = store.enqueue(
+        "edge-01", "expired-disable", "telemt.user.disable", {"username": "alice"}, "rev-1",
+        expires_at=int(time.time()) - 1,
+    )
+    current = store.enqueue(
+        "edge-01", "current-enable", "telemt.user.enable", {"username": "alice"}, "rev-1",
+        expires_at=int(time.time()) + 60,
+    )
+    calls = []
+
+    class Executor:
+        async def execute(self, item):
+            calls.append(item.sequence)
+            return {"username": "alice", "enabled": True, "telemt_revision": "rev-2"}
+
+    agent = NodeAgent("edge-01", AgentJournal(tmp_path / "agent.sqlite3"), Executor())
+
+    expired_result = await agent.apply(command_envelope(store.poll_next("edge-01")))
+    assert expired_result == {
+        "status": "failed", "sequence": 1, "command_id": expired["command_id"],
+        "result": {"message": "command rejected (ProtocolError)"},
+    }
+    assert calls == []
+    store.record_result("edge-01", expired["command_id"], 1, "failed", expired_result["result"])
+    agent.journal.mark_uploaded(expired["command_id"])
+
+    restarted = NodeAgent("edge-01", AgentJournal(tmp_path / "agent.sqlite3"), Executor())
+    current_result = await restarted.apply(command_envelope(store.poll_next("edge-01")))
+    assert current_result["command_id"] == current["command_id"]
+    assert current_result["status"] == "succeeded"
+    assert calls == [2]
+
+
 async def test_concurrent_duplicate_does_not_corrupt_inflight_execution(tmp_path):
     entered, release = asyncio.Event(), asyncio.Event()
 
