@@ -1,4 +1,4 @@
-FROM caddy:2.11.4-builder AS builder
+FROM caddy:2.11.4-builder@sha256:c7ae80243a530d532d20062d56d6198b3ab161eb6971d28716ef7ec55599fea4 AS builder
 
 # Keep the Naive forward-proxy module immutable; never build from a moving branch.
 RUN xcaddy build v2.11.4 \
