@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -101,6 +102,47 @@ def plan(repo: Path) -> RuntimePlan:
         users=("owner",),
         protocol_probe="/usr/local/bin/mtproxy-respq-probe",
     )
+
+
+def test_generated_acme_and_panel_sites_pass_native_nginx_syntax_check(tmp_path):
+    nginx = shutil.which("nginx")
+    assert nginx is not None, "native nginx is required for generated-site syntax validation"
+    manager = RuntimeInstaller(plan(Path(__file__).parents[1]), root=tmp_path, runner=FakeRunner())
+    acme_site = manager._acme_site_content()
+    panel_site = manager._panel_site_content()
+
+    certificate = tmp_path / "fullchain.pem"
+    private_key = tmp_path / "privkey.pem"
+    subprocess.run(
+        [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-subj", "/CN=tga-panel.dubr1kkk.uk", "-days", "1",
+            "-keyout", str(private_key), "-out", str(certificate),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    panel_site = panel_site.replace(
+        b"/etc/letsencrypt/live/tga.dubr1kkk.uk/fullchain.pem", str(certificate).encode()
+    ).replace(
+        b"/etc/letsencrypt/live/tga.dubr1kkk.uk/privkey.pem", str(private_key).encode()
+    )
+    (tmp_path / "nginx.conf").write_bytes(
+        b"worker_processes 1; pid nginx.pid; error_log stderr notice; events {} http {\n"
+        + acme_site
+        + panel_site
+        + b"}\n"
+    )
+
+    checked = subprocess.run(
+        [nginx, "-t", "-p", f"{tmp_path}/", "-c", "nginx.conf"],
+        capture_output=True,
+        text=True,
+    )
+    assert checked.returncode == 0, checked.stderr
+    assert acme_site.count(b"{") == acme_site.count(b"}") == 6
+    assert panel_site.count(b"{") == panel_site.count(b"}") == 2
 
 
 def test_runtime_install_owns_complete_stack_and_never_exposes_password(tmp_path):

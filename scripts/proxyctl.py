@@ -1086,7 +1086,7 @@ class RuntimeInstaller:
             f"ssl_certificate_key /etc/letsencrypt/live/{self.plan.proxy_domain}/privkey.pem; "
             f"location / {{ proxy_pass http://127.0.0.1:{self.plan.panel_app_port}; "
             "proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto https; "
-            "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }} }\n"
+            "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; } }\n"
         ).encode()
 
     def _expected_managed_hashes(self) -> dict[str, str]:
