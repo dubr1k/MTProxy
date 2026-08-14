@@ -11,7 +11,7 @@ lab-prepare:
 	$(LAB) prepare
 
 lab-start:
-	$(LAB) start
+	$(LAB) start --mode smoke
 
 lab-reset:
 	$(LAB) reset

@@ -200,6 +200,22 @@ EOF
   systemctl is-active nginx lab-xray lab-warp lab-3x-ui > /tmp/status.before
 }
 
+full_environment_preflight() {
+  local started log script
+  started=$(python3 -c 'import time; print(time.time())')
+  log=$(mktemp)
+  script="$(declare -p PROXY PANEL ROUTE BASELINE); $(declare -f add_hosts setup_full_host); setup_full_host"
+  if bash -Eeuo pipefail -c "$script" >"$log" 2>&1; then
+    emit environment-preflight passed "$started"
+    rm -f "$log"
+    return 0
+  fi
+  emit environment-preflight failed "$started" "$(tail -n 5 "$log" | tr '\n' ' ')"
+  sed 's/^/environment-preflight: /' "$log" >&2
+  rm -f "$log"
+  return 1
+}
+
 runtime_cmd() {
   mapfile -t args < <(proxy_args)
   python3 "$ROOT/scripts/proxyctl.py" "$1" "${args[@]}"
@@ -293,7 +309,9 @@ if [[ $MODE == smoke ]]; then
   case_run dns-tls-preflight dns_tls_fixture
   case_run secrets-scan secrets_scan
 elif [[ $MODE == full ]]; then
-  setup_full_host
+  if ! full_environment_preflight; then
+    exit "$RESULTS_FAILED"
+  fi
   case_run audit full_audit
   case_run plan full_plan
   case_run install full_install

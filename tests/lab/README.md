@@ -1,6 +1,6 @@
 # Isolated Ubuntu 24.04 installer lab
 
-This lab boots an official, checksum-pinned Ubuntu 24.04 cloud image in QEMU. It does not use KVM, TAP, bridges, host firewall rules, host Docker, or production credentials. QEMU always uses TCG, two virtual CPUs, 3 GiB RAM, a disposable qcow2 overlay, and restricted user-mode networking. The only inbound mapping is a checked random loopback TCP port forwarded to guest SSH.
+This lab boots an official, checksum-pinned Ubuntu 24.04 cloud image in QEMU. It does not use KVM, TAP, bridges, host firewall rules, host Docker, or production credentials. QEMU always uses TCG, two virtual CPUs, 3 GiB RAM, and a disposable qcow2 overlay. `smoke` uses restricted user-mode networking with no guest outbound access. `full` uses user-mode NAT only after cloud-init installs a fail-closed nftables policy: established SSH replies, slirp DNS, DHCP, and public TCP ports 80/443 are allowed; loopback is available only on the guest loopback interface, while link-local, metadata, carrier-grade NAT, documentation, multicast, RFC1918, and other destinations are rejected. The only inbound mapping in either mode is a checked random loopback TCP port forwarded to guest SSH.
 
 ## Prerequisites
 
@@ -19,7 +19,7 @@ make lab-stop
 make lab-clean      # remove all lab-created state; retain pinned base cache
 ```
 
-Direct CLI equivalents are available through `python3 scripts/lab/qemu_lab.py {prepare,start,reset,run,stop,cleanup}`. Add `cleanup --purge-cache` to delete the verified base image too. `run --output PATH` writes sanitized `report.json`, JUnit `report.xml`, and `guest.log` outside the guest. Any missing result, failed guest command, checksum mismatch, readiness timeout, or failed assertion exits nonzero.
+Direct CLI equivalents are available through `python3 scripts/lab/qemu_lab.py {prepare,start,reset,run,stop,cleanup}`. `start` requires an explicit `--mode`; a disk may not change modes without `reset`. Add `cleanup --purge-cache` to delete the verified base image too. `run --output PATH` writes sanitized `report.json`, JUnit `report.xml`, and `guest.log` outside the guest. A failed full-mode package/network setup emits a named `environment-preflight` failure and marks every unstarted scenario missing. Any missing result, failed guest command, checksum mismatch, readiness timeout, or failed assertion exits nonzero.
 
 ## Modes and isolation
 
