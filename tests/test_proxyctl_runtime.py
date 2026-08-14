@@ -250,6 +250,10 @@ def test_runtime_install_owns_complete_stack_and_never_exposes_password(tmp_path
     rendered_env = (project / ".env").read_text().splitlines()
     assert "PANEL_ALLOWED_HOSTS=panel.example.com" in rendered_env
     assert "PANEL_HEALTHCHECK_HOST=panel.example.com" in rendered_env
+    assert (
+        "curl", "-fsS", "-H", "Host: panel.example.com",
+        "http://127.0.0.1:8787/healthz",
+    ) in [call[0] for call in runner.calls]
     password_file = project / "secrets/panel-bootstrap-password"
     assert password_file.is_file()
     assert stat.S_IMODE(password_file.stat().st_mode) == 0o600

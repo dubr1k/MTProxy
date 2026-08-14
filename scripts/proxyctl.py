@@ -1355,7 +1355,10 @@ class RuntimeInstaller:
     def _health_and_protocol(self) -> None:
         self._compose("config", "-q")
         self._compose("ps", "--status", "running")
-        self._run("curl", "-fsS", f"http://127.0.0.1:{self.plan.panel_app_port}/healthz")
+        self._run(
+            "curl", "-fsS", "-H", f"Host: {self.plan.panel_domain}",
+            f"http://127.0.0.1:{self.plan.panel_app_port}/healthz",
+        )
         self._run(
             self.plan.protocol_probe, "--domain", self.plan.proxy_domain,
             "--secrets-file", f"{self.plan.project_dir}/secrets/users.conf",

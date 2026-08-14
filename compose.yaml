@@ -99,8 +99,8 @@ services:
         - >-
           exec 3<>/dev/tcp/127.0.0.1/8787;
           printf 'GET /healthz HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n' "$${PANEL_HEALTHCHECK_HOST}" >&3;
-          IFS= read -r -t 5 status <&3;
-          [[ "$$status" == *' 200 '* ]]
+          IFS=' ' read -r -t 5 protocol status_code reason <&3;
+          [[ "$$protocol" == HTTP/* && "$$status_code" == 200 ]]
       interval: 20s
       timeout: 10s
       retries: 5
