@@ -6,6 +6,7 @@ import copy
 from decimal import Decimal, InvalidOperation
 import fcntl
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
@@ -438,7 +439,6 @@ def _atomic(path: Path, value: Any) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(name, path)
-        os.chmod(path, 0o600)
         _fsync_dir(path.parent)
     finally:
         try:
@@ -579,6 +579,12 @@ class MitaCLI:
                         if key.fileobj is stdout:
                             stdout_chunks.append(chunk)
                 returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError as exc:
+                    raise MitaError("mita operation unavailable") from exc
             except BaseException as exc:
                 if process.returncode is None:
                     try:
@@ -675,6 +681,7 @@ class MieruManager:
         self._lock = threading.RLock()
         self.state_file = self.state_dir / "state.json"
         self.journal_file = self.state_dir / "journal.json"
+        self.journal_key_file = self.state_dir / "journal.key"
         self.backup_dir = self.state_dir / "backups"
         self.lock_file = self.state_dir / "writer.lock"
 
@@ -688,11 +695,12 @@ class MieruManager:
 
     def bootstrap(self) -> dict:
         with self._writer():
+            self._journal_key()
+            if os.path.lexists(self.journal_file):
+                self._recover()
             match = SUPPORTED_VERSION.fullmatch(str(self.mita.version()).strip())
             if not match:
                 raise ConfigConflict("only mita v3.35.x is supported")
-            if self.journal_file.exists():
-                self._recover()
             observed = self.mita.observe()
             validate_config(observed, elevated=True)
             if self.state_file.exists():
@@ -715,6 +723,24 @@ class MieruManager:
                 "version": match.group(1),
                 "revision": state["revision"],
             }
+
+    def _journal_key(self) -> bytes:
+        if not os.path.lexists(self.journal_key_file):
+            if os.path.lexists(self.journal_file):
+                raise ConfigConflict("transaction recovery authentication unavailable")
+            _atomic(self.journal_key_file, secrets.token_bytes(32))
+        key = _read_secure(self.journal_key_file, max_size=32)
+        if len(key) != 32:
+            raise ConfigConflict("invalid transaction recovery authentication")
+        return key
+
+    def _write_journal(self, journal: dict) -> None:
+        authenticated = dict(journal)
+        authenticated.pop("mac", None)
+        authenticated["mac"] = hmac.new(
+            self._journal_key(), _canonical(authenticated), hashlib.sha256
+        ).hexdigest()
+        _atomic(self.journal_file, authenticated)
 
     def _state(self) -> dict:
         info = self.state_file.lstat()
@@ -871,8 +897,8 @@ class MieruManager:
         _atomic(backup, before)
         backup_data = _read_secure(backup, max_size=self.mita.max_output if hasattr(self.mita, "max_output") else 1_048_576)
         journal = {
-            "version": 2,
-            "schema": "mieru-transaction-journal-v2",
+            "version": 3,
+            "schema": "mieru-transaction-journal-v3",
             "phase": "prepared",
             "operation": operation,
             "mode": mode,
@@ -886,11 +912,11 @@ class MieruManager:
             "backup_size": len(backup_data),
             "backup_sha256": hashlib.sha256(backup_data).hexdigest(),
         }
-        _atomic(self.journal_file, journal)
+        self._write_journal(journal)
         try:
             self.mita.apply(desired)
             journal["phase"] = "applied"
-            _atomic(self.journal_file, journal)
+            self._write_journal(journal)
             observed = self.mita.observe()
             if _hash(observed) != desired_hash:
                 raise MitaError("mita readback mismatch")
@@ -906,7 +932,7 @@ class MieruManager:
             try:
                 self.mita.apply(before)
                 journal["phase"] = "rollback_applied"
-                _atomic(self.journal_file, journal)
+                self._write_journal(journal)
                 self.mita.stop()
                 self._wait_status("IDLE", "rollback failed to reach idle state")
                 self.mita.start()
@@ -929,6 +955,7 @@ class MieruManager:
 
     def _recover(self) -> None:
         try:
+            key = self._journal_key()
             raw = _read_secure(self.journal_file, max_size=65_536)
             journal = json.loads(raw)
             fields = {
@@ -946,12 +973,22 @@ class MieruManager:
                 "backup_basename",
                 "backup_size",
                 "backup_sha256",
+                "mac",
             }
             if (
                 not isinstance(journal, dict)
                 or set(journal) != fields
-                or journal["version"] != 2
-                or journal["schema"] != "mieru-transaction-journal-v2"
+                or not isinstance(journal["mac"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", journal["mac"]) is None
+            ):
+                raise ValueError("invalid journal")
+            unsigned = {name: value for name, value in journal.items() if name != "mac"}
+            expected_mac = hmac.new(key, _canonical(unsigned), hashlib.sha256).hexdigest()
+            if not secrets.compare_digest(journal["mac"], expected_mac):
+                raise ValueError("journal authentication failed")
+            if (
+                journal["version"] != 3
+                or journal["schema"] != "mieru-transaction-journal-v3"
                 or journal["phase"] not in {"prepared", "applied", "rollback_applied"}
                 or journal["mode"] not in {"reload", "restart"}
                 or journal["operation"] not in TRANSACTION_MODES

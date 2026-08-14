@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from pathlib import Path
+import stat
 import time
 
 import pytest
@@ -256,12 +258,35 @@ class FakeMita:
         return value
 
 
+class RecoveryMita(FakeMita):
+    def version(self):
+        self.calls.append(("version",))
+        return super().version()
+
+
 def manager(tmp_path, mita=None):
     return MieruManager(
         mita=mita or FakeMita(),
         state_dir=tmp_path / "state",
         public_host="proxy.example.com",
     )
+
+
+def test_bootstrap_creates_private_durable_journal_authentication_key(tmp_path):
+    root = tmp_path / "state"
+
+    manager(tmp_path).bootstrap()
+
+    key_path = root / "journal.key"
+    info = key_path.lstat()
+    assert stat.S_ISREG(info.st_mode)
+    assert stat.S_IMODE(info.st_mode) == 0o600
+    first_digest = hashlib.sha256(key_path.read_bytes()).digest()
+    assert key_path.stat().st_size == 32
+
+    manager(tmp_path).bootstrap()
+
+    assert hmac.compare_digest(first_digest, hashlib.sha256(key_path.read_bytes()).digest())
 
 
 def test_lifecycle_revalidates_readback_and_probes_running_service(tmp_path):
@@ -398,6 +423,35 @@ def test_rotation_delete_and_disable_force_restart_and_tombstone_names(tmp_path)
         service.create_user("bob", [], expected_revision=service.inspect()["revision"])
 
 
+def test_transaction_phase_journal_is_v3_authenticated_without_config_snapshot(tmp_path):
+    class InterruptedMita(FakeMita):
+        def apply(self, config):
+            self.calls.append(("apply",))
+            raise KeyboardInterrupt
+
+    mita = InterruptedMita()
+    service = manager(tmp_path, mita)
+    revision = service.bootstrap()["revision"]
+
+    with pytest.raises(Exception, match="requires recovery"):
+        service.create_user("bob", [], expected_revision=revision)
+
+    root = tmp_path / "state"
+    journal = json.loads((root / "journal.json").read_text())
+    mac = journal.pop("mac")
+    expected_mac = hmac.new(
+        (root / "journal.key").read_bytes(),
+        json.dumps(
+            journal, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    assert journal["version"] == 3
+    assert journal["schema"] == "mieru-transaction-journal-v3"
+    assert hmac.compare_digest(mac, expected_mac)
+    assert all(not isinstance(value, (dict, list)) for value in journal.values())
+
+
 def test_failed_probe_rolls_back_full_snapshot_and_restarts(tmp_path):
     mita = FakeMita()
     service = manager(tmp_path, mita)
@@ -414,7 +468,21 @@ def test_failed_probe_rolls_back_full_snapshot_and_restarts(tmp_path):
     assert (tmp_path / "state" / "journal.json").exists() is False
 
 
-def _write_recovery_fixture(root, state, before, desired, *, generation=None):
+def _authenticate_journal(root, journal):
+    authenticated = dict(journal)
+    authenticated["mac"] = hmac.new(
+        (root / "journal.key").read_bytes(),
+        json.dumps(
+            journal, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return authenticated
+
+
+def _write_recovery_fixture(
+    root, state, before, desired, *, generation=None, phase="applied"
+):
     backup_dir = root / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
     backup = backup_dir / f"g{state['generation']}-{state['revision']}.json"
@@ -424,9 +492,9 @@ def _write_recovery_fixture(root, state, before, desired, *, generation=None):
     backup.write_bytes(backup_bytes)
     backup.chmod(0o600)
     journal = {
-        "version": 2,
-        "schema": "mieru-transaction-journal-v2",
-        "phase": "applied",
+        "version": 3,
+        "schema": "mieru-transaction-journal-v3",
+        "phase": phase,
         "operation": "user.create",
         "mode": "reload",
         "previous_config_hash": hashlib.sha256(backup_bytes[:-1]).hexdigest(),
@@ -453,7 +521,7 @@ def _write_recovery_fixture(root, state, before, desired, *, generation=None):
         "backup_sha256": hashlib.sha256(backup_bytes).hexdigest(),
     }
     path = root / "journal.json"
-    path.write_text(json.dumps(journal))
+    path.write_text(json.dumps(_authenticate_journal(root, journal)))
     path.chmod(0o600)
     return path, backup
 
@@ -499,23 +567,26 @@ def test_stale_or_tampered_recovery_journal_fails_closed_without_backup_apply(tm
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("operation", "other.action"),
+        ("operation", "user.quotas"),
         ("mode", "restart"),
         ("next_revision", "0" * 64),
         ("backup_basename", "not-generation-bound.json"),
+        ("phase", "rollback_applied"),
+        ("desired_config_hash", "0" * 64),
     ],
 )
-def test_recovery_rejects_semantically_tampered_metadata_before_side_effects(
+def test_prepared_recovery_rejects_any_unauthenticated_metadata_before_side_effects(
     tmp_path, field, value
 ):
-    mita = FakeMita()
+    mita = RecoveryMita()
     service = manager(tmp_path, mita)
     service.bootstrap()
     root = tmp_path / "state"
     state = json.loads((root / "state.json").read_text())
     desired = {**BASE, "loggingLevel": "DEBUG"}
-    mita.config = json.loads(json.dumps(desired))
-    journal_path, _ = _write_recovery_fixture(root, state, BASE, desired)
+    journal_path, _ = _write_recovery_fixture(
+        root, state, BASE, desired, phase="prepared"
+    )
     journal = json.loads(journal_path.read_text())
     journal[field] = value
     journal_path.write_text(json.dumps(journal))
@@ -525,7 +596,69 @@ def test_recovery_rejects_semantically_tampered_metadata_before_side_effects(
     with pytest.raises(ConfigConflict, match="recovery"):
         manager(tmp_path, mita).bootstrap()
     assert mita.calls == []
-    assert mita.config == desired
+    assert mita.config == BASE
+    assert journal_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("phase", "observed", "first_call"),
+    [
+        ("prepared", BASE, ("stop",)),
+        ("applied", {**BASE, "loggingLevel": "DEBUG"}, ("apply", BASE)),
+        ("rollback_applied", BASE, ("stop",)),
+    ],
+)
+def test_authenticated_recovery_completes_each_legitimate_phase(
+    tmp_path, phase, observed, first_call
+):
+    mita = FakeMita()
+    service = manager(tmp_path, mita)
+    service.bootstrap()
+    root = tmp_path / "state"
+    state = json.loads((root / "state.json").read_text())
+    desired = {**BASE, "loggingLevel": "DEBUG"}
+    mita.config = json.loads(json.dumps(observed))
+    journal_path, _ = _write_recovery_fixture(
+        root, state, BASE, desired, phase=phase
+    )
+    mita.calls.clear()
+
+    assert manager(tmp_path, mita).bootstrap()["ready"] is True
+    assert mita.calls[0] == first_call
+    assert mita.config == BASE
+    assert not journal_path.exists()
+
+
+@pytest.mark.parametrize("damage", ["missing", "symlink", "mode", "contents"])
+def test_recovery_fails_closed_when_journal_key_is_unavailable_or_unsafe(
+    tmp_path, damage
+):
+    mita = RecoveryMita()
+    service = manager(tmp_path, mita)
+    service.bootstrap()
+    root = tmp_path / "state"
+    state = json.loads((root / "state.json").read_text())
+    desired = {**BASE, "loggingLevel": "DEBUG"}
+    journal_path, _ = _write_recovery_fixture(
+        root, state, BASE, desired, phase="prepared"
+    )
+    key_path = root / "journal.key"
+    if damage == "missing":
+        key_path.unlink()
+    elif damage == "symlink":
+        key_path.unlink()
+        key_path.symlink_to(root / "state.json")
+    elif damage == "mode":
+        key_path.chmod(0o644)
+    else:
+        key_path.write_bytes(b"x" * 32)
+        key_path.chmod(0o600)
+    mita.calls.clear()
+
+    with pytest.raises(ConfigConflict):
+        manager(tmp_path, mita).bootstrap()
+    assert mita.calls == []
+    assert journal_path.exists()
 
 
 def test_per_user_metrics_fail_closed_when_typed_getusers_boundary_is_unavailable(tmp_path):
@@ -670,8 +803,8 @@ else:
     journal.write_text(
         json.dumps(
             {
-                "version": 2,
-                "schema": "mieru-transaction-journal-v2",
+                "version": 3,
+                "schema": "mieru-transaction-journal-v3",
                 "phase": "applied",
                 "operation": "user.create",
                 "mode": "reload",
@@ -687,6 +820,8 @@ else:
             }
         )
     )
+    unsigned = json.loads(journal.read_text())
+    journal.write_text(json.dumps(_authenticate_journal(journal.parent, unsigned)))
     journal.chmod(0o600)
 
     recovered = MieruManager(
@@ -817,6 +952,34 @@ def test_cli_timeout_kills_descendant_that_inherits_output_pipes(tmp_path):
 
     with pytest.raises(Exception, match="operation unavailable"):
         cli.version()
+    pid = int(grandchild_pid.read_text())
+    deadline = time.monotonic() + 1
+    while _process_running(pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not _process_running(pid)
+
+
+def test_cli_success_kills_same_group_descendant_after_direct_child_exits(tmp_path):
+    grandchild_pid = tmp_path / "success-grandchild.pid"
+    fake = tmp_path / "mita-success-descendant"
+    fake.write_text(
+        "#!/usr/bin/python3\n"
+        "import os, subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', "
+        "'import os,time; open(os.environ[\"PID_FILE\"],\"w\").write(str(os.getpid())); time.sleep(60)'], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "while not os.path.exists(os.environ['PID_FILE']): time.sleep(0.001)\n"
+        "print('mita 3.35.0', flush=True)\n"
+    )
+    fake.chmod(0o755)
+    cli = MitaCLI(
+        executable=fake,
+        env={"PID_FILE": str(grandchild_pid)},
+        timeout=2,
+        max_output=1024,
+    )
+
+    assert cli.version() == "3.35.0"
     pid = int(grandchild_pid.read_text())
     deadline = time.monotonic() + 1
     while _process_running(pid) and time.monotonic() < deadline:
