@@ -23,6 +23,9 @@ async def test_login_uses_opaque_server_side_session_and_security_headers(client
     cookie = response.cookies["panel_session"]
     assert "." not in cookie and len(cookie) >= 40
     assert "HttpOnly" in response.headers["set-cookie"]
+    identity = await client.get("/api/auth/me")
+    assert identity.status_code == 200
+    assert identity.json() == {"username": "owner", "role": "owner"}
     dashboard = await client.get("/api/dashboard")
     assert dashboard.status_code == 200
     assert dashboard.headers["content-security-policy"].startswith("default-src 'self'")

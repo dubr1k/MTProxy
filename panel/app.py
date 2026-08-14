@@ -129,11 +129,14 @@ def create_app(settings: Settings | None = None, *, telemt=None):
         candidates = links.get("tls", []) if isinstance(links, dict) else []
         return {"secret": data.get("secret"), "link": candidates[0] if candidates else data.get("link")}
 
+    def qr_data(link: str) -> str:
+        output = io.BytesIO()
+        qrcode.make(link, image_factory=qrcode.image.svg.SvgPathImage).save(output)
+        return "data:image/svg+xml;base64," + base64.b64encode(output.getvalue()).decode()
+
     def reveal(data, owner):
         if data.get("link"):
-            output = io.BytesIO()
-            qrcode.make(data["link"], image_factory=qrcode.image.svg.SvgPathImage).save(output)
-            data = {**data, "qr": "data:image/svg+xml;base64," + base64.b64encode(output.getvalue()).decode()}
+            data = {**data, "qr": qr_data(data["link"])}
         token = secrets.token_urlsafe(32)
         app.state.reveals[token] = (time.monotonic() + settings.reveal_ttl_seconds, owner["token_hash"], data)
         return token
@@ -177,6 +180,10 @@ def create_app(settings: Settings | None = None, *, telemt=None):
         app.state.store.delete_session(request.cookies.get("panel_session"))
         response.delete_cookie("panel_session", path="/"); response.delete_cookie("panel_csrf", path="/")
 
+    @app.get("/api/auth/me")
+    async def me(user=Depends(current)):
+        return {"username": user["username"], "role": user["role"]}
+
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         if not app.state.store.session(request.cookies.get("panel_session")):
@@ -198,6 +205,17 @@ def create_app(settings: Settings | None = None, *, telemt=None):
         audit(user, "user.create", body.username, request)
         token = reveal(secret_reveal(data), user)
         return {"username": body.username, "reveal_token": token}
+
+    @app.post("/api/users/{username}/access")
+    async def user_access(username: str, request: Request, user=Depends(roles("owner", "admin"))):
+        selected = next((item for item in await app.state.telemt.list_users() if item.get("username") == username), None)
+        if selected is None:
+            raise HTTPException(404, "user not found")
+        access = secret_reveal(selected)
+        if not access.get("link"):
+            raise HTTPException(409, "connection link unavailable")
+        audit(user, "user.access", username, request)
+        return {"username": username, "link": access["link"], "qr": qr_data(access["link"])}
 
     @app.delete("/api/users/{username}", status_code=204)
     async def delete_user(username: str, request: Request, user=Depends(roles("owner", "admin"))):

@@ -1,10 +1,86 @@
 <!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MTProxy Panel</title><link rel="stylesheet" href="/static/style.css"></head>
-<body><aside class="sidebar"><div class="brand"><b>M</b> MTProxy</div><nav aria-label="Основная навигация"><button data-view="dashboard">Обзор</button><button data-view="users">Пользователи</button><button data-view="admins">Администраторы</button><button data-view="audit">Аудит</button></nav></aside>
-<main class="content"><header><div><span class="eyebrow">CONTROL PLANE</span><h1 id="title">Обзор</h1></div><button id="add" hidden>Добавить</button></header><section id="view" aria-live="polite"><div class="cards"><article><small>Состояние</small><strong>Загрузка…</strong></article></div></section></main>
-<nav class="mobile-nav" aria-label="Мобильная навигация"><button data-view="dashboard">Обзор</button><button data-view="users">Люди</button><button data-view="admins">Админы</button><button data-view="audit">Аудит</button></nav>
-<dialog id="user-modal"><form method="dialog"><button class="close">×</button><h2>Новый пользователь</h2><label>Имя<input id="new-user" pattern="[A-Za-z0-9.-]+" maxlength="32" required></label><button id="create-user" type="button">Создать</button></form></dialog>
-<dialog id="admin-modal"><form method="dialog"><button class="close">×</button><h2>Администратор</h2><input id="admin-id" type="hidden"><label>Логин<input id="admin-user" pattern="[A-Za-z0-9_.-]+" maxlength="64"></label><label>Пароль<input id="admin-password" type="password" minlength="12" autocomplete="new-password"></label><label>Роль<select id="admin-role"><option value="viewer">Viewer</option><option value="admin">Admin</option><option value="owner">Owner</option></select></label><button id="save-admin" type="button">Сохранить</button></form></dialog>
-<dialog id="confirm"><form method="dialog"><h2 id="confirm-title">Подтверждение</h2><p id="confirm-text"></p><button value="cancel">Отмена</button><button id="confirm-ok" value="default">Продолжить</button></form></dialog>
-<dialog id="reveal"><form method="dialog"><h2>Сохраните сейчас</h2><p>Секрет и ссылка больше не будут показаны.</p><code id="secret"></code><button id="copy" type="button">Копировать</button><canvas id="qr-canvas" width="220" height="220" aria-label="QR-код"></canvas><button>Готово</button></form></dialog>
-<script src="/static/app.js"></script></body></html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#08090a">
+  <title>MTProxy Control</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">M</span><span><b>MTProxy</b><small>CONTROL</small></span></div>
+    <nav aria-label="Основная навигация">
+      <button class="nav-item active" data-view="dashboard"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20h-6v-6h-4v6H4z"/></svg><span>Обзор</span></button>
+      <button class="nav-item" data-view="users"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="3"/><circle cx="16" cy="12" r="3"/><path d="M11 12h2M3 12H1m22 0h-2"/></svg><span>Подключения</span><span class="nav-count" id="users-count">—</span></button>
+      <button class="nav-item owner-only" data-view="admins"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.6-4 2.8-6 7-6s6.4 2 7 6"/></svg><span>Администраторы</span></button>
+      <button class="nav-item audit-nav" data-view="audit"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6h13M7 12h13M7 18h13"/><circle cx="3" cy="6" r="1"/><circle cx="3" cy="12" r="1"/><circle cx="3" cy="18" r="1"/></svg><span>Журнал</span></button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="system-mini"><i></i><span><b>Telemt работает</b><small>Приватный control API</small></span></div>
+      <button class="profile-button" id="profile-button"><span class="avatar" id="avatar">A</span><span><b id="profile-name">—</b><small id="profile-role">—</small></span><svg class="chevron button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5"/></svg></button>
+      <button class="logout-button" id="logout">Выйти</button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <header class="topbar">
+      <div><span class="eyebrow" id="eyebrow">CONTROL PLANE</span><h1 id="title">Обзор</h1><p id="subtitle">Состояние прокси и активные подключения</p></div>
+      <div class="header-actions"><button class="icon-button" id="refresh" aria-label="Обновить" title="Обновить"><svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M19 12a7 7 0 1 0-2 5"/></svg></button><button class="primary compact" id="add" hidden><svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span id="add-label">Добавить</span></button></div>
+    </header>
+    <section id="view" aria-live="polite"><div class="skeleton-grid"><i></i><i></i><i></i></div></section>
+  </main>
+
+  <nav class="mobile-nav" aria-label="Мобильная навигация">
+    <button class="active" data-view="dashboard"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20h-6v-6h-4v6H4z"/></svg><small>Обзор</small></button>
+    <button data-view="users"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="3"/><circle cx="16" cy="12" r="3"/><path d="M11 12h2"/></svg><small>Доступы</small></button>
+    <button class="owner-only" data-view="admins"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.6-4 2.8-6 7-6s6.4 2 7 6"/></svg><small>Админы</small></button>
+    <button class="audit-nav" data-view="audit"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h14M6 12h14M6 18h14"/></svg><small>Журнал</small></button>
+    <button id="mobile-logout"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H4v14h6M14 8l4 4-4 4m4-4H9"/></svg><small>Выйти</small></button>
+  </nav>
+
+  <dialog id="user-modal" class="sheet">
+    <form method="dialog" id="user-form">
+      <div class="modal-head"><div><span class="eyebrow">НОВЫЙ ДОСТУП</span><h2>Добавить пользователя</h2></div><button class="icon-button close" value="cancel" aria-label="Закрыть">×</button></div>
+      <p class="modal-copy">Панель безопасно сгенерирует отдельный ключ и сразу покажет ссылку и QR-код.</p>
+      <label>Имя подключения<input id="new-user" pattern="[A-Za-z0-9.\-]+" maxlength="32" autocomplete="off" placeholder="например, phone-sergey" required><small>Латиница, цифры, точка и дефис</small></label>
+      <div class="form-error" id="user-error" role="alert"></div>
+      <footer><button class="secondary" value="cancel">Отмена</button><button class="primary" id="create-user" type="button">Создать доступ</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="admin-modal" class="sheet">
+    <form method="dialog" id="admin-form">
+      <div class="modal-head"><div><span class="eyebrow">КОМАНДА</span><h2 id="admin-modal-title">Администратор</h2></div><button class="icon-button close" value="cancel" aria-label="Закрыть">×</button></div>
+      <input id="admin-id" type="hidden">
+      <label>Логин<input id="admin-user" pattern="[A-Za-z0-9_.\-]+" maxlength="64" autocomplete="username" required></label>
+      <label>Пароль<input id="admin-password" type="password" minlength="12" autocomplete="new-password" placeholder="Не менее 12 символов"><small id="password-hint">Обязателен для нового администратора</small></label>
+      <label>Роль<select id="admin-role"><option value="viewer">Наблюдатель</option><option value="admin">Администратор</option><option value="owner">Владелец</option></select></label>
+      <div class="form-error" id="admin-error" role="alert"></div>
+      <footer><button class="danger ghost" id="delete-admin" type="button" hidden>Удалить</button><span class="spacer"></span><button class="secondary" value="cancel">Отмена</button><button class="primary" id="save-admin" type="button">Сохранить</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="confirm" class="confirm-dialog">
+    <form method="dialog">
+      <div class="confirm-icon" id="confirm-icon">!</div><h2 id="confirm-title">Подтверждение</h2><p id="confirm-text"></p>
+      <footer><button class="secondary" value="cancel">Отмена</button><button class="danger" id="confirm-ok" value="default">Продолжить</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="access-modal" class="access-dialog">
+    <form method="dialog">
+      <div class="modal-head"><div><span class="eyebrow">ПОДКЛЮЧЕНИЕ</span><h2 id="access-title">Доступ к прокси</h2></div><button class="icon-button close" value="cancel" aria-label="Закрыть">×</button></div>
+      <div class="access-layout">
+        <div class="qr-wrap"><img id="qr-image" alt="QR-код подключения"><span>Наведите камеру Telegram</span></div>
+        <div class="access-details"><span class="status-pill active"><i></i> Готово к подключению</span><p>Отсканируйте QR-код или отправьте ссылку на устройство. Ссылка содержит секретный ключ.</p><label>Ссылка Telegram<div class="copy-field"><input id="access-link" readonly aria-label="Ссылка подключения"><button id="copy-link" type="button">Копировать</button></div></label><div class="access-actions"><a class="primary button" id="open-telegram" href="#">Открыть в Telegram</a><a class="secondary button" id="download-qr" download="mtproxy-qr.svg">Скачать QR</a></div></div>
+      </div>
+      <div class="security-note">Не публикуйте ссылку открыто: любой, у кого она есть, сможет использовать прокси.</div>
+      <footer><button class="secondary" value="cancel">Закрыть</button></footer>
+    </form>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
