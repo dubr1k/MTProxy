@@ -41,23 +41,23 @@
 
   <dialog id="user-modal" class="sheet">
     <form method="dialog" id="user-form">
-      <div class="modal-head"><div><span class="eyebrow">НОВЫЙ ДОСТУП</span><h2>Добавить пользователя</h2></div><button class="icon-button close" value="cancel" aria-label="Закрыть">×</button></div>
+      <div class="modal-head"><div><span class="eyebrow">НОВЫЙ ДОСТУП</span><h2>Добавить пользователя</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
       <p class="modal-copy">Панель безопасно сгенерирует отдельный ключ и сразу покажет ссылку и QR-код.</p>
       <label>Имя подключения<input id="new-user" pattern="[A-Za-z0-9.\-]+" maxlength="32" autocomplete="off" placeholder="например, phone-sergey" required><small>Латиница, цифры, точка и дефис</small></label>
       <div class="form-error" id="user-error" role="alert"></div>
-      <footer><button class="secondary" value="cancel">Отмена</button><button class="primary" id="create-user" type="button">Создать доступ</button></footer>
+      <footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-user" type="button" disabled>Создать доступ</button></footer>
     </form>
   </dialog>
 
   <dialog id="admin-modal" class="sheet">
     <form method="dialog" id="admin-form">
-      <div class="modal-head"><div><span class="eyebrow">КОМАНДА</span><h2 id="admin-modal-title">Администратор</h2></div><button class="icon-button close" value="cancel" aria-label="Закрыть">×</button></div>
+      <div class="modal-head"><div><span class="eyebrow">КОМАНДА</span><h2 id="admin-modal-title">Администратор</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
       <input id="admin-id" type="hidden">
       <label>Логин<input id="admin-user" pattern="[A-Za-z0-9_.\-]+" maxlength="64" autocomplete="username" required></label>
       <label>Пароль<input id="admin-password" type="password" minlength="12" autocomplete="new-password" placeholder="Не менее 12 символов"><small id="password-hint">Обязателен для нового администратора</small></label>
       <label>Роль<select id="admin-role"><option value="viewer">Наблюдатель</option><option value="admin">Администратор</option><option value="owner">Владелец</option></select></label>
       <div class="form-error" id="admin-error" role="alert"></div>
-      <footer><button class="danger ghost" id="delete-admin" type="button" hidden>Удалить</button><span class="spacer"></span><button class="secondary" value="cancel">Отмена</button><button class="primary" id="save-admin" type="button">Сохранить</button></footer>
+      <footer><button class="danger ghost" id="delete-admin" type="button" hidden>Удалить</button><span class="spacer"></span><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="save-admin" type="button">Сохранить</button></footer>
     </form>
   </dialog>
 

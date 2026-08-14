@@ -50,6 +50,8 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert "@media(max-width:760px)" in css.text
     js = (await client.get("/static/app.js")).text
     assert "function proxyLink" in js and "navigationGeneration" in js
+    assert 'value="cancel" formnovalidate' in text
+    assert 'id="create-user" type="button" disabled' in text
     assert "admin-form');if(!form.reportValidity()" in js
 
 
