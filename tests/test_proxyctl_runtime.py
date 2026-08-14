@@ -65,6 +65,14 @@ def test_command_runner_reports_captured_stderr_for_failed_command():
         CommandRunner().run(("sh", "-c", "printf 'specific compose failure\\n' >&2; exit 7"))
 
 
+def test_compose_discovery_reports_unavailable_when_docker_is_not_installed(monkeypatch):
+    def missing_docker(*_args, **_kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(subprocess, "run", missing_docker)
+    assert CommandRunner().compose_available() is False
+
+
 def test_compose_start_failure_reports_bounded_sanitized_diagnostics_and_rolls_back(tmp_path):
     root, route = runtime_root(tmp_path)
     original_route = route.read_bytes()

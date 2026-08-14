@@ -1010,10 +1010,13 @@ class CommandRunner:
         return shutil.which(name) is not None
 
     def compose_available(self) -> bool:
-        return subprocess.run(
-            ["docker", "compose", "version"], stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, check=False,
-        ).returncode == 0
+        try:
+            return subprocess.run(
+                ["docker", "compose", "version"], stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, check=False,
+            ).returncode == 0
+        except OSError:
+            return False
 
     def run(self, argv, *, stdin_path: Path | None = None, env: dict[str, str] | None = None) -> None:
         stdin = stdin_path.open("rb") if stdin_path else subprocess.DEVNULL
