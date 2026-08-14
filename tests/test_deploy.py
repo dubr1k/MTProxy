@@ -135,6 +135,50 @@ class DeployCliTests(unittest.TestCase):
                 "<h1>Private cover</h1>\n",
             )
 
+    def test_panel_healthcheck_sends_configured_allowed_host(self):
+        env = {
+            **os.environ,
+            "MTPROXY_DOMAIN": "proxy.lab.test",
+            "MTPROXY_COVER_ROOT": "/tmp",
+            "PANEL_ALLOWED_HOSTS": "panel.lab.test",
+            "PANEL_HEALTHCHECK_HOST": "panel.lab.test",
+        }
+        rendered = subprocess.run(
+            ["docker", "compose", "config", "--format", "json"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        panel = json.loads(rendered.stdout)["services"]["panel"]
+        self.assertEqual(panel["environment"]["PANEL_HEALTHCHECK_HOST"], "panel.lab.test")
+        command = panel["healthcheck"]["test"]
+        self.assertEqual(command[:3], ["CMD", "python", "-c"])
+        self.assertIn("Request", command[3])
+        self.assertIn("PANEL_HEALTHCHECK_HOST", command[3])
+        self.assertIn("headers={'Host':", command[3])
+
+    def test_panel_healthcheck_default_host_is_allowed(self):
+        env = {
+            **os.environ,
+            "MTPROXY_DOMAIN": "proxy.lab.test",
+            "MTPROXY_COVER_ROOT": "/tmp",
+        }
+        rendered = subprocess.run(
+            ["docker", "compose", "config", "--format", "json"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        panel = json.loads(rendered.stdout)["services"]["panel"]
+        self.assertIn(
+            panel["environment"]["PANEL_HEALTHCHECK_HOST"],
+            panel["environment"]["PANEL_ALLOWED_HOSTS"].split(","),
+        )
+
     def test_render_is_idempotent_and_preserves_existing_secrets(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

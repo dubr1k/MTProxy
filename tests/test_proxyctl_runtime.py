@@ -46,10 +46,52 @@ class FakeRunner:
         if command[:3] == ("apt-get", "install", "-y"):
             self.installed.update(command[3:])
 
+    def capture(self, argv, *, max_chars):
+        command = tuple(str(value) for value in argv)
+        self.calls.append((command, None))
+        if command[-1:] == ("ps",):
+            return "panel running (unhealthy)"
+        if command[-5:] == ("logs", "--no-color", "--tail", "80", "panel"):
+            return "panel log password=do-not-expose"
+        if command[-3:] == ("ps", "-q", "panel"):
+            return "panel-container-id"
+        if command[:2] == ("docker", "inspect"):
+            return '{"Status":"unhealthy","Log":[{"Output":"Bearer do-not-expose"}]}'
+        return ""
+
 
 def test_command_runner_reports_captured_stderr_for_failed_command():
     with pytest.raises(InstallerConflict, match="specific compose failure"):
         CommandRunner().run(("sh", "-c", "printf 'specific compose failure\\n' >&2; exit 7"))
+
+
+def test_compose_start_failure_reports_bounded_sanitized_diagnostics_and_rolls_back(tmp_path):
+    root, route = runtime_root(tmp_path)
+    original_route = route.read_bytes()
+    runner = FakeRunner(
+        fail_on=("docker", "compose", "--project-directory", "/opt/mtproxy-shared443", "up"),
+        failure=InstallerConflict,
+    )
+    manager = RuntimeInstaller(plan(Path(__file__).parents[1]), root=root, runner=runner)
+
+    with pytest.raises(InstallerConflict) as caught:
+        manager.install()
+
+    message = str(caught.value)
+    assert "injected command failure" in message
+    assert "panel running (unhealthy)" in message
+    assert "panel log password=[REDACTED]" in message
+    assert '"Status":"unhealthy"' in message
+    assert "do-not-expose" not in message
+    commands = [call[0] for call in runner.calls]
+    compose = ("docker", "compose", "--project-directory", "/opt/mtproxy-shared443")
+    assert compose + ("ps",) in commands
+    assert compose + ("logs", "--no-color", "--tail", "80", "panel") in commands
+    assert compose + ("ps", "-q", "panel") in commands
+    assert ("docker", "inspect", "--format", "{{json .State.Health}}", "panel-container-id") in commands
+    assert all("Config" not in command and "Env" not in command for command in commands)
+    assert route.read_bytes() == original_route
+    assert {child.name for child in (root / "opt/mtproxy-shared443").iterdir()} == {".mtproxy-owned", "secrets"}
 
 
 def test_test_hook_kills_process_only_after_requested_phase_is_durable(tmp_path):
@@ -169,6 +211,9 @@ def test_runtime_install_owns_complete_stack_and_never_exposes_password(tmp_path
     assert original_route != route.read_text()
 
     project = root / "opt/mtproxy-shared443"
+    rendered_env = (project / ".env").read_text().splitlines()
+    assert "PANEL_ALLOWED_HOSTS=tga-panel.dubr1kkk.uk" in rendered_env
+    assert "PANEL_HEALTHCHECK_HOST=tga-panel.dubr1kkk.uk" in rendered_env
     password_file = project / "secrets/panel-bootstrap-password"
     assert password_file.is_file()
     assert stat.S_IMODE(password_file.stat().st_mode) == 0o600

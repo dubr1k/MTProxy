@@ -66,6 +66,7 @@ services:
     environment:
       PANEL_DATABASE: /data/panel.sqlite3
       PANEL_ALLOWED_HOSTS: ${PANEL_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      PANEL_HEALTHCHECK_HOST: ${PANEL_HEALTHCHECK_HOST:-localhost}
       PANEL_COOKIE_SECURE: ${PANEL_COOKIE_SECURE:-true}
       TELEMT_API_URL: http://mtproxy:9091
       TELEMT_API_TOKEN_SOURCE: /run/secrets/telemt-api-token
@@ -91,7 +92,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=2)"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; request = urllib.request.Request('http://127.0.0.1:8787/healthz', headers={'Host': os.environ['PANEL_HEALTHCHECK_HOST']}); urllib.request.urlopen(request, timeout=2)"]
       interval: 20s
       timeout: 3s
       retries: 3

@@ -1033,6 +1033,22 @@ class CommandRunner:
             if stdin_path:
                 stdin.close()
 
+    def capture(self, argv, *, max_chars: int) -> str:
+        """Capture a bounded diagnostic command without inheriting a terminal."""
+        command = [str(value) for value in argv]
+        limit = max(0, min(max_chars, 4096))
+        try:
+            completed = subprocess.run(
+                command, check=False, stdin=subprocess.DEVNULL, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"diagnostic unavailable: {type(exc).__name__}"[:limit]
+        output = completed.stdout or ""
+        if completed.returncode:
+            output = f"exit={completed.returncode} {output}"
+        return output[-limit:]
+
 
 class RuntimeInstaller:
     """Transactional full-runtime manager, testable against a fake root and runner."""
@@ -1048,6 +1064,44 @@ class RuntimeInstaller:
 
     def _compose(self, *args: str) -> None:
         self._run("docker", "compose", "--project-directory", self.plan.project_dir, *args)
+
+    @staticmethod
+    def _sanitize_diagnostic(value: str, *, max_chars: int = 4096) -> str:
+        clean = " ".join(value.split())
+        clean = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [REDACTED]", clean)
+        clean = re.sub(
+            r"(?i)\b(password|secret|token|authorization)(\s*[=:]\s*|\s+)\S+",
+            lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+            clean,
+        )
+        return clean[-max_chars:]
+
+    def _compose_start(self) -> None:
+        try:
+            self._compose("up", "-d", "--wait")
+        except InstallerConflict as original:
+            compose = ("docker", "compose", "--project-directory", self.plan.project_dir)
+            diagnostics: list[tuple[str, str]] = []
+
+            def capture(label: str, command: tuple[str, ...], limit: int) -> str:
+                try:
+                    value = self.runner.capture(command, max_chars=limit)
+                except Exception as exc:
+                    value = f"diagnostic unavailable: {type(exc).__name__}"
+                diagnostics.append((label, self._sanitize_diagnostic(value, max_chars=limit)))
+                return value
+
+            capture("compose ps", compose + ("ps",), 2000)
+            capture("panel logs", compose + ("logs", "--no-color", "--tail", "80", "panel"), 4000)
+            container = capture("panel id", compose + ("ps", "-q", "panel"), 256).strip().splitlines()
+            if container and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", container[-1]):
+                capture(
+                    "panel health",
+                    ("docker", "inspect", "--format", "{{json .State.Health}}", container[-1]),
+                    4000,
+                )
+            detail = "; ".join(f"{label}: {value or '(empty)'}" for label, value in diagnostics)
+            raise InstallerConflict(f"{original}; startup diagnostics: {detail}") from original
 
     def _managed_paths(self) -> list[str]:
         return [
@@ -1161,6 +1215,7 @@ class RuntimeInstaller:
             f"MTPROXY_COVER_ROOT=/var/www/{self.plan.proxy_domain}\n"
             "MTPROXY_LETSENCRYPT_ROOT=/etc/letsencrypt\n"
             f"PANEL_ALLOWED_HOSTS={self.plan.panel_domain}\n"
+            f"PANEL_HEALTHCHECK_HOST={self.plan.panel_domain}\n"
         )
         _atomic_write(project / ".env", env.encode(), mode=0o600)
         cover = _root_path(self.root, f"/var/www/{self.plan.proxy_domain}/index.html")
@@ -1366,7 +1421,7 @@ class RuntimeInstaller:
                 self._validate_reload()
                 self._compose("config", "-q")
                 self._compose("pull", "-q")
-                self._compose("up", "-d", "--wait")
+                self._compose_start()
                 password = _root_path(self.root, f"{self.plan.project_dir}/secrets/panel-bootstrap-password")
                 self._run(
                     "docker", "compose", "--project-directory", self.plan.project_dir,
@@ -1410,7 +1465,7 @@ class RuntimeInstaller:
                 validate=lambda: self._run("nginx", "-t"),
                 reload=lambda: self._run("systemctl", "reload", "nginx"),
             )
-            self._compose("up", "-d", "--wait")
+            self._compose_start()
             self._health_and_protocol()
         if _locked:
             operation()
