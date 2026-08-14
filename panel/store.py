@@ -12,6 +12,11 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
 
+DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=2$WgRGk2j919KU4cq8Aoq1eQ$Yu6TDt/n0xMCzUMjf0cpxeC/CkNXj2ilMtTlv2L+2wU"
+)
+
+
 class ConflictError(Exception):
     pass
 
@@ -22,7 +27,7 @@ class Store:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self.passwords = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=2)
-        self._dummy_hash = self.passwords.hash("dummy-password-never-used")
+        self._dummy_hash = DUMMY_PASSWORD_HASH
         self._init()
 
     def connect(self):

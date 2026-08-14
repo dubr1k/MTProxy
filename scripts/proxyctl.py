@@ -1081,27 +1081,30 @@ class RuntimeInstaller:
             self._compose("up", "-d", "--wait")
         except InstallerConflict as original:
             compose = ("docker", "compose", "--project-directory", self.plan.project_dir)
-            diagnostics: list[tuple[str, str]] = []
 
-            def capture(label: str, command: tuple[str, ...], limit: int) -> str:
+            def capture(command: tuple[str, ...], limit: int) -> str:
                 try:
                     value = self.runner.capture(command, max_chars=limit)
                 except Exception as exc:
                     value = f"diagnostic unavailable: {type(exc).__name__}"
-                diagnostics.append((label, self._sanitize_diagnostic(value, max_chars=limit)))
-                return value
+                return self._sanitize_diagnostic(value, max_chars=limit)
 
-            capture("compose ps", compose + ("ps",), 2000)
-            capture("panel logs", compose + ("logs", "--no-color", "--tail", "80", "panel"), 4000)
-            container = capture("panel id", compose + ("ps", "-q", "panel"), 256).strip().splitlines()
+            container = capture(compose + ("ps", "-q", "panel"), 256).strip().splitlines()
             if container and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", container[-1]):
-                capture(
-                    "panel health",
+                health = capture(
                     ("docker", "inspect", "--format", "{{json .State.Health}}", container[-1]),
-                    4000,
+                    2400,
                 )
+            else:
+                health = "container id unavailable"
+            diagnostics = (
+                ("panel health", health),
+                ("panel logs", capture(compose + ("logs", "--no-color", "--tail", "80", "panel"), 600)),
+                ("compose ps", capture(compose + ("ps",), 400)),
+            )
+            summary = self._sanitize_diagnostic(str(original), max_chars=300)
             detail = "; ".join(f"{label}: {value or '(empty)'}" for label, value in diagnostics)
-            raise InstallerConflict(f"{original}; startup diagnostics: {detail}") from original
+            raise InstallerConflict(f"compose startup failed: {summary}; startup diagnostics: {detail}") from original
 
     def _managed_paths(self) -> list[str]:
         return [

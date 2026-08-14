@@ -46,7 +46,7 @@ class FakeRunner:
         if command[:3] == ("apt-get", "install", "-y"):
             self.installed.update(command[3:])
 
-    def capture(self, argv, *, max_chars):
+    def capture(self, argv, *, max_chars) -> str:
         command = tuple(str(value) for value in argv)
         self.calls.append((command, None))
         if command[-1:] == ("ps",):
@@ -92,6 +92,39 @@ def test_compose_start_failure_reports_bounded_sanitized_diagnostics_and_rolls_b
     assert all("Config" not in command and "Env" not in command for command in commands)
     assert route.read_bytes() == original_route
     assert {child.name for child in (root / "opt/mtproxy-shared443").iterdir()} == {".mtproxy-owned", "secrets"}
+
+
+def test_compose_start_keeps_health_diagnostics_ahead_of_bounded_logs_and_ps():
+    class VerboseRunner(FakeRunner):
+        def run(self, argv, *, stdin_path=None, env=None):
+            command = tuple(str(value) for value in argv)
+            self.calls.append((command, str(stdin_path) if stdin_path else None))
+            raise InstallerConflict("compose progress " + "P" * 5000 + " container panel is unhealthy")
+
+        def capture(self, argv, *, max_chars) -> str:
+            command = tuple(str(value) for value in argv)
+            self.calls.append((command, None))
+            if command[-3:] == ("ps", "-q", "panel"):
+                return "panel-container-id"
+            if command[:2] == ("docker", "inspect"):
+                return '{"Status":"unhealthy","Log":[{"Output":"health-marker token=hidden"}]}'
+            if command[-5:] == ("logs", "--no-color", "--tail", "80", "panel"):
+                return "log-marker " + "L" * 5000
+            if command[-1:] == ("ps",):
+                return "ps-marker " + "S" * 5000
+            return ""
+
+    manager = RuntimeInstaller(plan(Path(__file__).parents[1]), runner=VerboseRunner())
+
+    with pytest.raises(InstallerConflict) as caught:
+        manager._compose_start()
+
+    message = str(caught.value)
+    assert len(message) <= 3900
+    assert "health-marker token=[REDACTED]" in message
+    assert "hidden" not in message
+    assert message.index("panel health:") < message.index("panel logs:") < message.index("compose ps:")
+    assert message.index("health-marker") < 4000
 
 
 def test_test_hook_kills_process_only_after_requested_phase_is_durable(tmp_path):
