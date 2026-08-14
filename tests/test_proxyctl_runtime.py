@@ -182,7 +182,8 @@ def plan(repo: Path) -> RuntimePlan:
 def test_generated_acme_and_panel_sites_pass_native_nginx_syntax_check(tmp_path):
     nginx = shutil.which("nginx")
     assert nginx is not None, "native nginx is required for generated-site syntax validation"
-    manager = RuntimeInstaller(plan(Path(__file__).parents[1]), root=tmp_path, runner=FakeRunner())
+    runtime_plan = plan(Path(__file__).parents[1])
+    manager = RuntimeInstaller(runtime_plan, root=tmp_path, runner=FakeRunner())
     acme_site = manager._acme_site_content()
     panel_site = manager._panel_site_content()
 
@@ -191,7 +192,7 @@ def test_generated_acme_and_panel_sites_pass_native_nginx_syntax_check(tmp_path)
     subprocess.run(
         [
             "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-            "-subj", "/CN=tga-panel.dubr1kkk.uk", "-days", "1",
+            "-subj", f"/CN={runtime_plan.panel_domain}", "-days", "1",
             "-keyout", str(private_key), "-out", str(certificate),
         ],
         check=True,
@@ -199,9 +200,11 @@ def test_generated_acme_and_panel_sites_pass_native_nginx_syntax_check(tmp_path)
         stderr=subprocess.DEVNULL,
     )
     panel_site = panel_site.replace(
-        b"/etc/letsencrypt/live/tga.dubr1kkk.uk/fullchain.pem", str(certificate).encode()
+        f"/etc/letsencrypt/live/{runtime_plan.proxy_domain}/fullchain.pem".encode(),
+        str(certificate).encode(),
     ).replace(
-        b"/etc/letsencrypt/live/tga.dubr1kkk.uk/privkey.pem", str(private_key).encode()
+        f"/etc/letsencrypt/live/{runtime_plan.proxy_domain}/privkey.pem".encode(),
+        str(private_key).encode(),
     )
     (tmp_path / "nginx.conf").write_bytes(
         b"worker_processes 1; pid nginx.pid; error_log stderr notice; events {} http {\n"
@@ -245,8 +248,8 @@ def test_runtime_install_owns_complete_stack_and_never_exposes_password(tmp_path
 
     project = root / "opt/mtproxy-shared443"
     rendered_env = (project / ".env").read_text().splitlines()
-    assert "PANEL_ALLOWED_HOSTS=tga-panel.dubr1kkk.uk" in rendered_env
-    assert "PANEL_HEALTHCHECK_HOST=tga-panel.dubr1kkk.uk" in rendered_env
+    assert "PANEL_ALLOWED_HOSTS=panel.example.com" in rendered_env
+    assert "PANEL_HEALTHCHECK_HOST=panel.example.com" in rendered_env
     password_file = project / "secrets/panel-bootstrap-password"
     assert password_file.is_file()
     assert stat.S_IMODE(password_file.stat().st_mode) == 0o600
