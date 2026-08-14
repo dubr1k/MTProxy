@@ -22,7 +22,7 @@ dpkg-deb -x mita_3.35.0_amd64.deb mita-root
 printf '%s  %s\n' 4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31 mita-root/usr/bin/mita | sha256sum -c -
 ```
 
-The v3.35.0 Debian executables are statically linked. Create non-login user and group `mieru-manager`, add that user to group `mita`, and add the panel service user to group `mieru-manager`. Install `deploy/mieru-manager.service`. Put a random 32+ byte token in `/etc/mieru-manager/token` mode 0600 and configure:
+The v3.35.0 Debian executables are statically linked. Reserve numeric UID/GID `10005:10005` for the non-login `mieru-manager` identity (fail closed if either number belongs to another principal), add that user to the distinct `mita` socket group, and add the panel service user only to group `10005`. Install `deploy/mieru-manager.service`. Put a random 32–512 character ASCII token in `/etc/mieru-manager/token`, then run `sudo ./scripts/prepare-mieru-token.sh prepare /etc/mieru-manager/token`; the resulting metadata is exactly `root:10005` mode `0440`.
 
 ```text
 MIERU_PUBLIC_HOST=mieru.example.com
@@ -33,23 +33,27 @@ MIERU_MITA_SHA256=4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb
 
 The helper verifies the pinned executable SHA-256 before every invocation and accepts only mita 3.35.x at bootstrap. It invokes only fixed `/usr/bin/mita` argv commands with in-memory bounded stdout/stderr. Each invocation runs in a new process group; timeout, output-limit, exceptional, and successful completion paths kill remaining same-group descendants before returning. A malicious child can escape that boundary by double-forking and calling `setsid()`, so this containment is not a sandbox and depends on the executable remaining pinned and trusted. Complete secret-bearing JSON is inherited through an anonymous FD and never a named tempfile, command line, log, audit, or HTTP list response. Keep `/var/run/mita/mita.sock` mode 0770; do not enable `MITA_INSECURE_UDS`.
 
-For Compose, combine `compose.yaml` and `compose.mieru.yaml`. Set `MIERU_MITA_BIN` to the extracted, executable-digest-verified host binary, `MIERU_MITA_SHA256` to that executable digest, and `MIERU_MITA_GID` to the numeric GID that can connect to `/var/run/mita/mita.sock`. The binary and mita runtime directory are mounted read-only; only manager state and its API runtime directory are writable. The manager health check uses the authenticated Unix API, and the panel waits for it to become healthy.
+For Compose, combine `compose.yaml` and `compose.mieru.yaml`. Set `MIERU_MITA_BIN` to the extracted, executable-digest-verified host binary, `MIERU_MITA_SHA256` to that executable digest, and `MIERU_MITA_GID` to the numeric GID that can connect to `/var/run/mita/mita.sock`. That dynamically supplied socket GID must be a distinct nonzero group and must not reuse reserved panel/manager/Caddy/accounting identities `10001` through `10005`; the mandatory state preflight rejects those values. The binary and mita runtime directory are mounted read-only; only manager state and its API runtime directory are writable. The manager health check uses the authenticated Unix API, and the panel waits for it to become healthy.
 
 ### Mandatory Compose state provisioning
 
-The container deliberately runs as fixed numeric UID/GID `10003:10003`. Docker creates a missing bind source as host `root:root`, which is not writable by that identity. A host account named `mieru-manager` may have a dynamically allocated UID/GID; its name does not change the container's numeric identity and does not satisfy this contract. Do not share a state directory with a host-systemd manager that uses a different identity.
+The container deliberately runs as fixed numeric UID/GID `10005:10005`. Docker creates a missing bind source as host `root:root`, which is not writable by that identity. A host account named `mieru-manager` may have a dynamically allocated UID/GID; its name does not change the container's numeric identity and does not satisfy this contract. Do not share a state directory with a host-systemd manager that uses a different identity.
 
-Before the first `docker compose up`, choose an absolute normalized path and check whether `10003` collides with an unrelated host principal. No output from these `getent` commands means no host-account collision; any output must identify an intentionally trusted `mieru-manager` principal, otherwise stop and resolve the fixed-ID collision before granting access:
+Before the first `docker compose up`, choose an absolute normalized path and check whether `10005` collides with an unrelated host principal. No output from these `getent` commands means no host-account collision; any output must identify an intentionally trusted `mieru-manager` principal, otherwise stop and resolve the fixed-ID collision before granting access:
 
 ```sh
 export MIERU_MANAGER_STATE_DIR=/var/lib/mieru-manager
-getent passwd 10003 || true
-getent group 10003 || true
+export MIERU_MITA_GID="$(stat -c %g /var/run/mita/mita.sock)"
+getent passwd 10005 || true
+getent group 10005 || true
+sudo ./scripts/prepare-mieru-token.sh prepare "$(pwd)/secrets/mieru-manager-token"
 sudo ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
 docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
 ```
 
-The `prepare` command is mandatory and must run as root. It refuses `/`, relative or non-normalized paths, symlinked path components, non-directories, and non-empty directories. It creates or repairs only an empty state directory, setting exactly numeric owner `10003:10003` and mode `0700`; it never starts a root container or recursively changes restored data. `MIERU_MANAGER_STATE_DIR` defaults to `/var/lib/mieru-manager` in both the script and Compose.
+Both `prepare` commands are mandatory and must run as root before `docker compose up`. The token preparer requires an explicit absolute normalized path to an existing root-owned regular non-symlink file, checks every path component, validates a content-blind size bound of 32–513 bytes (32–512 ASCII characters with an optional final newline), and changes only that file's group/mode to `root:10005`/`0440`; it never reads or prints token content. Compose preserves this source metadata, allowing manager GID `10005` to read the secret while keeping it unreadable to unrelated identities. The panel root entrypoint copies that source to `/run/panel/mieru-manager-token` as `panel:panel` mode `0400` before dropping permanently to UID `10001`, GID `101`, and only supplementary GID `10005`.
+
+The state preparer refuses `/`, relative or non-normalized paths, symlinked path components, non-directories, and non-empty directories. It creates or repairs only an empty state directory, setting exactly numeric owner `10005:10005` and mode `0700`; it never starts a root container or recursively changes restored data. `MIERU_MANAGER_STATE_DIR` defaults to `/var/lib/mieru-manager` in both the script and Compose. UID `10003` remains exclusively the documented Naive Caddy identity and therefore cannot traverse or read/write Mieru state.
 
 ### Restore contract
 
@@ -60,10 +64,11 @@ export MIERU_MANAGER_STATE_DIR=/var/lib/mieru-manager
 docker compose -f compose.yaml -f compose.mieru.yaml stop panel mieru-manager
 # Restore trusted backup media here, preserving numeric ownership and modes.
 sudo ./scripts/prepare-mieru-state.sh verify "$MIERU_MANAGER_STATE_DIR"
+sudo ./scripts/prepare-mieru-token.sh verify "$(pwd)/secrets/mieru-manager-token"
 docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
 ```
 
-The restored directory must be `10003:10003` mode `0700`. Top-level `state.json`, `writer.lock`, `journal.json`, and `journal.key`, when present, must be regular non-symlink files owned by `10003:10003` with mode `0600`; `journal.key` must be exactly 32 bytes. `backups/` must be a real directory owned by `10003:10003` with mode `0700`, and each direct backup file must be regular, non-symlink, `10003:10003`, and mode `0600`. The verifier checks metadata and key size only: it does not read or print key, journal, state, or backup contents, and it does not chown or chmod restored files.
+The restored directory must be `10005:10005` mode `0700`. Top-level `state.json`, `writer.lock`, `journal.json`, and `journal.key`, when present, must be regular non-symlink files owned by `10005:10005` with mode `0600`; `journal.key` must be exactly 32 bytes. `backups/` must be a real directory owned by `10005:10005` with mode `0700`, and each direct backup file must be regular, non-symlink, `10005:10005`, and mode `0600`. The verifier checks metadata and key size only: it does not read or print key, journal, state, or backup contents, and it does not chown or chmod restored files.
 
 An active `journal.json` and its original `journal.key` are one recovery unit. Always co-restore them. Never delete or regenerate `journal.key` to make a restored journal start: the manager must authenticate that journal before recovery and intentionally fails closed when the key is absent or changed. If `prepare` reports that a directory is non-empty, use `verify` after restoring correct metadata; do not use a recursive `chown` as a substitute for reviewing the restored recovery set.
 

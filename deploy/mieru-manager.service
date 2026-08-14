@@ -5,8 +5,8 @@ Requires=mita.service
 
 [Service]
 Type=simple
-User=mieru-manager
-Group=mieru-manager
+User=10005
+Group=10005
 SupplementaryGroups=mita
 EnvironmentFile=/etc/mieru-manager/manager.env
 ExecStart=/opt/proxy-control/venv/bin/python -m mieru_manager

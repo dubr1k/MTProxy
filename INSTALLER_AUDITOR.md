@@ -65,10 +65,10 @@ python3 -m pytest -q panel/tests tests/test_naive_manager.py \
 python3 -m unittest -v tests/test_deploy.py
 ruff check .
 bash -n install.sh uninstall.sh install_mtproxy.sh uninstall_mtproxy.sh \
-  scripts/check-deployment.sh scripts/prepare-mieru-state.sh \
+  scripts/check-deployment.sh scripts/prepare-mieru-state.sh scripts/prepare-mieru-token.sh \
   docker/telemt-entrypoint.sh panel/entrypoint.sh
 shellcheck install.sh uninstall.sh install_mtproxy.sh uninstall_mtproxy.sh \
-  scripts/check-deployment.sh scripts/prepare-mieru-state.sh \
+  scripts/check-deployment.sh scripts/prepare-mieru-state.sh scripts/prepare-mieru-token.sh \
   docker/telemt-entrypoint.sh panel/entrypoint.sh
 docker compose config -q
 git diff --check

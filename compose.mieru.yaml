@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: mieru_manager/Dockerfile
     restart: unless-stopped
-    user: "10003:10003"
+    user: "10005:10005"
     group_add:
       - ${MIERU_MITA_GID:?set the host mita socket group GID}
     environment:
@@ -38,12 +38,12 @@ services:
       mieru-manager:
         condition: service_healthy
     group_add:
-      - "10003"
+      - "10005"
     environment:
       MIERU_ENABLED: "true"
-      MIERU_MANAGER_TOKEN_FILE: /run/secrets/mieru-manager-token
+      MIERU_MANAGER_TOKEN_SOURCE: /run/secrets/mieru-manager-token
       MIERU_MANAGER_SOCKET: /run/mieru-manager/manager.sock
-      PANEL_SUPPLEMENTARY_GROUPS: "10003"
+      PANEL_SUPPLEMENTARY_GROUPS: "10005"
     secrets: [mieru-manager-token]
     volumes:
       - mieru-manager-run:/run/mieru-manager:ro
@@ -56,4 +56,4 @@ volumes:
     driver_opts:
       type: tmpfs
       device: tmpfs
-      o: uid=10003,gid=10003,mode=0770
+      o: uid=10005,gid=10005,mode=0770

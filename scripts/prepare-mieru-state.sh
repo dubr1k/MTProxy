@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-readonly MIERU_UID=10003
-readonly MIERU_GID=10003
+readonly MIERU_UID=10005
+readonly MIERU_GID=10005
 readonly MIERU_MODE=0700
 
 fail() {
@@ -16,7 +16,7 @@ verify_regular_file() {
     expected_size=${3:-}
     [ ! -L "$file" ] || fail "$description must not be a symlink: $file"
     [ -f "$file" ] || fail "$description must be a regular file: $file"
-    [ "$(stat -c '%u:%g' -- "$file")" = "$MIERU_UID:$MIERU_GID" ] || fail "$description must have owner 10003:10003: $file"
+    [ "$(stat -c '%u:%g' -- "$file")" = "$MIERU_UID:$MIERU_GID" ] || fail "$description must have owner 10005:10005: $file"
     [ "$(stat -c '%a' -- "$file")" = "600" ] || fail "$description must have mode 0600: $file"
     if [ -n "$expected_size" ]; then
         [ "$(stat -c '%s' -- "$file")" = "$expected_size" ] || fail "$description must be exactly $expected_size bytes: $file"
@@ -24,6 +24,11 @@ verify_regular_file() {
 }
 
 [ "$(id -u)" -eq 0 ] || fail "must run as root"
+case ${MIERU_MITA_GID-} in
+    "") ;;
+    *[!0-9]*) fail "MIERU_MITA_GID must be a decimal numeric GID" ;;
+    0|10001|10002|10003|10004|10005) fail "MIERU_MITA_GID must not reuse root or reserved service identities 10001..10005" ;;
+esac
 [ "$#" -le 2 ] || fail "usage: $0 prepare|verify [absolute-state-directory]"
 mode=${1:-}
 case "$mode" in
@@ -65,7 +70,7 @@ if [ "$mode" = "prepare" ]; then
     chmod "$MIERU_MODE" -- "$state_dir"
     printf 'Prepared Mieru manager state directory: %s\n' "$state_dir"
 else
-    [ "$(stat -c '%u:%g' -- "$state_dir")" = "$MIERU_UID:$MIERU_GID" ] || fail "state directory must have owner 10003:10003; restore ownership explicitly, then retry verify"
+    [ "$(stat -c '%u:%g' -- "$state_dir")" = "$MIERU_UID:$MIERU_GID" ] || fail "state directory must have owner 10005:10005; restore ownership explicitly, then retry verify"
     [ "$(stat -c '%a' -- "$state_dir")" = "700" ] || fail "state directory must have mode 0700; restore its mode explicitly, then retry verify"
 
     for name in state.json writer.lock; do
@@ -92,7 +97,7 @@ else
         if [ -L "$backup_dir" ] || [ ! -d "$backup_dir" ]; then
             fail "backups must be a real directory, not a symlink"
         fi
-        [ "$(stat -c '%u:%g' -- "$backup_dir")" = "$MIERU_UID:$MIERU_GID" ] || fail "backups directory must have owner 10003:10003"
+        [ "$(stat -c '%u:%g' -- "$backup_dir")" = "$MIERU_UID:$MIERU_GID" ] || fail "backups directory must have owner 10005:10005"
         [ "$(stat -c '%a' -- "$backup_dir")" = "700" ] || fail "backups directory must have mode 0700"
         for backup in "$backup_dir"/* "$backup_dir"/.[!.]* "$backup_dir"/..?*; do
             if [ -e "$backup" ] || [ -L "$backup" ]; then
