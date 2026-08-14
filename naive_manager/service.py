@@ -184,19 +184,21 @@ class NaiveCredentialManager:
         self._clear_transaction()
         self._prune_backups()
 
-    @synchronized
     def health(self) -> dict:
         try:
-            if self._recovery_failed or self._transaction_file.exists():
-                raise ManagerRecoveryError("transaction recovery required")
-            state = self._read_state()
-            self._assert_consistent(state)
-            self.probe()
-            if self.traffic is not None:
-                self.traffic.collect()
-                if self.traffic.health().get("ready") is not True:
-                    raise ManagerConflict("traffic accounting is unavailable")
-            return {"ready": True, "host": self.public_host}
+            traffic = self.traffic
+            operation = traffic.operation() if traffic is not None else self._lock
+            with operation, self._lock:
+                if self._recovery_failed or self._transaction_file.exists():
+                    raise ManagerRecoveryError("transaction recovery required")
+                state = self._read_state()
+                self._assert_consistent(state)
+                self.probe()
+                if traffic is not None:
+                    traffic.collect()
+                    if traffic.health().get("ready") is not True:
+                        raise ManagerConflict("traffic accounting is unavailable")
+                return {"ready": True, "host": self.public_host}
         except Exception:
             return {"ready": False, "host": self.public_host}
 
@@ -208,17 +210,26 @@ class NaiveCredentialManager:
     def traffic_report(self) -> dict:
         if self.traffic is None:
             raise ManagerConflict("traffic accounting is unavailable")
-        self.traffic.collect()
-        return self.traffic.list_traffic()
+        try:
+            self.traffic.collect()
+            return self.traffic.list_traffic()
+        except RuntimeError as exc:
+            raise ManagerConflict("traffic accounting is degraded") from exc
 
     def reset_traffic(self, username: str) -> dict:
-        with self._lock:
-            self._find(self._read_state(), username)
-        if self.traffic is None:
+        traffic = self.traffic
+        if traffic is None:
             raise ManagerConflict("traffic accounting is unavailable")
-        if not self.traffic.drain():
-            raise ManagerConflict("traffic backlog remains pending")
-        return self.traffic.reset(username)
+        with traffic.operation(), self._lock:
+            self._find(self._read_state(), username)
+            try:
+                if not traffic.drain():
+                    raise ManagerConflict("traffic backlog remains pending")
+                return traffic.reset(username)
+            except ManagerConflict:
+                raise
+            except RuntimeError as exc:
+                raise ManagerConflict("traffic accounting is degraded") from exc
 
     @synchronized
     def managed_usernames(self) -> set[str]:
@@ -273,18 +284,24 @@ class NaiveCredentialManager:
         self._apply(state)
         return {"username": username, "enabled": bool(enabled)}
 
-    @synchronized
     def delete(self, username: str) -> None:
-        state = self._read_state()
-        self._find(state, username)
-        if self.traffic is None:
+        traffic = self.traffic
+        if traffic is None:
             raise ManagerConflict("traffic accounting is unavailable")
-        if not self.traffic.drain():
-            raise ManagerConflict("traffic backlog remains pending")
-        state["users"] = [row for row in state["users"] if row["username"] != username]
-        state["tombstones"].append({"username": username, "deleted_at": _now()})
-        self._apply(state)
-        self.traffic.archive_user(username)
+        with traffic.operation(), self._lock:
+            state = self._read_state()
+            self._find(state, username)
+            try:
+                if not traffic.drain():
+                    raise ManagerConflict("traffic backlog remains pending")
+            except ManagerConflict:
+                raise
+            except RuntimeError as exc:
+                raise ManagerConflict("traffic accounting is degraded") from exc
+            state["users"] = [row for row in state["users"] if row["username"] != username]
+            state["tombstones"].append({"username": username, "deleted_at": _now()})
+            self._apply(state)
+            traffic.archive_user(username)
 
     def _archive_tombstones(self, state: dict) -> None:
         if self.traffic is None:

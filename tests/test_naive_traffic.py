@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -97,12 +98,39 @@ def test_rename_rotation_is_processed_once(tmp_path):
     traffic, log = collector(tmp_path)
     log.write_text(record(upload=1, download=2))
     assert traffic.collect() == 1
-    rotated = log.with_name("access.json.1")
+    rotated = log.with_name("access-2026-08-14T15-00-00.000-size.json")
     os.rename(log, rotated)
     log.write_text(record(upload=3, download=4))
     assert traffic.collect() == 1
     assert traffic.collect() == 0
     assert traffic.list_traffic()["aggregate"]["total_bytes"] == 10
+
+
+def test_timberjack_rotation_names_are_processed_oldest_first_and_unrelated_files_ignored(tmp_path):
+    """Catch matching access.json.* instead of Caddy 2.11 timberjack backup names."""
+    traffic, log = collector(tmp_path)
+    older = log.with_name("access-2026-08-14T15-00-00.000-size.json")
+    newer = log.with_name("access-2026-08-14T15-00-01.123-rotate.json")
+    older.write_text(record(upload=1, download=2))
+    newer.write_text(record(upload=3, download=4))
+    log.write_text(record(upload=5, download=6))
+    log.with_name("access.json.1").write_text(record(upload=100, download=100))
+    log.with_name("access-2026-08-14T15-00-01.12-size.json").write_text(record(upload=100, download=100))
+    log.with_name("other-2026-08-14T15-00-01.123-size.json").write_text(record(upload=100, download=100))
+
+    assert traffic.collect() == 3
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 21
+
+
+def test_matching_timberjack_rotation_symlink_fails_closed(tmp_path):
+    """Catch candidate enumeration following a matching attacker-controlled symlink."""
+    traffic, log = collector(tmp_path)
+    target = tmp_path / "outside.json"
+    target.write_text(record(upload=10, download=20))
+    log.with_name("access-2026-08-14T15-00-00.000-size.json").symlink_to(target)
+
+    with pytest.raises(RuntimeError, match="unavailable or unsafe"):
+        traffic.collect()
 
 
 def test_same_size_same_tail_copytruncate_fails_closed(tmp_path):
@@ -128,6 +156,42 @@ def test_same_size_same_tail_copytruncate_fails_closed(tmp_path):
     assert traffic.list_traffic()["aggregate"]["total_bytes"] == 3
 
 
+def test_same_inode_middle_rewrite_with_identical_sampled_ends_fails_closed(tmp_path):
+    """Catch first/last sampling accepting a rewrite wholly inside the consumed prefix."""
+    traffic, log = collector(tmp_path)
+    first = record(upload=1, download=2, padding="a" * 5000 + "X" * 100 + "z" * 5000)
+    replacement = record(upload=1, download=2, padding="a" * 5000 + "Y" * 100 + "z" * 5000)
+    assert len(first) == len(replacement) > 8192
+    assert first[:4096] == replacement[:4096]
+    assert first[-4096:] == replacement[-4096:]
+    log.write_text(first)
+    assert traffic.collect() == 1
+
+    log.write_text(replacement)
+
+    with pytest.raises(RuntimeError, match="rename-only"):
+        traffic.collect()
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 3
+
+
+def test_consumed_prefix_larger_than_request_budget_fails_closed(tmp_path):
+    """Catch silently sampling an old prefix that cannot be verified within bounded work."""
+    log = tmp_path / "logs" / "access.json"
+    log.parent.mkdir()
+    log.write_text(record(padding="x" * 300))
+    traffic = TrafficCollector(
+        log, tmp_path / "traffic.sqlite3", lambda: {"alice"},
+        max_line_bytes=512, max_read_bytes=600, max_verify_bytes=300,
+    )
+    assert traffic.collect() == 1
+    with log.open("a") as stream:
+        stream.write(record(upload=1, download=2, padding="y" * 300))
+
+    with pytest.raises(RuntimeError, match="verification budget"):
+        traffic.collect()
+    assert traffic.health()["ready"] is False
+
+
 def test_strict_filtering_rejects_unknown_sentinels_bad_schema_and_oversize(tmp_path):
     traffic, log = collector(tmp_path)
     invalid = [
@@ -147,6 +211,16 @@ def test_strict_filtering_rejects_unknown_sentinels_bad_schema_and_oversize(tmp_
         "upload_bytes_decimal": "2", "download_bytes_decimal": "3",
         "total_bytes_decimal": "5",
     }
+
+
+def test_managed_invaliduser_counts_while_exact_redaction_sentinel_is_rejected(tmp_path):
+    """Catch broad startswith('invalid') filtering valid manager usernames."""
+    traffic, log = collector(tmp_path, users=lambda: {"invaliduser", "invalid"})
+    log.write_text(record(user="invaliduser", upload=5, download=7) + record(user="invalid"))
+
+    assert traffic.collect() == 1
+    assert traffic.list_traffic()["users"][0]["username"] == "invaliduser"
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 12
 
 
 def test_reset_changes_only_local_baseline_and_is_transactional(tmp_path):
@@ -262,7 +336,9 @@ def test_rotation_candidates_are_bounded_before_collection(tmp_path):
     log.parent.mkdir()
     log.write_text("")
     for index in range(3):
-        log.with_name(f"access.json.{index}").write_text(record(upload=1, download=1))
+        log.with_name(f"access-2026-08-14T15-00-0{index}.000-size.json").write_text(
+            record(upload=1, download=1)
+        )
     traffic = TrafficCollector(
         log, tmp_path / "traffic.sqlite3", lambda: {"alice"}, max_rotations=2,
     )
@@ -275,7 +351,7 @@ def test_safely_consumed_deleted_rotation_state_is_pruned(tmp_path):
     traffic, log = collector(tmp_path)
     log.write_text(record(upload=1, download=2))
     traffic.collect()
-    rotated = log.with_name("access.json.1")
+    rotated = log.with_name("access-2026-08-14T15-00-00.000-size.json")
     os.rename(log, rotated)
     log.write_text(record(upload=3, download=4))
     traffic.collect()
@@ -285,6 +361,28 @@ def test_safely_consumed_deleted_rotation_state_is_pruned(tmp_path):
 
     with sqlite3.connect(tmp_path / "traffic.sqlite3") as database:
         assert database.execute("SELECT COUNT(*) FROM traffic_files").fetchone()[0] == 1
+
+
+def test_deleted_partially_consumed_rotation_is_tombstoned_as_persistent_accounting_loss(tmp_path):
+    """Catch retaining an absent partial inode forever while reporting accounting as healthy."""
+    traffic, log = collector(tmp_path)
+    rotated = log.with_name("access-2026-08-14T15-00-00.000-size.json")
+    rotated.write_text(record(upload=1, download=2) + record(upload=3, download=4).rstrip("\n"))
+    assert traffic.collect() == 1
+    rotated.unlink()
+
+    with pytest.raises(RuntimeError, match="accounting loss"):
+        traffic.collect()
+
+    assert traffic.health()["ready"] is False
+    for operation in (traffic.list_traffic, lambda: traffic.reset("alice"), lambda: traffic.archive_user("alice")):
+        with pytest.raises(RuntimeError, match="accounting loss"):
+            operation()
+    with sqlite3.connect(tmp_path / "traffic.sqlite3") as database:
+        assert database.execute("SELECT COUNT(*) FROM traffic_files").fetchone()[0] == 1
+        assert database.execute("SELECT error FROM accounting_state WHERE singleton=1").fetchone() == (
+            "accounting_loss",
+        )
 
 
 def test_archiving_deleted_user_removes_live_counter_without_losing_history(tmp_path):
@@ -322,3 +420,23 @@ def test_counter_contract_includes_exact_decimal_strings(tmp_path):
     assert body["users"][0]["upload_bytes_decimal"] == "9007199254740993"
     assert body["users"][0]["total_bytes_decimal"] == "9007199254740995"
     assert body["aggregate"]["total_bytes_decimal"] == "9007199254740995"
+
+
+def test_panel_naive_overview_sums_decimal_strings_exactly_above_javascript_safe_integer():
+    """Catch routing exact decimal accounting through JavaScript Number during aggregation."""
+    script = """
+const fs = require('fs'), vm = require('vm');
+const sandbox = {
+  document: {cookie: '', querySelector: () => null, querySelectorAll: () => []},
+  location: {protocol: 'https:'}, setTimeout: () => {}, console
+};
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync('panel/static/app.js', 'utf8'), sandbox);
+console.log(String(sandbox.sumNaiveTraffic([
+  {total_bytes_decimal: '9007199254740993'},
+  {total_bytes_decimal: '7'}
+])));
+"""
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    assert result.stdout.strip() == "9007199254741000"

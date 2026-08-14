@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import threading
@@ -1046,6 +1047,83 @@ def test_delete_refuses_pending_backlog_then_archives_and_tombstones_username(tm
     assert state["tombstones"] == [{"username": "old-user", "deleted_at": state["tombstones"][0]["deleted_at"]}]
     with pytest.raises(ManagerConflict, match="retired"):
         service.create("old-user")
+
+
+def test_delete_serializes_with_collector_that_already_captured_old_user_snapshot(tmp_path):
+    """Catch deletion archiving before a stale collector recreates the retired live counter."""
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    log = tmp_path / "access.json"
+    line = json.dumps({
+        "request": {"method": "CONNECT"}, "status": 200, "user_id": "old-user",
+        "bytes_read": 1, "size": 2,
+    }) + "\n"
+    log.write_text("")
+    snapshot_taken = threading.Event()
+    release_snapshot = threading.Event()
+    first_snapshot = True
+    snapshot_lock = threading.Lock()
+
+    def paused_snapshot():
+        nonlocal first_snapshot
+        users = service.managed_usernames()
+        with snapshot_lock:
+            pause = first_snapshot
+            first_snapshot = False
+        if pause:
+            snapshot_taken.set()
+            assert release_snapshot.wait(2)
+        return users
+
+    traffic = TrafficCollector(log, tmp_path / "traffic.sqlite3", paused_snapshot)
+    service.traffic = traffic
+    outcomes = {}
+    collecting = threading.Thread(target=lambda: outcomes.setdefault("collected", traffic.collect()))
+    deleting = threading.Thread(target=lambda: (service.delete("old-user"), outcomes.setdefault("deleted", True)))
+    collecting.start()
+    assert snapshot_taken.wait(1)
+    deleting.start()
+    deleting.join(1)
+    assert deleting.is_alive()
+    log.write_text(line)
+    release_snapshot.set()
+    collecting.join(2)
+    deleting.join(2)
+
+    assert not collecting.is_alive() and not deleting.is_alive()
+    assert outcomes == {"deleted": True, "collected": 1}
+    assert traffic.list_traffic()["users"] == []
+    with sqlite3.connect(tmp_path / "traffic.sqlite3") as database:
+        assert database.execute("SELECT COUNT(*) FROM traffic_counters").fetchone()[0] == 0
+        assert database.execute(
+            "SELECT username,upload_bytes,download_bytes FROM traffic_archives"
+        ).fetchall() == [("old-user", 1, 2)]
+
+
+def test_persistent_accounting_loss_surfaces_as_conflict_for_report_reset_and_delete(tmp_path):
+    """Catch degraded accounting escaping as an internal error or allowing lifecycle mutation."""
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    log = tmp_path / "access.json"
+    log.write_text("")
+    traffic = TrafficCollector(log, tmp_path / "traffic.sqlite3", service.managed_usernames)
+    service.traffic = traffic
+    rotated = tmp_path / "access-2026-08-14T15-00-00.000-size.json"
+    rotated.write_text(json.dumps({
+        "request": {"method": "CONNECT"}, "status": 200, "user_id": "old-user",
+        "bytes_read": 1, "size": 2,
+    }) + "\n" + "partial")
+    assert traffic.collect() == 1
+    rotated.unlink()
+    with pytest.raises(RuntimeError, match="accounting loss"):
+        traffic.collect()
+
+    for operation in (service.traffic_report, lambda: service.reset_traffic("old-user"), lambda: service.delete("old-user")):
+        with pytest.raises(ManagerConflict, match="accounting"):
+            operation()
+    assert any(row["username"] == "old-user" for row in service.list_users())
 
 
 def test_password_rotation_preserves_accounting_history(tmp_path):
