@@ -9,12 +9,27 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 MODULE = Path(__file__).parents[2] / "scripts" / "lab" / "qemu_lab.py"
 spec = importlib.util.spec_from_file_location("qemu_lab", MODULE)
 lab = importlib.util.module_from_spec(spec)
 assert spec.loader
 spec.loader.exec_module(lab)
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        assert seconds > 0
+        self.sleeps.append(seconds)
+        self.now += seconds
 
 
 class QemuLabTests(unittest.TestCase):
@@ -153,6 +168,78 @@ case_run repair must_not_run install
         for invalid in (None, "", "default"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 lab.user_data(invalid, "ssh-ed25519 test")
+
+    def test_ssh_command_bounds_connection_and_unresponsive_server(self):
+        with mock.patch.object(lab, "_state_port", return_value=22022):
+            command = lab.ssh_command("true")
+        self.assertIn("BatchMode=yes", command)
+        self.assertIn("ConnectTimeout=5", command)
+        self.assertIn("ServerAliveInterval=5", command)
+        self.assertIn("ServerAliveCountMax=1", command)
+
+    def test_readiness_retries_after_timed_out_probe_and_later_succeeds(self):
+        clock = FakeClock()
+        probe_timeouts = []
+
+        def probe(command, **kwargs):
+            probe_timeouts.append(kwargs["timeout"])
+            if len(probe_timeouts) == 1:
+                clock.now += kwargs["timeout"]
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return subprocess.CompletedProcess(command, 0)
+
+        with (
+            mock.patch.object(lab.subprocess, "run", side_effect=probe),
+            mock.patch.object(lab.time, "monotonic", side_effect=clock.monotonic),
+            mock.patch.object(lab.time, "sleep", side_effect=clock.sleep),
+            mock.patch.object(lab, "_state_port", return_value=22022),
+        ):
+            lab.wait_for_readiness(timeout=30)
+
+        self.assertEqual(probe_timeouts, [10, 10])
+        self.assertEqual(clock.sleeps, [5])
+
+    def test_readiness_hung_probes_cannot_exceed_overall_deadline(self):
+        clock = FakeClock()
+        probe_timeouts = []
+
+        def hung_probe(command, **kwargs):
+            probe_timeouts.append(kwargs["timeout"])
+            clock.now += kwargs["timeout"]
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        with (
+            mock.patch.object(lab.subprocess, "run", side_effect=hung_probe),
+            mock.patch.object(lab.time, "monotonic", side_effect=clock.monotonic),
+            mock.patch.object(lab.time, "sleep", side_effect=clock.sleep),
+            mock.patch.object(lab, "_state_port", return_value=22022),
+            self.assertRaisesRegex(TimeoutError, "last SSH readiness probe timed out"),
+        ):
+            lab.wait_for_readiness(timeout=17)
+
+        self.assertEqual(probe_timeouts, [10, 2])
+        self.assertEqual(clock.sleeps, [5])
+        self.assertEqual(clock.now, 17)
+
+    def test_readiness_failed_probes_sleep_without_busy_loop_until_deadline(self):
+        clock = FakeClock()
+        attempts = []
+
+        def failed_probe(command, **kwargs):
+            attempts.append(kwargs["timeout"])
+            return subprocess.CompletedProcess(command, 255)
+
+        with (
+            mock.patch.object(lab.subprocess, "run", side_effect=failed_probe),
+            mock.patch.object(lab.time, "monotonic", side_effect=clock.monotonic),
+            mock.patch.object(lab.time, "sleep", side_effect=clock.sleep),
+            mock.patch.object(lab, "_state_port", return_value=22022),
+            self.assertRaisesRegex(TimeoutError, "last SSH readiness probe exited 255"),
+        ):
+            lab.wait_for_readiness(timeout=11)
+
+        self.assertEqual(attempts, [10, 6, 1])
+        self.assertEqual(clock.sleeps, [5, 5, 1])
 
     def test_sanitize_removes_proxy_links_and_credentials(self):
         text = "password=hello telemt-api-token=abc tg://proxy?server=x&secret=ee123"

@@ -12,8 +12,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tarfile
-import tempfile
 import time
 from pathlib import Path
 
@@ -201,8 +199,47 @@ def _state_port() -> int:
 
 def ssh_command(remote: str, *, port: int | None = None) -> list[str]:
     return ["ssh", "-i", str(STATE / "ssh-key"), "-p", str(port or _state_port()),
-            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no",
+            "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+            "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=1",
+            "-o", "StrictHostKeyChecking=no",
             "-o", f"UserKnownHostsFile={STATE / 'known_hosts'}", "lab@127.0.0.1", remote]
+
+
+def wait_for_readiness(timeout: int | float, probe_timeout: int | float = 10) -> None:
+    deadline = time.monotonic() + timeout
+    last_returncode = None
+    last_probe_timed_out = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            attempt = subprocess.run(
+                ssh_command("test -f /var/lib/cloud/instance/lab-ready"),
+                capture_output=True,
+                text=True,
+                timeout=min(probe_timeout, remaining),
+            )
+        except subprocess.TimeoutExpired:
+            last_probe_timed_out = True
+            last_returncode = None
+        else:
+            last_probe_timed_out = False
+            last_returncode = attempt.returncode
+            if attempt.returncode == 0:
+                return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(5, remaining))
+
+    if last_probe_timed_out:
+        detail = "last SSH readiness probe timed out"
+    elif last_returncode is not None:
+        detail = f"last SSH readiness probe exited {last_returncode}"
+    else:
+        detail = "no SSH readiness probe was attempted"
+    raise TimeoutError(f"VM readiness timed out ({detail}); inspect {STATE / 'serial.log'}")
 
 
 def start(mode: str, timeout: int = 900) -> None:
@@ -234,13 +271,7 @@ def start(mode: str, timeout: int = 900) -> None:
                      pid_file, STATE / "serial.log", mode))
     mode_file.write_text(f"{mode}\n")
     unbooted.unlink(missing_ok=True)
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        attempt = subprocess.run(ssh_command("test -f /var/lib/cloud/instance/lab-ready"), capture_output=True, text=True)
-        if attempt.returncode == 0:
-            return
-        time.sleep(5)
-    raise TimeoutError(f"VM readiness timed out; inspect {STATE / 'serial.log'}")
+    wait_for_readiness(timeout)
 
 
 def stop() -> None:
@@ -360,12 +391,18 @@ def main(argv: list[str] | None = None) -> int:
     cleanup_parser.add_argument("--purge-cache", action="store_true")
     args = parser.parse_args(argv)
     try:
-        if args.command == "prepare": prepare()
-        elif args.command == "start": start(args.mode, args.timeout)
-        elif args.command == "stop": stop()
-        elif args.command == "reset": reset()
-        elif args.command == "run": run_scenarios(args.mode, args.output)
-        elif args.command == "cleanup": cleanup(args.purge_cache)
+        if args.command == "prepare":
+            prepare()
+        elif args.command == "start":
+            start(args.mode, args.timeout)
+        elif args.command == "stop":
+            stop()
+        elif args.command == "reset":
+            reset()
+        elif args.command == "run":
+            run_scenarios(args.mode, args.output)
+        elif args.command == "cleanup":
+            cleanup(args.purge_cache)
         return 0
     except (OSError, RuntimeError, subprocess.SubprocessError, TimeoutError, ValueError) as exc:
         print(f"LAB FAILED: {sanitize(str(exc))}", file=sys.stderr)
