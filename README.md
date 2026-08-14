@@ -86,7 +86,8 @@ getent passwd 10005 || true
 getent group 10005 || true
 sudo ./scripts/prepare-mieru-token.sh prepare "$MIERU_MANAGER_TOKEN_FILE"
 sudo ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
-export COMPOSE_FILE="${COMPOSE_FILE:-compose.yaml}:compose.mieru.yaml"
+# Если Naive уже активен, включите и compose.naive.yaml в эту полную строку.
+export COMPOSE_FILE=compose.yaml:compose.mieru.yaml
 docker compose config
 docker compose up -d --build
 ```
