@@ -1,5 +1,7 @@
 # Автоматическая установка на VPS
 
+> **Актуальный installer:** используйте полный двухдоменный workflow `audit/plan/install/repair/uninstall` из [INSTALLER_AUDITOR.md](INSTALLER_AUDITOR.md). Старые параметры `fresh`/`coexist` ниже сохранены только как архитектурная справка и больше не принимаются `install.sh`.
+
 Installer разворачивает следующую схему:
 
 ```text

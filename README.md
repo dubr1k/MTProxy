@@ -14,19 +14,19 @@
 
 ## Быстрая установка на VPS
 
-Полный installer поддерживает чистый сервер (`fresh`) и безопасное сосуществование с уже настроенным Nginx/Xray (`coexist`):
+Полный installer безопасно сосуществует с уже настроенным Nginx/Xray/3x-ui и управляет двумя доменами:
 
 ```bash
-git clone https://github.com/dubr1k/MTProxy.git
-cd MTProxy
 sudo ./install.sh \
-  --mode fresh \
-  --domain proxy.example.com \
-  --email admin@example.com \
-  --users phone,laptop,reserve
+  --proxy-domain tga.dubr1kkk.uk \
+  --panel-domain tga-panel.dubr1kkk.uk \
+  --email ops@example.com \
+  --route-file /etc/nginx/stream.d/routes.conf \
+  --users owner,phone \
+  --protocol-probe /usr/local/bin/mtproxy-respq-probe
 ```
 
-Если Nginx уже владеет TCP/443, используйте `--mode coexist --route-file /путь/к/stream-map.conf`. Подробности, rollback и удаление: **[INSTALL.ru.md](INSTALL.ru.md)** · [English](INSTALL.en.md).
+Он устанавливает недостающие пакеты, выпускает двухдоменный ACME-сертификат, разворачивает Telemt и панель, создаёт внутренний TLS-vhost панели, транзакционно меняет SNI-карту и выполняет обязательный `resPQ` hook. Firewall не меняется, секреты не печатаются. Полные режимы `audit/plan/install/repair/uninstall`, rollback и ограничения: **[INSTALLER_AUDITOR.md](INSTALLER_AUDITOR.md)**.
 
 ## Зачем заменён старый движок
 

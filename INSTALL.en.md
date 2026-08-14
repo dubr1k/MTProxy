@@ -1,5 +1,7 @@
 # Automated VPS installation
 
+> **Current installer:** use the complete two-domain `audit/plan/install/repair/uninstall` workflow in [INSTALLER_AUDITOR.md](INSTALLER_AUDITOR.md). The historical `fresh`/`coexist` options below are retained only as architecture background and are no longer accepted by `install.sh`.
+
 The installer deploys this topology:
 
 ```text

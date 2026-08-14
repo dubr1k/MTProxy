@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import ssl
@@ -843,6 +844,460 @@ def uninstall_installation(
         _uninstall_installation_unlocked(root=root, validate=validate, reload=reload)
 
 
+RUNTIME_STATE_PATH = "/var/lib/proxy-control/runtime.json"
+RUNTIME_CORE_PACKAGES = ("ca-certificates", "certbot", "curl", "openssl", "python3")
+
+
+@dataclass(frozen=True)
+class RuntimePlan:
+    """Complete, deterministic host-runtime installation contract."""
+
+    proxy_domain: str
+    panel_domain: str
+    email: str
+    route_file: str
+    source_dir: str
+    project_dir: str = "/opt/mtproxy-shared443"
+    users: tuple[str, ...] = ("default",)
+    proxy_backend_port: int = 8445
+    panel_app_port: int = 8787
+    panel_tls_port: int = 8443
+    protocol_probe: str = ""
+    schema: int = 1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "proxy_domain", validate_domain(self.proxy_domain))
+        object.__setattr__(self, "panel_domain", validate_domain(self.panel_domain))
+        if self.proxy_domain == self.panel_domain:
+            raise InstallerConflict("proxy and panel domains must differ")
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", self.email):
+            raise InstallerConflict("a valid ACME email is required")
+        for value, label in ((self.route_file, "route file"), (self.project_dir, "project directory")):
+            if not value.startswith("/") or ".." in Path(value).parts:
+                raise InstallerConflict(f"{label} must be a normalized absolute path")
+        if not self.protocol_probe.startswith("/"):
+            raise InstallerConflict("an absolute protocol verification hook is required")
+        if not self.users or len(set(self.users)) != len(self.users) or any(
+            not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) for name in self.users
+        ):
+            raise InstallerConflict("users must be unique safe names")
+        for port in (self.proxy_backend_port, self.panel_app_port, self.panel_tls_port):
+            if not 1024 <= port <= 65535:
+                raise InstallerConflict("runtime ports must be in 1024..65535")
+
+    def to_dict(self) -> dict:
+        return {
+            "schema": self.schema,
+            "proxy_domain": self.proxy_domain,
+            "panel_domain": self.panel_domain,
+            "email": self.email,
+            "route_file": self.route_file,
+            "source_dir": self.source_dir,
+            "project_dir": self.project_dir,
+            "users": list(self.users),
+            "proxy_backend_port": self.proxy_backend_port,
+            "panel_app_port": self.panel_app_port,
+            "panel_tls_port": self.panel_tls_port,
+            "protocol_probe": self.protocol_probe,
+            "actions": [
+                "install_missing_packages", "create_two_domain_acme_vhosts", "issue_certificate",
+                "render_compose_and_secrets", "bootstrap_panel_from_password_file",
+                "start_and_healthcheck_compose", "install_panel_tls_vhost",
+                "transactionally_install_sni_routes", "run_respq_protocol_hook",
+            ],
+        }
+
+
+class CommandRunner:
+    """Small injectable host-command boundary; suppresses all command output."""
+
+    def package_installed(self, name: str) -> bool:
+        return subprocess.run(
+            ["dpkg-query", "-W", "-f=${Status}", name],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False,
+        ).stdout == "install ok installed"
+
+    def command_available(self, name: str) -> bool:
+        return shutil.which(name) is not None
+
+    def compose_available(self) -> bool:
+        return subprocess.run(
+            ["docker", "compose", "version"], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, check=False,
+        ).returncode == 0
+
+    def run(self, argv, *, stdin_path: Path | None = None, env: dict[str, str] | None = None) -> None:
+        stdin = stdin_path.open("rb") if stdin_path else subprocess.DEVNULL
+        try:
+            subprocess.run(
+                [str(value) for value in argv], check=True, stdin=stdin,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+            )
+        finally:
+            if stdin_path:
+                stdin.close()
+
+
+class RuntimeInstaller:
+    """Transactional full-runtime manager, testable against a fake root and runner."""
+
+    def __init__(self, plan: RuntimePlan, *, root: Path = Path("/"), runner=None):
+        self.plan = plan
+        self.root = root
+        self.runner = runner or CommandRunner()
+        self.state_path = _root_path(root, RUNTIME_STATE_PATH)
+
+    def _run(self, *argv: str, stdin_path: Path | None = None) -> None:
+        self.runner.run(argv, stdin_path=stdin_path)
+
+    def _compose(self, *args: str) -> None:
+        self._run("docker", "compose", "--project-directory", self.plan.project_dir, *args)
+
+    def _managed_paths(self) -> list[str]:
+        return [
+            "/etc/nginx/sites-available/proxy-control-acme.conf",
+            "/etc/nginx/sites-available/proxy-control-panel.conf",
+            "/etc/nginx/sites-enabled/proxy-control-acme.conf",
+            "/etc/nginx/sites-enabled/proxy-control-panel.conf",
+        ]
+
+    @staticmethod
+    def _path_hash(path: Path) -> str:
+        if path.is_symlink():
+            return _sha256(("symlink:" + os.readlink(path)).encode())
+        return _sha256(path.read_bytes())
+
+    def _check_unowned_paths(self) -> None:
+        for host_path in self._managed_paths():
+            if _root_path(self.root, host_path).exists() or _root_path(self.root, host_path).is_symlink():
+                raise InstallerConflict(f"refusing to replace unowned Nginx file: {host_path}")
+
+    def _write_acme_site(self) -> None:
+        for domain in (self.plan.proxy_domain, self.plan.panel_domain):
+            _root_path(self.root, f"/var/www/{domain}/.well-known/acme-challenge").mkdir(parents=True)
+        acme = (
+            f"server {{ listen 80; server_name {self.plan.proxy_domain}; "
+            f"location ^~ /.well-known/acme-challenge/ {{ root /var/www/{self.plan.proxy_domain}; }} "
+            "location / { return 301 https://$host$request_uri; } }\n"
+            f"server {{ listen 80; server_name {self.plan.panel_domain}; "
+            f"location ^~ /.well-known/acme-challenge/ {{ root /var/www/{self.plan.panel_domain}; }} "
+            "location / { return 301 https://$host$request_uri; } }\n"
+        )
+        available = _root_path(self.root, "/etc/nginx/sites-available")
+        enabled = _root_path(self.root, "/etc/nginx/sites-enabled")
+        _atomic_write(available / "proxy-control-acme.conf", acme.encode(), mode=0o644)
+        os.symlink("../sites-available/proxy-control-acme.conf", enabled / "proxy-control-acme.conf")
+
+    def _write_panel_site(self) -> None:
+        panel = (
+            f"server {{ listen 127.0.0.1:{self.plan.panel_tls_port} ssl; "
+            f"server_name {self.plan.panel_domain}; "
+            f"ssl_certificate /etc/letsencrypt/live/{self.plan.proxy_domain}/fullchain.pem; "
+            f"ssl_certificate_key /etc/letsencrypt/live/{self.plan.proxy_domain}/privkey.pem; "
+            f"location / {{ proxy_pass http://127.0.0.1:{self.plan.panel_app_port}; "
+            "proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto https; "
+            "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }} }\n"
+        )
+        available = _root_path(self.root, "/etc/nginx/sites-available")
+        enabled = _root_path(self.root, "/etc/nginx/sites-enabled")
+        _atomic_write(available / "proxy-control-panel.conf", panel.encode(), mode=0o640)
+        os.symlink("../sites-available/proxy-control-panel.conf", enabled / "proxy-control-panel.conf")
+
+    def _render_project(self) -> bool:
+        project = _root_path(self.root, self.plan.project_dir)
+        marker = project / ".mtproxy-owned"
+        created = not project.exists()
+        if project.exists() and any(project.iterdir()):
+            raise InstallerConflict("pre-existing project requires explicit migration; refusing overwrite")
+        project.mkdir(parents=True, exist_ok=True)
+        if not marker.exists():
+            _atomic_write(marker, (uuid.uuid4().hex + "\n").encode(), mode=0o600)
+        source = Path(self.plan.source_dir)
+        if not source.is_dir():
+            raise InstallerConflict("installer source directory does not exist")
+        for name in ("compose.yaml", "uninstall.sh"):
+            shutil.copy2(source / name, project / name)
+        target_scripts = project / "scripts"
+        target_scripts.mkdir(exist_ok=True)
+        shutil.copy2(source / "scripts/proxyctl.py", target_scripts / "proxyctl.py")
+        for directory in ("docker", "panel"):
+            shutil.copytree(
+                source / directory, project / directory, dirs_exist_ok=True,
+                ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc", "*.sqlite3*"),
+            )
+        secret_dir = project / "secrets"
+        secret_dir.mkdir(mode=0o700, exist_ok=True)
+        users_file = secret_dir / "users.conf"
+        existing: dict[str, str] = {}
+        if users_file.is_file():
+            for line in users_file.read_text().splitlines():
+                if "=" in line:
+                    name, value = line.split("=", 1)
+                    if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) and re.fullmatch(r"[0-9a-f]{32}", value):
+                        existing[name] = value
+        _atomic_write(users_file, "".join(
+            f"{name}={existing.get(name, secrets.token_hex(16))}\n" for name in self.plan.users
+        ).encode(), mode=0o600)
+        token = secret_dir / "telemt-api-token"
+        if not token.exists():
+            _atomic_write(token, ("Bearer " + secrets.token_urlsafe(48) + "\n").encode(), mode=0o600)
+        password = secret_dir / "panel-bootstrap-password"
+        if not password.exists():
+            _atomic_write(password, (secrets.token_urlsafe(32) + "\n").encode(), mode=0o600)
+        env = (
+            f"MTPROXY_DOMAIN={self.plan.proxy_domain}\n"
+            f"MTPROXY_BACKEND_PORT={self.plan.proxy_backend_port}\n"
+            f"MTPROXY_COVER_ROOT=/var/www/{self.plan.proxy_domain}\n"
+            "MTPROXY_LETSENCRYPT_ROOT=/etc/letsencrypt\n"
+            f"PANEL_ALLOWED_HOSTS={self.plan.panel_domain}\n"
+        )
+        _atomic_write(project / ".env", env.encode(), mode=0o600)
+        cover = _root_path(self.root, f"/var/www/{self.plan.proxy_domain}/index.html")
+        if not cover.exists():
+            _atomic_write(cover, b"<!doctype html><title>Welcome</title><h1>Welcome</h1>\n", mode=0o644)
+        return created
+
+    def _remove_managed_files(self, state: dict, *, check_hashes: bool) -> None:
+        hashes = state.get("managed_hashes", {})
+        paths = [(host_path, _root_path(self.root, host_path)) for host_path in state.get("managed_files", [])]
+        if check_hashes:
+            for host_path, path in paths:
+                if (not path.exists() and not path.is_symlink()) or self._path_hash(path) != hashes.get(host_path):
+                    raise InstallerConflict(f"managed file has drifted: {host_path}")
+        for _host_path, path in reversed(paths):
+            if path.exists() or path.is_symlink():
+                path.unlink()
+
+    def _snapshot_managed_files(self, state: dict) -> dict[str, tuple]:
+        snapshots = {}
+        for host_path in state.get("managed_files", []):
+            path = _root_path(self.root, host_path)
+            if path.is_symlink():
+                snapshots[host_path] = ("symlink", os.readlink(path))
+            elif path.is_file():
+                snapshots[host_path] = ("file", path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+            else:
+                raise InstallerConflict(f"managed file is missing: {host_path}")
+        return snapshots
+
+    def _restore_managed_files(self, snapshots: dict[str, tuple]) -> None:
+        for host_path, snapshot in snapshots.items():
+            path = _root_path(self.root, host_path)
+            path.unlink(missing_ok=True)
+            if snapshot[0] == "symlink":
+                _ensure_parent(path)
+                os.symlink(snapshot[1], path)
+            else:
+                _atomic_write(path, snapshot[1], mode=snapshot[2])
+
+    def _validate_reload(self) -> None:
+        self._run("nginx", "-t")
+        self._run("systemctl", "reload", "nginx")
+
+    def _health_and_protocol(self) -> None:
+        self._compose("config", "-q")
+        self._compose("ps", "--status", "running")
+        self._run("curl", "-fsS", f"http://127.0.0.1:{self.plan.panel_app_port}/healthz")
+        self._run(
+            self.plan.protocol_probe, "--domain", self.plan.proxy_domain,
+            "--secrets-file", f"{self.plan.project_dir}/secrets/users.conf",
+        )
+
+    def install(self) -> Path:
+        with _operation_lock(self.root):
+            if self.state_path.exists():
+                self.repair(_locked=True)
+                return self.state_path
+            route_plan = InstallPlan(
+                self.plan.proxy_domain, self.plan.panel_domain, self.plan.route_file,
+                self.plan.proxy_backend_port, self.plan.panel_tls_port,
+            )
+            missing = {name for name in RUNTIME_CORE_PACKAGES if not self.runner.package_installed(name)}
+            command_available = getattr(self.runner, "command_available", None)
+            compose_available = getattr(self.runner, "compose_available", None)
+            if not (command_available("nginx") if command_available else self.runner.package_installed("nginx-full")):
+                missing.add("nginx-full")
+            if not (command_available("docker") if command_available else self.runner.package_installed("docker.io")):
+                missing.add("docker.io")
+            if not (compose_available() if compose_available else self.runner.package_installed("docker-compose-v2")):
+                missing.add("docker-compose-v2")
+            missing = sorted(missing)
+            state = {
+                "schema": 1, "status": "installing", "plan": self.plan.to_dict(),
+                "owned_packages": missing, "managed_files": self._managed_paths(),
+                "managed_hashes": {}, "project_created": False,
+            }
+            _write_state(self.state_path, state)
+            route_applied = False
+            try:
+                if missing:
+                    self._run("apt-get", "update")
+                    self._run("apt-get", "install", "-y", *missing)
+                self._run("systemctl", "enable", "--now", "docker", "nginx")
+                state["project_created"] = self._render_project()
+                _write_state(self.state_path, state)
+                self._check_unowned_paths()
+                self._write_acme_site()
+                self._validate_reload()
+                self._run(
+                    "certbot", "certonly", "--webroot",
+                    "-w", f"/var/www/{self.plan.proxy_domain}", "-d", self.plan.proxy_domain,
+                    "-w", f"/var/www/{self.plan.panel_domain}", "-d", self.plan.panel_domain,
+                    "--cert-name", self.plan.proxy_domain, "-m", self.plan.email,
+                    "--agree-tos", "--non-interactive",
+                )
+                self._write_panel_site()
+                state["managed_hashes"] = {
+                    path: self._path_hash(_root_path(self.root, path)) for path in state["managed_files"]
+                }
+                _write_state(self.state_path, state)
+                self._validate_reload()
+                self._compose("config", "-q")
+                self._compose("pull", "-q")
+                self._compose("up", "-d", "--wait")
+                password = _root_path(self.root, f"{self.plan.project_dir}/secrets/panel-bootstrap-password")
+                self._run(
+                    "docker", "compose", "--project-directory", self.plan.project_dir,
+                    "exec", "-T", "panel", "python", "-m", "panel.cli", "create-admin",
+                    "--username", "owner", "--role", "owner", "--password-stdin",
+                    stdin_path=password,
+                )
+                _apply_plan_unlocked(route_plan, root=self.root, validate=lambda: self._run("nginx", "-t"), reload=lambda: self._run("systemctl", "reload", "nginx"))
+                route_applied = True
+                self._health_and_protocol()
+                state["status"] = "active"
+                _write_state(self.state_path, state)
+                return self.state_path
+            except BaseException:
+                try:
+                    if route_applied:
+                        _uninstall_installation_unlocked(root=self.root, validate=lambda: self._run("nginx", "-t"), reload=lambda: self._run("systemctl", "reload", "nginx"))
+                    self._compose("down", "--remove-orphans", "--volumes")
+                    self._remove_managed_files(state, check_hashes=False)
+                    self._run("nginx", "-t")
+                    self._run("systemctl", "reload", "nginx")
+                    if state["project_created"]:
+                        shutil.rmtree(_root_path(self.root, self.plan.project_dir), ignore_errors=True)
+                    if missing:
+                        self._run("apt-get", "purge", "-y", *missing)
+                    self.state_path.unlink(missing_ok=True)
+                except BaseException as rollback_error:
+                    state["status"] = "rollback-failed"
+                    state["rollback_error"] = type(rollback_error).__name__
+                    _write_state(self.state_path, state)
+                raise
+
+    def repair(self, *, _locked: bool = False) -> None:
+        def operation() -> None:
+            if not self.state_path.exists():
+                return
+            state = json.loads(self.state_path.read_text())
+            if state.get("status") != "active" or state.get("plan") != self.plan.to_dict():
+                raise InstallerConflict("runtime transaction is incomplete or belongs to another plan")
+            for host_path, expected in state.get("managed_hashes", {}).items():
+                path = _root_path(self.root, host_path)
+                if (not path.exists() and not path.is_symlink()) or self._path_hash(path) != expected:
+                    raise InstallerConflict(f"managed file has drifted: {host_path}")
+            _repair_installation_unlocked(root=self.root, validate=lambda: self._run("nginx", "-t"), reload=lambda: self._run("systemctl", "reload", "nginx"))
+            self._compose("up", "-d", "--wait")
+            self._health_and_protocol()
+        if _locked:
+            operation()
+        else:
+            with _operation_lock(self.root):
+                operation()
+
+    def uninstall(self) -> None:
+        with _operation_lock(self.root):
+            if not self.state_path.exists():
+                return
+            state = json.loads(self.state_path.read_text())
+            if state.get("status") != "active" or state.get("plan") != self.plan.to_dict():
+                raise InstallerConflict("runtime manifest is not an active matching installation")
+            snapshots = self._snapshot_managed_files(state)
+            self._remove_managed_files(state, check_hashes=True)
+            try:
+                _uninstall_installation_unlocked(
+                    root=self.root,
+                    validate=lambda: self._run("nginx", "-t"),
+                    reload=lambda: self._run("systemctl", "reload", "nginx"),
+                )
+            except BaseException:
+                self._restore_managed_files(snapshots)
+                self._validate_reload()
+                raise
+            self._compose("down", "--remove-orphans", "--volumes")
+            project = _root_path(self.root, self.plan.project_dir)
+            if project.is_dir():
+                for child in list(project.iterdir()):
+                    if child.name != "secrets":
+                        shutil.rmtree(child) if child.is_dir() else child.unlink()
+            owned_packages = state.get("owned_packages", [])
+            if owned_packages:
+                self._run("apt-get", "purge", "-y", *owned_packages)
+            self.state_path.unlink()
+
+
+def _add_runtime_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--proxy-domain", required=True)
+    command.add_argument("--panel-domain", required=True)
+    command.add_argument("--email", required=True)
+    command.add_argument("--route-file", required=True)
+    command.add_argument("--project-dir", default="/opt/mtproxy-shared443")
+    command.add_argument("--users", default="default")
+    command.add_argument("--protocol-probe", required=True)
+    command.add_argument("--source-dir", default=str(Path(__file__).resolve().parents[1]))
+    command.add_argument("--json", action="store_true")
+
+
+def _runtime_plan_from_args(args) -> RuntimePlan:
+    return RuntimePlan(
+        proxy_domain=args.proxy_domain,
+        panel_domain=args.panel_domain,
+        email=args.email,
+        route_file=args.route_file,
+        source_dir=args.source_dir,
+        project_dir=args.project_dir,
+        users=tuple(part.strip() for part in args.users.split(",") if part.strip()),
+        protocol_probe=args.protocol_probe,
+    )
+
+
+def _runtime_plan_from_state(root: Path) -> RuntimePlan | None:
+    path = _root_path(root, RUNTIME_STATE_PATH)
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text())["plan"]
+        return RuntimePlan(**{key: raw[key] for key in (
+            "proxy_domain", "panel_domain", "email", "route_file", "source_dir", "project_dir",
+            "proxy_backend_port", "panel_app_port", "panel_tls_port", "protocol_probe",
+        )}, users=tuple(raw["users"]))
+    except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError) as exc:
+        raise InstallerConflict("runtime manifest plan is invalid") from exc
+
+
+def _validate_runtime_preflight(report: AuditReport, plan: RuntimePlan) -> None:
+    known = set(report.nginx.sni_routes) | set(report.nginx.http_domains)
+    collision = known & {plan.proxy_domain, plan.panel_domain}
+    if collision:
+        raise InstallerConflict(f"domain already routed: {sorted(collision)[0]}")
+    if not report.nginx.stream_enabled or report.nginx.sni_map_count != 1:
+        raise InstallerConflict("exactly one existing Nginx SNI map is required")
+    if report.nginx.sni_map_files.get(plan.route_file) != 1:
+        raise InstallerConflict("route file is not the single audited SNI map file")
+    for port in (plan.proxy_backend_port, plan.panel_app_port):
+        if port in report.listening_ports:
+            raise InstallerConflict(f"backend port {port} is already listening")
+    checks = {item.domain: item for item in report.domains}
+    for domain in (plan.proxy_domain, plan.panel_domain):
+        check = checks.get(domain)
+        if check is None or not check.dns_matches_host:
+            raise InstallerConflict(f"DNS does not resolve to this host: {domain}")
+        if check.unhandled_aaaa:
+            raise InstallerConflict(f"unhandled AAAA record: {domain}")
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="proxyctl", description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("/"), help=argparse.SUPPRESS)
@@ -851,14 +1306,16 @@ def _parser() -> argparse.ArgumentParser:
     audit.add_argument("--proxy-domain")
     audit.add_argument("--panel-domain")
     audit.add_argument("--json", action="store_true")
-    for name in ("plan", "apply"):
-        command = sub.add_parser(name, help=f"{name} a validated owned route transaction")
-        command.add_argument("--proxy-domain", required=True)
-        command.add_argument("--panel-domain", required=True)
-        command.add_argument("--route-file", required=True)
-        command.add_argument("--json", action="store_true")
-    sub.add_parser("repair", help="idempotently recover or validate owned state")
-    sub.add_parser("uninstall", help="transactionally remove only the owned route")
+    for name in ("plan", "install"):
+        command = sub.add_parser(name, help=f"{name} the complete MTProxy and panel runtime")
+        _add_runtime_arguments(command)
+    apply = sub.add_parser("apply", help="legacy route-only transaction")
+    apply.add_argument("--proxy-domain", required=True)
+    apply.add_argument("--panel-domain", required=True)
+    apply.add_argument("--route-file", required=True)
+    apply.add_argument("--json", action="store_true")
+    sub.add_parser("repair", help="validate and restart the complete owned runtime")
+    sub.add_parser("uninstall", help="remove the complete owned runtime, preserving credentials")
     return parser
 
 
@@ -866,8 +1323,13 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command in {"repair", "uninstall"}:
-            function = repair_installation if args.command == "repair" else uninstall_installation
-            function(root=args.root)
+            runtime_plan = _runtime_plan_from_state(args.root)
+            if runtime_plan is not None:
+                manager = RuntimeInstaller(runtime_plan, root=args.root)
+                (manager.repair if args.command == "repair" else manager.uninstall)()
+            else:
+                function = repair_installation if args.command == "repair" else uninstall_installation
+                function(root=args.root)
             return 0
         requested = {
             validate_domain(value)
@@ -878,15 +1340,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "audit":
             print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2, sort_keys=True) if args.json else report)
             return 0
+        if args.command in {"plan", "install"}:
+            runtime_plan = _runtime_plan_from_args(args)
+            existing_runtime = _runtime_plan_from_state(args.root)
+            if existing_runtime is not None:
+                if existing_runtime != runtime_plan:
+                    raise InstallerConflict("another runtime plan is already owned")
+                if args.command == "install":
+                    RuntimeInstaller(runtime_plan, root=args.root).install()
+                print(json.dumps(runtime_plan.to_dict(), indent=2, sort_keys=True) + "\n", end="")
+                return 0
+            _validate_runtime_preflight(report, runtime_plan)
+            if args.command == "install":
+                RuntimeInstaller(runtime_plan, root=args.root).install()
+            print(json.dumps(runtime_plan.to_dict(), indent=2, sort_keys=True) + "\n", end="")
+            return 0
         plan = InstallPlan.from_audit(
             report,
             proxy_domain=args.proxy_domain,
             panel_domain=args.panel_domain,
             route_file=args.route_file,
         )
-        if args.command == "apply":
-            apply_plan(plan, root=args.root)
-        print(plan.to_json(), end="" if args.json else "")
+        apply_plan(plan, root=args.root)
+        print(plan.to_json(), end="")
         return 0
     except (InstallerConflict, ValueError, OSError, subprocess.SubprocessError) as exc:
         print(f"BLOCKED: {exc}")

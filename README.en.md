@@ -16,19 +16,19 @@ This project provides a **Docker production path** based on the modern [Telemt](
 
 ## Quick VPS installation
 
-The installer supports both a clean server (`fresh`) and safe coexistence with an existing Nginx/Xray deployment (`coexist`):
+The complete installer safely coexists with an existing Nginx/Xray/3x-ui host and manages two domains:
 
 ```bash
-git clone https://github.com/dubr1k/MTProxy.git
-cd MTProxy
 sudo ./install.sh \
-  --mode fresh \
-  --domain proxy.example.com \
-  --email admin@example.com \
-  --users phone,laptop,reserve
+  --proxy-domain tga.dubr1kkk.uk \
+  --panel-domain tga-panel.dubr1kkk.uk \
+  --email ops@example.com \
+  --route-file /etc/nginx/stream.d/routes.conf \
+  --users owner,phone \
+  --protocol-probe /usr/local/bin/mtproxy-respq-probe
 ```
 
-When Nginx already owns TCP/443, use `--mode coexist --route-file /path/to/stream-map.conf`. Full instructions, rollback, and removal: **[INSTALL.en.md](INSTALL.en.md)** · [Русский](INSTALL.ru.md).
+It installs missing packages, issues a two-domain ACME certificate, deploys Telemt and the panel, creates the panel's internal TLS vhost, transactionally changes the SNI map, and runs a mandatory `resPQ` hook. It never changes the firewall or prints secrets. See **[INSTALLER_AUDITOR.md](INSTALLER_AUDITOR.md)** for `audit/plan/install/repair/uninstall`, rollback, and limitations.
 
 ## Why the runtime was replaced
 
@@ -75,7 +75,7 @@ Regular browser or active probe
 | `docker/links.py` | Generates Fake-TLS links locally without logging secrets |
 | `install.sh` / `uninstall.sh` | Idempotent VPS deployment and precise removal |
 | `scripts/mtproxy-deploy` | Tested file renderer and safe SNI-route editor |
-| `scripts/proxyctl.py` | Read-only audit, deterministic plan, and transactional owned-route manager ([guide](INSTALLER_AUDITOR.md)) |
+| `scripts/proxyctl.py` | Complete audit/plan/install/repair/uninstall runtime orchestrator ([guide](INSTALLER_AUDITOR.md)) |
 | `DOCKER_DEPLOYMENT.md` | Short operational notes |
 
 ## Requirements
