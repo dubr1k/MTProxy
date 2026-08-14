@@ -1,0 +1,53 @@
+services:
+  naive-manager:
+    build:
+      context: .
+      dockerfile: naive_manager/Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    user: "10002:101"
+    environment:
+      NAIVE_PUBLIC_HOST: ${NAIVE_PUBLIC_HOST:-chrbased.dubr1k-solutions.com}
+      NAIVE_MANAGER_TOKEN_FILE: /data/manager-token
+      NAIVE_SOCKET_MODE: "660"
+    volumes:
+      - ${NAIVE_DATA_DIR:-/var/lib/naive-manager}:/data
+      - naive-manager-run:/run/naive-manager
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-m", "naive_manager.healthcheck"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  panel:
+    depends_on:
+      naive-manager:
+        condition: service_healthy
+    environment:
+      NAIVE_ENABLED: "true"
+      NAIVE_MANAGER_TOKEN_SOURCE: /run/secrets/naive-manager-token
+      NAIVE_MANAGER_SOCKET: /run/naive-manager/manager.sock
+      NAIVE_PUBLIC_HOST: ${NAIVE_PUBLIC_HOST:-chrbased.dubr1k-solutions.com}
+    secrets:
+      - naive-manager-token
+    volumes:
+      - naive-manager-run:/run/naive-manager:ro
+
+secrets:
+  naive-manager-token:
+    file: ./secrets/naive-manager-token
+
+volumes:
+  naive-manager-run:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=10002,gid=101,mode=0770

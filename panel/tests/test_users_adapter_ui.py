@@ -52,6 +52,9 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert "function proxyLink" in js and "navigationGeneration" in js
     assert 'value="cancel" formnovalidate' in text
     assert 'id="create-user" type="button" disabled' in text
+    assert 'data-view="naive"' in text and 'id="naive-modal"' in text
+    assert 'id="naive-access-modal"' in text and 'id="copy-naive-url"' in text
+    assert "renderNaive" in js and "naiveAction" in js and "showNaiveAccess" in js
     assert "admin-form');if(!form.reportValidity()" in js
 
 
