@@ -60,8 +60,11 @@ docker compose -f compose.yaml -f compose.naive.yaml up -d --build
 Mieru требует отдельно полученный и проверенный по digest executable `mita` и обязательный state preflight:
 
 ```sh
+sudo install -d -o root -g root -m 0700 /etc/mieru-manager
+sudo sh -c 'umask 077; openssl rand -base64 48 > /etc/mieru-manager/token'
+export MIERU_MANAGER_TOKEN_FILE=/etc/mieru-manager/token
 sudo ./scripts/prepare-mieru-state.sh prepare "${MIERU_MANAGER_STATE_DIR:-/var/lib/mieru-manager}"
-sudo ./scripts/prepare-mieru-token.sh prepare "$PWD/secrets/mieru-manager-token"
+sudo ./scripts/prepare-mieru-token.sh prepare "$MIERU_MANAGER_TOKEN_FILE"
 docker compose -f compose.yaml -f compose.mieru.yaml config
 docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
 ```
