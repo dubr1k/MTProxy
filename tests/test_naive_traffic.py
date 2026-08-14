@@ -106,6 +106,56 @@ def test_rename_rotation_is_processed_once(tmp_path):
     assert traffic.list_traffic()["aggregate"]["total_bytes"] == 10
 
 
+def test_active_hardlink_alias_counts_once_and_does_not_consume_rotation_or_verify_budget(tmp_path):
+    log = tmp_path / "logs" / "access.json"
+    log.parent.mkdir()
+    line = record(upload=7, download=11)
+    log.write_text(line)
+    rotated = log.with_name("access-2026-08-14T15-00-00.000-size.json")
+    os.link(log, rotated)
+    traffic = TrafficCollector(
+        log,
+        tmp_path / "traffic.sqlite3",
+        lambda: {"alice"},
+        max_line_bytes=128,
+        max_read_bytes=256,
+        max_verify_bytes=len(line.encode()),
+        max_rotations=0,
+    )
+
+    assert traffic.collect() == 1
+    assert traffic.collect() == 0
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 18
+    with sqlite3.connect(tmp_path / "traffic.sqlite3") as database:
+        assert database.execute("SELECT path FROM traffic_files").fetchone() == (str(log),)
+
+
+def test_rotated_hardlink_aliases_use_oldest_stable_path_and_one_rotation_slot(tmp_path):
+    log = tmp_path / "logs" / "access.json"
+    log.parent.mkdir()
+    log.touch()
+    newer = log.with_name("access-2026-08-14T15-00-01.000-size.json")
+    older = log.with_name("access-2026-08-14T15-00-00.000-size.json")
+    newer.write_text(record(upload=2, download=3))
+    os.link(newer, older)
+    traffic = TrafficCollector(
+        log,
+        tmp_path / "traffic.sqlite3",
+        lambda: {"alice"},
+        max_line_bytes=128,
+        max_read_bytes=256,
+        max_rotations=1,
+    )
+
+    assert traffic.collect() == 1
+    assert traffic.collect() == 0
+    with sqlite3.connect(tmp_path / "traffic.sqlite3") as database:
+        path = database.execute(
+            "SELECT path FROM traffic_files WHERE inode=?", (older.stat().st_ino,),
+        ).fetchone()
+    assert path == (str(older),)
+
+
 @pytest.mark.parametrize("rotate_after_scan", [False, True])
 def test_rotation_at_prune_identity_rescan_boundary_is_not_replayed(
     tmp_path, monkeypatch, rotate_after_scan,
@@ -275,6 +325,36 @@ def test_prefix_verification_budget_is_shared_across_all_candidates(tmp_path, mo
         traffic.collect()
     assert verified == [98]
     assert traffic.list_traffic()["aggregate"]["total_bytes"] == 6
+
+
+def test_read_budget_exhaustion_still_verifies_later_tracked_prefixes(tmp_path):
+    log = tmp_path / "logs" / "access.json"
+    log.parent.mkdir()
+    tracked = record(upload=1, download=2, padding="A" * 100)
+    rewritten = record(upload=1, download=2, padding="B" * 100)
+    assert len(tracked) == len(rewritten)
+    log.write_text(tracked)
+    traffic = TrafficCollector(
+        log,
+        tmp_path / "traffic.sqlite3",
+        lambda: {"alice"},
+        max_line_bytes=299,
+        max_read_bytes=300,
+        max_verify_bytes=1024,
+    )
+    assert traffic.collect() == 1
+
+    log.write_text(rewritten)
+    rotated = log.with_name("access-2026-08-14T15-00-00.000-size.json")
+    first = record(upload=3, download=4).rstrip("\n")
+    rotated.write_text(first + " " * (299 - len(first.encode())) + "\n")
+    assert rotated.stat().st_size == 300
+
+    with pytest.raises(RuntimeError, match="rename-only"):
+        traffic.collect()
+
+    assert traffic.health()["ready"] is False
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 10
 
 
 def test_strict_filtering_rejects_unknown_sentinels_bad_schema_and_oversize(tmp_path):

@@ -16,6 +16,7 @@ from typing import Callable
 
 
 MAX_COUNTER = 2**63 - 1
+REDACTION_SENTINEL = "invalid"
 
 
 @dataclass(frozen=True)
@@ -222,7 +223,7 @@ class TrafficCollector:
         parent = self.log_path.parent
         rotation = self._rotation_matcher()
         try:
-            candidates = []
+            candidates: dict[tuple[int, int], _Candidate] = {}
             with os.scandir(parent) as entries:
                 for scanned, entry in enumerate(entries, 1):
                     if scanned > self.max_directory_entries:
@@ -233,20 +234,27 @@ class TrafficCollector:
                         os.close(fd)
                         if entry.inode() != info.st_ino:
                             raise RuntimeError("accounting log changed during discovery")
-                        candidates.append(_Candidate(
+                        candidate = _Candidate(
                             path=path,
                             identity=(info.st_dev, info.st_ino),
                             active=entry.name == self.log_path.name,
-                        ))
+                        )
+                        existing = candidates.get(candidate.identity)
+                        if (
+                            existing is None
+                            or candidate.active
+                            or (not existing.active and path.name < existing.path.name)
+                        ):
+                            candidates[candidate.identity] = candidate
                         if len(candidates) > self.max_rotations + 1:
                             raise RuntimeError("accounting log rotation limit exceeded")
         except OSError as exc:
             raise RuntimeError("accounting log directory unavailable") from exc
-        if not any(candidate.active for candidate in candidates):
+        if not any(candidate.active for candidate in candidates.values()):
             raise RuntimeError("active accounting log is missing")
         # Process oldest rotations first and the active inode last. Identity+offset
         # keeps this ordering replay-safe across restart and rename rotation.
-        return sorted(candidates, key=lambda value: (value.active, value.path.name))
+        return sorted(candidates.values(), key=lambda value: (value.active, value.path.name))
 
     def _rotation_matcher(self) -> re.Pattern[str]:
         suffix = self.log_path.suffix
@@ -262,21 +270,19 @@ class TrafficCollector:
         rotation = self._rotation_matcher()
         present = set()
         active_seen = False
-        candidates = 0
         try:
             with os.scandir(parent) as entries:
                 for scanned, entry in enumerate(entries, 1):
                     if scanned > self.max_directory_entries:
                         raise RuntimeError("accounting log directory entry limit exceeded")
                     if entry.name == self.log_path.name or rotation.fullmatch(entry.name):
-                        candidates += 1
-                        if candidates > self.max_rotations + 1:
-                            raise RuntimeError("accounting log rotation limit exceeded")
                         fd, info = self._open_regular(Path(entry.path))
                         os.close(fd)
                         if entry.inode() != info.st_ino:
                             raise RuntimeError("accounting log changed during discovery")
                         present.add((info.st_dev, info.st_ino))
+                        if len(present) > self.max_rotations + 1:
+                            raise RuntimeError("accounting log rotation limit exceeded")
                         active_seen = active_seen or entry.name == self.log_path.name
         except OSError as exc:
             raise RuntimeError("accounting log directory unavailable") from exc
@@ -301,8 +307,6 @@ class TrafficCollector:
                 verify_budget = self.max_verify_bytes
                 candidates = self._candidates()
                 for candidate in candidates:
-                    if budget <= 0:
-                        break
                     count, consumed, verified = self._collect_file(
                         candidate, users, budget, verify_budget,
                     )
@@ -341,7 +345,7 @@ class TrafficCollector:
             prefix = self._hash_prefix(fd, offset)
             if row and prefix.digest() != row[2]:
                 raise RuntimeError("accounting log violates rename-only rotation contract")
-            data = os.pread(fd, min(budget, available), offset)
+            data = b"" if budget <= 0 else os.pread(fd, min(budget, available), offset)
 
             cursor = 0
             processed_end = 0
@@ -480,7 +484,7 @@ class TrafficCollector:
             or value["status"] >= 300
             or not isinstance(username, str)
             or username not in users
-            or username == "invalid"
+            or username == REDACTION_SENTINEL
             or type(upload) is not int
             or type(download) is not int
             or not 0 <= upload <= MAX_COUNTER

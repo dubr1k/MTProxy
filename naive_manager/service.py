@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
 
-from .traffic import TrafficCollector
+from .traffic import REDACTION_SENTINEL, TrafficCollector
 
 
 BEGIN = "# BEGIN NAIVE-MANAGER USERS"
@@ -164,6 +164,12 @@ class NaiveCredentialManager:
             self._archive_tombstones(state)
             return
         text = self.caddyfile.read_text()
+        legacy_credentials = self._legacy_credentials(text)
+        try:
+            for username, _password in legacy_credentials:
+                self._valid_username(username)
+        except ValueError as exc:
+            raise ManagerConflict("reserved accounting username in imported credentials") from exc
         users = [
             {
                 "username": username,
@@ -172,7 +178,7 @@ class NaiveCredentialManager:
                 "created_at": _now(),
                 "updated_at": _now(),
             }
-            for username, password in self._legacy_credentials(text)
+            for username, password in legacy_credentials
         ]
         if not users:
             raise ManagerConflict("no NaiveProxy credentials found for initial import")
@@ -456,7 +462,14 @@ class NaiveCredentialManager:
         for row in state["users"]:
             if not isinstance(row, dict):
                 raise ManagerConflict("invalid user state")
-            self._valid_username(row.get("username", ""))
+            try:
+                self._valid_username(row.get("username", ""))
+            except ValueError as exc:
+                if row.get("username") == REDACTION_SENTINEL:
+                    raise ManagerConflict(
+                        "reserved accounting username in manager state"
+                    ) from exc
+                raise ManagerConflict("invalid user state") from exc
             if row["username"] in seen or not isinstance(row.get("password"), str) or not row["password"]:
                 raise ManagerConflict("invalid user state")
             seen.add(row["username"])
@@ -468,7 +481,14 @@ class NaiveCredentialManager:
                 or not isinstance(row.get("deleted_at"), str)
             ):
                 raise ManagerConflict("invalid tombstone state")
-            self._valid_username(row.get("username", ""))
+            try:
+                self._valid_username(row.get("username", ""))
+            except ValueError as exc:
+                if row.get("username") == REDACTION_SENTINEL:
+                    raise ManagerConflict(
+                        "reserved accounting username in manager state"
+                    ) from exc
+                raise ManagerConflict("invalid tombstone state") from exc
             if row["username"] in seen or row["username"] in retired:
                 raise ManagerConflict("invalid tombstone state")
             retired.add(row["username"])
@@ -652,6 +672,8 @@ class NaiveCredentialManager:
     def _valid_username(username: str) -> None:
         if not isinstance(username, str) or USERNAME.fullmatch(username) is None:
             raise ValueError("invalid username")
+        if username == REDACTION_SENTINEL:
+            raise ValueError("reserved username")
 
     @staticmethod
     def _encode_state(state: dict) -> bytes:

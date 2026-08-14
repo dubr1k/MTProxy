@@ -122,6 +122,38 @@ def test_bootstrap_imports_existing_credentials_without_changing_them(tmp_path):
     assert "old-password" not in accounting
 
 
+def test_create_rejects_exact_redaction_sentinel_without_mutation(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    config_before = service.caddyfile.read_bytes()
+    state_before = service.state_file.read_bytes()
+    backups_before = sorted(service.backup_dir.iterdir())
+
+    with pytest.raises(ValueError, match="reserved username"):
+        service.create("invalid")
+
+    assert service.caddyfile.read_bytes() == config_before
+    assert service.state_file.read_bytes() == state_before
+    assert sorted(service.backup_dir.iterdir()) == backups_before
+    assert service.create("invaliduser")["username"] == "invaliduser"
+
+
+def test_bootstrap_rejects_reserved_sentinel_import_before_mutation(tmp_path):
+    hooks = Hooks()
+    caddy = tmp_path / "Caddyfile"
+    caddy.write_text(CADDY.replace("basic_auth old-user old-password", "basic_auth invalid password"))
+    service = manager(tmp_path, hooks)
+    config_before = caddy.read_bytes()
+
+    with pytest.raises(ManagerConflict, match="reserved accounting username"):
+        service.bootstrap()
+
+    assert caddy.read_bytes() == config_before
+    assert not service.state_file.exists()
+    assert not service.backup_dir.exists()
+
+
 def test_bootstrap_rejects_preexisting_managed_markers(tmp_path):
     hooks = Hooks()
     caddy = tmp_path / "Caddyfile"
@@ -159,6 +191,36 @@ def test_bootstrap_rejects_caddyfile_reached_through_symlinked_parent(tmp_path):
 
     with pytest.raises(ManagerConflict, match="unsafe"):
         service.bootstrap()
+
+
+@pytest.mark.parametrize("accounting_present", [True, False])
+def test_bootstrap_fails_closed_on_reserved_sentinel_in_existing_state(
+    tmp_path, accounting_present,
+):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    state = json.loads(service.state_file.read_text())
+    state["users"][0]["username"] = "invalid"
+    service.state_file.write_bytes(service._encode_state(state))
+    rendered = service.caddyfile.read_text().replace(
+        "basic_auth old-user old-password", "basic_auth invalid old-password",
+    )
+    if not accounting_present:
+        lines = rendered.splitlines()
+        begin = next(i for i, line in enumerate(lines) if line.strip() == ACCOUNTING_BEGIN)
+        end = next(i for i, line in enumerate(lines) if line.strip() == ACCOUNTING_END)
+        rendered = "\n".join(lines[:begin] + lines[end + 1:]) + "\n"
+    service.caddyfile.write_text(rendered)
+    config_before = service.caddyfile.read_bytes()
+    state_before = service.state_file.read_bytes()
+
+    with pytest.raises(ManagerConflict, match="reserved accounting username in manager state"):
+        service.bootstrap()
+
+    assert service.caddyfile.read_bytes() == config_before
+    assert service.state_file.read_bytes() == state_before
+    assert not (service.state_file.parent / "transaction.json").exists()
 
 
 def test_bootstrap_transactionally_migrates_existing_managed_state_to_accounting(tmp_path):
