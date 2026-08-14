@@ -42,6 +42,11 @@ class AgentJournal:
             columns = {row[1] for row in db.execute("PRAGMA table_info(agent_commands)")}
             if "uploaded_at" not in columns:
                 db.execute("ALTER TABLE agent_commands ADD COLUMN uploaded_at INTEGER")
+            if "operation" not in columns:
+                db.execute(
+                    "ALTER TABLE agent_commands ADD COLUMN operation TEXT NOT NULL "
+                    "DEFAULT 'telemt.inventory.refresh'"
+                )
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -67,17 +72,37 @@ class AgentJournal:
             if item.sequence != expected:
                 raise ProtocolError(f"sequence gap: expected {expected}")
             db.execute("UPDATE agent_state SET node_id=?,last_sequence=? WHERE singleton=1", (item.node_id, item.sequence))
-            db.execute("INSERT INTO agent_commands(sequence,command_id,digest,status,started_at) VALUES(?,?,?,'executing',?)",
-                       (item.sequence, item.command_id, item.digest, int(time.time())))
+            db.execute(
+                "INSERT INTO agent_commands(sequence,command_id,digest,status,started_at,operation) "
+                "VALUES(?,?,?,'executing',?,?)",
+                (
+                    item.sequence,
+                    item.command_id,
+                    item.digest,
+                    int(time.time()),
+                    item.operation,
+                ),
+            )
             return None
 
     def recover_interrupted(self) -> int:
         """Call once during exclusive process startup, before accepting commands."""
-        result = {"message": "outcome requires Telemt reconciliation"}
         with self._lock, self.connect() as db:
-            rows = db.execute("SELECT sequence FROM agent_commands WHERE status='executing'").fetchall()
-            db.execute("""UPDATE agent_commands SET status='indeterminate',result_json=?,completed_at=?
-                WHERE status='executing'""", (json.dumps(result, sort_keys=True, separators=(",", ":")), int(time.time())))
+            rows = db.execute(
+                "SELECT sequence,operation FROM agent_commands WHERE status='executing'"
+            ).fetchall()
+            for row in rows:
+                protocol = "Mieru" if row["operation"].startswith("mieru.") else "Telemt"
+                result = {"message": f"outcome requires {protocol} reconciliation"}
+                db.execute(
+                    """UPDATE agent_commands SET status='indeterminate',result_json=?,completed_at=?
+                    WHERE sequence=? AND status='executing'""",
+                    (
+                        json.dumps(result, sort_keys=True, separators=(",", ":")),
+                        int(time.time()),
+                        row["sequence"],
+                    ),
+                )
             return len(rows)
 
     def finish(self, item: TypedCommand, status: str, result: dict) -> dict:

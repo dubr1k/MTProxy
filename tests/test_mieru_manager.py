@@ -22,6 +22,33 @@ BASE = {
 }
 
 
+def _status_cli(tmp_path, output):
+    fake = tmp_path / "mita-status"
+    fake.write_text(f"#!/bin/sh\nprintf '%s\\n' '{output}'\n")
+    fake.chmod(0o755)
+    return MitaCLI(executable=fake)
+
+
+@pytest.mark.parametrize("status", ["RUNNING", "STOPPED", "UNKNOWN"])
+def test_cli_parses_official_exact_status_grammar(tmp_path, status):
+    assert _status_cli(tmp_path, f'mita server status is "{status}"').status() == status
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "RUNNING",
+        'mita server status is "IDLE"',
+        'mita server status is "RUNNING" trailing',
+        'prefix mita server status is "RUNNING"',
+        'mita server status is "RUNNING"\nmita server status is "STOPPED"',
+    ],
+)
+def test_cli_rejects_ambiguous_or_noncanonical_status(tmp_path, output):
+    with pytest.raises(Exception, match="invalid status"):
+        _status_cli(tmp_path, output).status()
+
+
 def test_validation_rejects_overlapping_ports_and_unknown_fields():
     with pytest.raises(ValidationError, match="overlap"):
         validate_config(
@@ -117,6 +144,55 @@ def test_validation_enforces_user_quota_mtu_dns_and_privileged_flags():
             ],
         },
         elevated=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "interval",
+    ["1ms", "999ms", "0.999999999s", "1 s", "1d", "2562047h47m16.854775808s"],
+)
+def test_validation_rejects_metrics_intervals_outside_go_duration_contract(interval):
+    with pytest.raises(ValidationError, match="metrics interval"):
+        validate_config({**BASE, "advancedSettings": {"metricsLoggingInterval": interval}})
+
+
+@pytest.mark.parametrize("interval", ["1s", "1000ms", "1.5s", "1m30s", "+2s"])
+def test_validation_accepts_go_durations_at_least_one_second(interval):
+    validate_config({**BASE, "advancedSettings": {"metricsLoggingInterval": interval}})
+
+
+def test_validation_matches_egress_proxy_action_and_proto_int32_bounds():
+    proxy = {
+        "name": "out",
+        "protocol": "SOCKS5_PROXY_PROTOCOL",
+        "host": "127.0.0.1",
+        "port": 1080,
+    }
+    with pytest.raises(ValidationError, match="proxy name"):
+        validate_config(
+            {**BASE, "egress": {"proxies": [proxy], "rules": [{"action": "PROXY"}]}}
+        )
+    with pytest.raises(ValidationError, match="non-PROXY"):
+        validate_config(
+            {
+                **BASE,
+                "egress": {
+                    "proxies": [proxy],
+                    "rules": [{"action": "DIRECT", "proxyNames": ["out"]}],
+                },
+            }
+        )
+    validate_config(
+        {
+            **BASE,
+            "users": [
+                {
+                    "name": "alice",
+                    "hashedPassword": "a" * 64,
+                    "quotas": [{"days": 2**31 - 1, "megabytes": 2**31 - 1}],
+                }
+            ],
+        }
     )
 
 
@@ -225,6 +301,18 @@ def test_create_uses_complete_snapshot_cas_and_reveals_password_once(tmp_path):
         service.create_user("carol", [], expected_revision=initial)
 
 
+def test_create_with_private_or_loopback_policy_forces_controlled_restart(tmp_path):
+    for flag in ("allow_private_ip", "allow_loopback_ip"):
+        mita = FakeMita()
+        service = manager(tmp_path / flag, mita)
+        revision = service.bootstrap()["revision"]
+        mita.calls.clear()
+        service.create_user(
+            "bob", [], expected_revision=revision, elevated=True, **{flag: True}
+        )
+        assert mita.calls[-3:] == [("stop",), ("start",), ("probe",)]
+
+
 def test_rotation_delete_and_disable_force_restart_and_tombstone_names(tmp_path):
     mita = FakeMita()
     service = manager(tmp_path, mita)
@@ -265,31 +353,114 @@ def test_failed_probe_rolls_back_full_snapshot_and_restarts(tmp_path):
     assert (tmp_path / "state" / "journal.json").exists() is False
 
 
-def test_metrics_are_secret_free_rolling_and_reset_is_panel_baseline(tmp_path):
+def _write_recovery_fixture(root, state, before, desired, *, generation=None):
+    backup_dir = root / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f"g{state['generation']}-{state['revision']}.json"
+    backup_bytes = json.dumps(
+        before, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode() + b"\n"
+    backup.write_bytes(backup_bytes)
+    backup.chmod(0o600)
+    journal = {
+        "version": 2,
+        "schema": "mieru-transaction-journal-v2",
+        "phase": "applied",
+        "operation": "user.create",
+        "mode": "reload",
+        "previous_config_hash": hashlib.sha256(backup_bytes[:-1]).hexdigest(),
+        "desired_config_hash": hashlib.sha256(
+            json.dumps(desired, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "state_revision": state["revision"],
+        "state_generation": state["generation"] if generation is None else generation,
+        "next_revision": "f" * 64,
+        "next_generation": (state["generation"] if generation is None else generation) + 1,
+        "backup_basename": backup.name,
+        "backup_size": len(backup_bytes),
+        "backup_sha256": hashlib.sha256(backup_bytes).hexdigest(),
+    }
+    path = root / "journal.json"
+    path.write_text(json.dumps(journal))
+    path.chmod(0o600)
+    return path, backup
+
+
+def test_recovery_is_generation_bound_and_checks_observed_phase_before_side_effect(tmp_path):
     mita = FakeMita()
     service = manager(tmp_path, mita)
     service.bootstrap()
+    root = tmp_path / "state"
+    state = json.loads((root / "state.json").read_text())
+    desired = {**BASE, "loggingLevel": "DEBUG"}
+    mita.config = json.loads(json.dumps(desired))
+    _write_recovery_fixture(root, state, BASE, desired)
+    mita.calls.clear()
+
+    recovered = manager(tmp_path, mita).bootstrap()
+    assert recovered["ready"] is True
+    assert mita.config == BASE
+    assert mita.calls[:3] == [("apply", BASE), ("stop",), ("start",)]
+    assert (root / "journal.json").exists() is False
+
+
+def test_stale_or_tampered_recovery_journal_fails_closed_without_backup_apply(tmp_path):
+    mita = FakeMita()
+    service = manager(tmp_path, mita)
+    service.bootstrap()
+    root = tmp_path / "state"
+    state = json.loads((root / "state.json").read_text())
+    desired = {**BASE, "loggingLevel": "DEBUG"}
+    mita.config = json.loads(json.dumps(desired))
+    journal, _ = _write_recovery_fixture(
+        root, state, BASE, desired, generation=state["generation"] + 1
+    )
+    mita.calls.clear()
+
+    with pytest.raises(ConfigConflict, match="recovery"):
+        manager(tmp_path, mita).bootstrap()
+    assert mita.calls == []
+    assert mita.config == desired
+    assert journal.exists()
+
+
+def test_per_user_metrics_fail_closed_when_typed_getusers_boundary_is_unavailable(tmp_path):
+    mita = FakeMita()
+    service = manager(tmp_path, mita)
+    service.bootstrap()
+    # Canonical v3.35 `mita get users` is a human table, not typed histories.
     mita.metrics_value = {
-        "users": [
-            {
-                "name": "alice",
-                "uploadBytes": 100,
-                "downloadBytes": 900,
-                "collectedAt": 2_000_000,
-            }
-        ]
+        "table": "User  LastActive  1DayDown  1DayUp  7DaysDown  7DaysUp  30DaysDown  30DaysUp\nalice  -  -  -  -  -  -  -"
     }
-    first = service.metrics()
-    assert first["users"][0] == {
-        "username": "alice",
-        "upload_bytes": 100,
-        "download_bytes": 900,
-        "application_bytes": 1000,
-        "stale": False,
+    assert service.metrics() == {
+        "status": "error",
+        "stale": True,
+        "users": [],
+        "capability": "unavailable",
+        "reason": "mita v3.35 CLI does not expose typed GetUsers histories",
     }
-    service.reset_metric_baseline("alice")
-    assert service.metrics()["users"][0]["application_bytes"] == 0
+    with pytest.raises(ConfigConflict, match="unavailable"):
+        service.reset_metric_baseline("alice")
     assert not (tmp_path / "state" / "metrics.pb").exists()
+
+
+def test_share_links_bracket_ipv6_and_reject_traffic_pattern_before_mutation(tmp_path):
+    mita = FakeMita()
+    service = MieruManager(
+        mita=mita, state_dir=tmp_path / "ipv6", public_host="2001:db8::1"
+    )
+    revision = service.bootstrap()["revision"]
+    created = service.create_user("bob", [], expected_revision=revision)
+    assert "@[2001:db8::1]?" in created["share_url"]
+
+    config = {**BASE, "trafficPattern": {"seed": 42}}
+    mita = FakeMita(config)
+    service = manager(tmp_path / "traffic", mita)
+    revision = service.bootstrap()["revision"]
+    mita.calls.clear()
+    with pytest.raises(ValidationError, match="trafficPattern"):
+        service.create_user("bob", [], expected_revision=revision)
+    assert mita.calls == []
 
 
 def test_fake_mita_process_covers_fd_lifecycle_rollback_recovery_and_secret_hygiene(
@@ -331,7 +502,8 @@ elif args == ['stop']:
 elif args == ['start']:
     running.write_text('yes')
 elif args == ['status']:
-    print('RUNNING' if running.exists() else 'STOPPED')
+    state = 'RUNNING' if running.exists() else 'STOPPED'
+    print(f'mita server status is "{state}"')
 elif args == ['get', 'metrics']:
     print('{"users": []}')
 else:
@@ -365,13 +537,34 @@ else:
     state = json.loads((tmp_path / "manager/state.json").read_text())
     backup = tmp_path / "manager/backups" / f"{state['revision']}.json"
     backup.parent.mkdir(parents=True, exist_ok=True)
-    backup.write_text(json.dumps(BASE))
+    backup_data = json.dumps(BASE, sort_keys=True, separators=(",", ":")).encode()
+    backup.write_bytes(backup_data)
     backup.chmod(0o600)
     changed = {**BASE, "loggingLevel": "DEBUG"}
+    changed_hash = hashlib.sha256(
+        json.dumps(changed, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     live_config.write_text(json.dumps(changed))
     journal = tmp_path / "manager/journal.json"
     journal.write_text(
-        json.dumps({"version": 1, "phase": "applied", "backup": backup.name})
+        json.dumps(
+            {
+                "version": 2,
+                "schema": "mieru-transaction-journal-v2",
+                "phase": "applied",
+                "operation": "user.create",
+                "mode": "reload",
+                "previous_config_hash": state["config_hash"],
+                "desired_config_hash": changed_hash,
+                "state_revision": state["revision"],
+                "state_generation": state["generation"],
+                "next_revision": changed_hash,
+                "next_generation": state["generation"] + 1,
+                "backup_basename": backup.name,
+                "backup_size": len(backup_data),
+                "backup_sha256": hashlib.sha256(backup_data).hexdigest(),
+            }
+        )
     )
     journal.chmod(0o600)
 
@@ -447,3 +640,30 @@ elif sys.argv[1:] == ['get', 'metrics']: print(json.dumps({'users':[]}))
     assert "not-on-argv" not in lines
     assert "/proc/self/fd/" in lines
     assert cli.observe()["portBindings"][0]["port"] == 8443
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_cli_kills_child_during_execution_when_either_output_stream_exceeds_cap(
+    tmp_path, stream
+):
+    marker = tmp_path / "completed"
+    fake = tmp_path / "mita-overflow"
+    fake.write_text(
+        "#!/usr/bin/python3\n"
+        "import os, sys\n"
+        f"out = sys.{stream}.buffer\n"
+        "for _ in range(2048):\n"
+        "    out.write(b'x' * 1024); out.flush()\n"
+        "open(os.environ['MARKER'], 'w').write('child completed')\n"
+    )
+    fake.chmod(0o755)
+    cli = MitaCLI(
+        executable=fake,
+        env={"MARKER": str(marker)},
+        timeout=2,
+        max_output=1024,
+    )
+
+    with pytest.raises(Exception, match="too large"):
+        cli.version()
+    assert marker.exists() is False

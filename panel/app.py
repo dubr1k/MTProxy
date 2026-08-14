@@ -179,6 +179,11 @@ class FleetCommandCreate(BaseModel):
         "telemt.user.disable",
         "telemt.user.update_limits",
         "telemt.user.reset_quota",
+        "mieru.inspect",
+        "mieru.metrics",
+        "mieru.lifecycle.start",
+        "mieru.lifecycle.stop",
+        "mieru.lifecycle.restart",
     ]
     expected_telemt_revision: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
     payload: dict

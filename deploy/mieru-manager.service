@@ -21,6 +21,7 @@ NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
 PrivateTmp=yes
+TemporaryFileSystem=/tmp:rw,nosuid,nodev,noexec,size=8M,mode=0700
 PrivateDevices=yes
 PrivateNetwork=yes
 ProtectSystem=strict

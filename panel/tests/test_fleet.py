@@ -47,7 +47,7 @@ def test_mieru_fleet_boundary_allows_only_secret_free_inspection_and_lifecycle()
     assert inspect.operation == "mieru.inspect"
     restart = command(operation="mieru.lifecycle.restart", payload={})
     assert restart.payload == {}
-    with pytest.raises(ProtocolError, match="sealed payload"):
+    with pytest.raises(ProtocolError, match="operation is not allowlisted"):
         command(operation="mieru.config.apply", payload={"config": {"portBindings": []}})
     with pytest.raises(ProtocolError, match="operation"):
         command(operation="mieru.user.rotate", payload={"username": "alice"})
@@ -260,6 +260,18 @@ async def test_exclusive_startup_recovery_marks_crash_residue_without_reexecutio
     assert replay["status"] == "indeterminate"
 
 
+def test_exclusive_recovery_labels_mieru_crash_with_operation_specific_reconciliation(
+    tmp_path,
+):
+    journal = AgentJournal(tmp_path / "agent.sqlite3")
+    item = command(operation="mieru.lifecycle.restart", payload={})
+    journal.begin(item)
+    assert journal.recover_interrupted() == 1
+    assert journal.pending_outbox()[0]["result"] == {
+        "message": "outcome requires Mieru reconciliation"
+    }
+
+
 async def test_local_executor_is_loopback_only_and_sends_revision_precondition():
     seen = {}
 
@@ -310,6 +322,41 @@ async def test_owner_fleet_api_queues_typed_command(client, login_user):
     assert body["sequence"] == 1 and body["status"] == "queued"
     listing = (await client.get("/api/fleet/nodes/edge-01/commands")).json()["items"]
     assert listing[0]["idempotency_key"] == "disable-alice-2026-08-14"
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "mieru.inspect",
+        "mieru.metrics",
+        "mieru.lifecycle.start",
+        "mieru.lifecycle.stop",
+        "mieru.lifecycle.restart",
+    ],
+)
+async def test_public_fleet_schema_accepts_advertised_secret_free_mieru_commands(
+    client, login_user, operation
+):
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+    assert (
+        await client.post(
+            "/api/fleet/nodes",
+            json={"node_id": "edge-01", "display_name": "Edge", "inventory": {}},
+            headers={"X-CSRF-Token": csrf},
+        )
+    ).status_code == 201
+    response = await client.post(
+        "/api/fleet/nodes/edge-01/commands",
+        json={
+            "idempotency_key": f"mieru-{operation.replace('.', '-')}",
+            "operation": operation,
+            "expected_telemt_revision": "mrev-1",
+            "payload": {},
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 201, response.text
 
 
 

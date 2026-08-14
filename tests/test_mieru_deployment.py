@@ -7,7 +7,10 @@ import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MITA_SHA256 = "cca7a31e7be692bf10dd5c72f8862b92695a8b06e2a3abcb22ede936e74b2342"
+MITA_AMD64_PACKAGE_SHA256 = "cca7a31e7be692bf10dd5c72f8862b92695a8b06e2a3abcb22ede936e74b2342"
+MITA_ARM64_PACKAGE_SHA256 = "66ff435dd5bd6078944cb4eb7fc427366afaac5ab51030ff62561c645c31a9e3"
+MITA_AMD64_EXECUTABLE_SHA256 = "4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31"
+MITA_ARM64_EXECUTABLE_SHA256 = "a4e486c1531b7bebec02eca2b60dcba2a4971b2cd479c590d8405aab59fe6a23"
 
 
 def render_mieru_compose() -> dict:
@@ -15,7 +18,7 @@ def render_mieru_compose() -> dict:
         **os.environ,
         "MIERU_PUBLIC_HOST": "mieru.example.com",
         "MIERU_MITA_BIN": "/opt/pinned/mita",
-        "MIERU_MITA_SHA256": MITA_SHA256,
+        "MIERU_MITA_SHA256": MITA_AMD64_EXECUTABLE_SHA256,
         "MIERU_MITA_GID": "321",
         "MTPROXY_DOMAIN": "mt.example.com",
         "MTPROXY_BACKEND_PORT": "8445",
@@ -57,7 +60,7 @@ def test_mieru_overlay_supplies_pinned_host_binary_and_read_only_uds_access():
     }
     assert mounts["/run/mita"]["read_only"] is True
     assert manager["group_add"] == ["321"]
-    assert manager["environment"]["MIERU_MITA_SHA256"] == MITA_SHA256
+    assert manager["environment"]["MIERU_MITA_SHA256"] == MITA_AMD64_EXECUTABLE_SHA256
     assert manager["read_only"] is True
     assert manager["cap_drop"] == ["ALL"]
     assert manager["healthcheck"]["test"] == [

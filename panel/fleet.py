@@ -31,7 +31,6 @@ OPERATIONS = {
     "mieru.lifecycle.start",
     "mieru.lifecycle.stop",
     "mieru.lifecycle.restart",
-    "mieru.config.apply",
 }
 LIMIT_FIELDS = {
     "data_quota_bytes": (1, 2**63 - 1),
@@ -92,8 +91,6 @@ def validate_payload(operation: str, payload: Any) -> dict:
     _walk_secret_free(payload, "payload")
     if not isinstance(payload, dict):
         raise ProtocolError("payload must be an object")
-    if operation == "mieru.config.apply":
-        raise ProtocolError("Mieru remote config mutation requires a sealed payload layer")
     if operation.startswith("mieru."):
         if payload:
             raise ProtocolError("payload must be empty")

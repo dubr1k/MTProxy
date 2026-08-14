@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import copy
+from decimal import Decimal, InvalidOperation
 import fcntl
 import hashlib
 import ipaddress
 import json
 import os
 import re
+import selectors
 import secrets
 import stat
 import subprocess
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
@@ -44,8 +47,19 @@ USER_FIELDS = {
 }
 PORT_FIELDS = {"port", "protocol", "portRange"}
 QUOTA_FIELDS = {"days", "megabytes"}
-MAX_QUOTA_DAYS = 3650
+MAX_QUOTA_DAYS = 2**31 - 1
 MAX_QUOTA_MIB = 2**31 - 1
+MAX_GO_DURATION_NS = 2**63 - 1
+_DURATION_UNITS_NS = {
+    "ns": Decimal(1),
+    "us": Decimal(1_000),
+    "µs": Decimal(1_000),
+    "μs": Decimal(1_000),
+    "ms": Decimal(1_000_000),
+    "s": Decimal(1_000_000_000),
+    "m": Decimal(60_000_000_000),
+    "h": Decimal(3_600_000_000_000),
+}
 
 
 class ValidationError(ValueError):
@@ -77,6 +91,37 @@ def _positive_int(value: Any, low: int, high: int, name: str) -> int:
     ):
         raise ValidationError(f"invalid {name}")
     return value
+
+
+def _go_duration_ns(value: Any) -> int:
+    if not isinstance(value, str) or not value:
+        raise ValidationError("invalid metrics interval")
+    sign = 1
+    body = value
+    if body[0] in "+-":
+        sign = -1 if body[0] == "-" else 1
+        body = body[1:]
+    token = re.compile(
+        r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|µs|μs|ms|s|m|h)"
+    )
+    position = 0
+    total = Decimal(0)
+    try:
+        for match in token.finditer(body):
+            if match.start() != position:
+                raise ValidationError("invalid metrics interval")
+            part = match.group(0)
+            unit = next(unit for unit in _DURATION_UNITS_NS if part.endswith(unit))
+            total += Decimal(part[: -len(unit)]) * _DURATION_UNITS_NS[unit]
+            position = match.end()
+    except (InvalidOperation, StopIteration) as exc:
+        raise ValidationError("invalid metrics interval") from exc
+    if position != len(body) or position == 0:
+        raise ValidationError("invalid metrics interval")
+    nanoseconds = sign * int(total)
+    if not -(2**63) <= nanoseconds <= MAX_GO_DURATION_NS:
+        raise ValidationError("invalid metrics interval")
+    return nanoseconds
 
 
 def _validate_traffic(value: Any) -> None:
@@ -182,7 +227,7 @@ def validate_config(config: Any, *, elevated: bool = False) -> dict:
             if not match:
                 raise ValidationError("invalid port range")
             start, end = map(int, match.groups())
-            if not 1 <= start <= end <= 65535 or end - start > 4095:
+            if not 1 <= start <= end <= 65535:
                 raise ValidationError("invalid port range")
             ports = range(start, end + 1)
         if occupied[protocol].intersection(ports):
@@ -238,12 +283,9 @@ def validate_config(config: Any, *, elevated: bool = False) -> dict:
             {"metricsLoggingInterval", "userHintIsMandatory"},
             "advanced settings",
         )
-        if "metricsLoggingInterval" in node and (
-            not isinstance(node["metricsLoggingInterval"], str)
-            or re.fullmatch(r"[1-9][0-9]*(?:ms|s|m|h)", node["metricsLoggingInterval"])
-            is None
-        ):
-            raise ValidationError("invalid metrics interval")
+        if "metricsLoggingInterval" in node:
+            if _go_duration_ns(node["metricsLoggingInterval"]) < 1_000_000_000:
+                raise ValidationError("invalid metrics interval")
         if "userHintIsMandatory" in node and not isinstance(
             node["userHintIsMandatory"], bool
         ):
@@ -309,17 +351,33 @@ def validate_config(config: Any, *, elevated: bool = False) -> dict:
             rule = _object(
                 rule, {"ipRanges", "domainNames", "action", "proxyNames"}, "egress rule"
             )
-            if rule.get("action", "DIRECT") not in {"PROXY", "DIRECT", "REJECT"}:
+            action = rule.get("action", "PROXY")
+            if action not in {"PROXY", "DIRECT", "REJECT"}:
                 raise ValidationError("invalid egress action")
-            if any(name not in proxy_names for name in rule.get("proxyNames", [])):
+            names = rule.get("proxyNames", [])
+            if not isinstance(names, list) or any(
+                not isinstance(name, str) for name in names
+            ):
+                raise ValidationError("invalid egress proxy name list")
+            if action == "PROXY" and not names:
+                raise ValidationError("egress rule proxy name list is empty")
+            if action != "PROXY" and names:
+                raise ValidationError(
+                    "egress rule proxy names must be empty for non-PROXY action"
+                )
+            if any(name not in proxy_names for name in names):
                 raise ValidationError("egress rule names unknown proxy")
-            for value in rule.get("ipRanges", []):
+            ip_ranges = rule.get("ipRanges", [])
+            domains = rule.get("domainNames", [])
+            if not isinstance(ip_ranges, list) or not isinstance(domains, list):
+                raise ValidationError("invalid egress match list")
+            for value in ip_ranges:
                 if value != "*":
                     try:
                         ipaddress.ip_network(value, strict=False)
                     except (ValueError, TypeError) as exc:
                         raise ValidationError("invalid egress CIDR") from exc
-            for value in rule.get("domainNames", []):
+            for value in domains:
                 if not isinstance(value, str) or not value or value.strip(".") != value:
                     raise ValidationError("invalid egress domain")
     if "trafficPattern" in config:
@@ -366,6 +424,39 @@ def _atomic(path: Path, value: Any) -> None:
         Path(name).unlink(missing_ok=True)
 
 
+def _read_secure(path: Path, *, max_size: int) -> bytes:
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o600:
+            raise OSError("unsafe file")
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            after = os.fstat(fd)
+            if (
+                (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                or not stat.S_ISREG(after.st_mode)
+                or stat.S_IMODE(after.st_mode) != 0o600
+                or after.st_size > max_size
+            ):
+                raise OSError("unsafe file")
+            chunks = []
+            remaining = max_size + 1
+            while remaining:
+                chunk = os.read(fd, min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            data = b"".join(chunks)
+            if len(data) > max_size:
+                raise OSError("unsafe file")
+            return data
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ConfigConflict("unsafe transaction recovery file") from exc
+
+
 class MitaCLI:
     """Narrow argv-only CLI boundary; secret snapshots and output use anonymous FDs."""
 
@@ -406,14 +497,10 @@ class MitaCLI:
         self, args: list[str], *, input_value: Any | None = None, output: bool = False
     ) -> bytes:
         self.verify_executable()
-        # TemporaryFile is unlinked immediately on Linux: only inherited anonymous FDs
-        # remain visible to the child through /proc/self/fd/N.
-        output_stream = tempfile.TemporaryFile() if output else open(os.devnull, "wb")
         input_stream = None
         try:
-            output_fd = output_stream.fileno()
             command = [self.executable, *args]
-            pass_fds = [output_fd]
+            pass_fds = []
             if input_value is not None:
                 input_stream = tempfile.TemporaryFile()
                 input_fd = input_stream.fileno()
@@ -426,30 +513,65 @@ class MitaCLI:
                 command.append(f"/proc/self/fd/{input_fd}")
                 pass_fds.append(input_fd)
             try:
-                completed = subprocess.run(
+                process = subprocess.Popen(
                     command,
                     stdin=subprocess.DEVNULL,
-                    stdout=output_fd,
-                    stderr=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     close_fds=True,
                     pass_fds=tuple(pass_fds),
-                    timeout=self.timeout,
                     env={**os.environ, **self.env},
-                    check=False,
                 )
-            except (OSError, subprocess.TimeoutExpired) as exc:
+            except OSError as exc:
                 raise MitaError("mita operation unavailable") from exc
-            if completed.returncode != 0:
+            selector = selectors.DefaultSelector()
+            stdout = process.stdout
+            stderr = process.stderr
+            assert stdout is not None and stderr is not None
+            for stream in (stdout, stderr):
+                os.set_blocking(stream.fileno(), False)
+                selector.register(stream, selectors.EVENT_READ)
+            stdout_chunks: list[bytes] = []
+            total = 0
+            deadline = time.monotonic() + self.timeout
+            try:
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise MitaError("mita operation unavailable")
+                    events = selector.select(remaining)
+                    if not events:
+                        raise MitaError("mita operation unavailable")
+                    for key, _ in events:
+                        chunk = os.read(key.fd, min(65_536, self.max_output + 1))
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            key.fileobj.close()
+                            continue
+                        total += len(chunk)
+                        if total > self.max_output:
+                            raise MitaError("mita response is too large")
+                        if key.fileobj is stdout:
+                            stdout_chunks.append(chunk)
+                returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+            except BaseException:
+                process.kill()
+                for stream in (stdout, stderr):
+                    try:
+                        selector.unregister(stream)
+                    except (KeyError, ValueError):
+                        pass
+                    stream.close()
+                process.wait()
+                raise
+            finally:
+                selector.close()
+            if returncode != 0:
                 raise MitaError("mita operation failed")
             if not output:
                 return b""
-            size = os.fstat(output_fd).st_size
-            if size > self.max_output:
-                raise MitaError("mita response is too large")
-            output_stream.seek(0)
-            return output_stream.read(size)
+            return b"".join(stdout_chunks)
         finally:
-            output_stream.close()
             if input_stream is not None:
                 input_stream.close()
 
@@ -484,16 +606,16 @@ class MitaCLI:
         self._run(["start"])
 
     def status(self) -> str:
-        return self._text(["status"]).upper()
+        text = self._text(["status"])
+        match = re.fullmatch(
+            r'mita server status is "(RUNNING|STOPPED|UNKNOWN)"', text
+        )
+        if match is None:
+            raise MitaError("mita returned invalid status")
+        return match.group(1)
 
     def metrics(self) -> dict:
-        try:
-            value = json.loads(self._text(["get", "metrics"]))
-        except (ValueError, TypeError) as exc:
-            raise MitaError("mita returned invalid metrics") from exc
-        if not isinstance(value, dict):
-            raise MitaError("mita returned invalid metrics")
-        return value
+        raise MitaError("typed per-user metrics are unavailable in the mita v3.35 CLI")
 
     def probe(self) -> None:
         if self.status() != "RUNNING":
@@ -540,7 +662,8 @@ class MieruManager:
                     raise ConfigConflict("observed config changed outside manager")
             else:
                 state = {
-                    "version": 1,
+                    "version": 2,
+                    "generation": 0,
                     "revision": _hash(observed),
                     "config_hash": _hash(observed),
                     "disabled": {},
@@ -567,13 +690,17 @@ class MieruManager:
             or set(state)
             != {
                 "version",
+                "generation",
                 "revision",
                 "config_hash",
                 "disabled",
                 "tombstones",
                 "metric_baselines",
             }
-            or state["version"] != 1
+            or state["version"] != 2
+            or isinstance(state["generation"], bool)
+            or not isinstance(state["generation"], int)
+            or state["generation"] < 0
         ):
             raise ConfigConflict("invalid manager state")
         return state
@@ -664,24 +791,57 @@ class MieruManager:
         ):
             raise ConfigConflict("desired revision does not match")
 
-    def _transaction(self, desired: dict, state: dict, *, mode: str) -> str:
+    def _transaction(
+        self, desired: dict, state: dict, *, mode: str, operation: str
+    ) -> str:
+        if mode not in {"reload", "restart"} or not re.fullmatch(
+            r"[a-z]+(?:\.[a-z]+)+", operation
+        ):
+            raise ValidationError("invalid transaction metadata")
         validate_config(desired, elevated=True)
         before = self.mita.observe()
         validate_config(before, elevated=True)
-        if _hash(before) != state["config_hash"]:
+        previous_hash = _hash(before)
+        if previous_hash != state["config_hash"]:
             raise ConfigConflict("observed config changed outside manager")
+        expected = self._expected(desired)
+        desired_hash = _hash(expected)
+        next_generation = state["generation"] + 1
+        next_revision = _hash(
+            {
+                "config": expected,
+                "disabled": state["disabled"],
+                "tombstones": state["tombstones"],
+                "generation": next_generation,
+            }
+        )
         self.backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        backup = self.backup_dir / f"{state['revision']}.json"
+        backup = self.backup_dir / f"g{state['generation']}-{state['revision']}.json"
         _atomic(backup, before)
-        journal = {"version": 1, "phase": "prepared", "backup": backup.name}
+        backup_data = _read_secure(backup, max_size=self.mita.max_output if hasattr(self.mita, "max_output") else 1_048_576)
+        journal = {
+            "version": 2,
+            "schema": "mieru-transaction-journal-v2",
+            "phase": "prepared",
+            "operation": operation,
+            "mode": mode,
+            "previous_config_hash": previous_hash,
+            "desired_config_hash": desired_hash,
+            "state_revision": state["revision"],
+            "state_generation": state["generation"],
+            "next_revision": next_revision,
+            "next_generation": next_generation,
+            "backup_basename": backup.name,
+            "backup_size": len(backup_data),
+            "backup_sha256": hashlib.sha256(backup_data).hexdigest(),
+        }
         _atomic(self.journal_file, journal)
         try:
             self.mita.apply(desired)
             journal["phase"] = "applied"
             _atomic(self.journal_file, journal)
             observed = self.mita.observe()
-            expected = self._expected(desired)
-            if _hash(observed) != _hash(expected):
+            if _hash(observed) != desired_hash:
                 raise MitaError("mita readback mismatch")
             if mode == "reload":
                 self.mita.reload()
@@ -694,28 +854,23 @@ class MieruManager:
         except BaseException as exc:
             try:
                 self.mita.apply(before)
+                journal["phase"] = "rollback_applied"
+                _atomic(self.journal_file, journal)
                 self.mita.stop()
                 self.mita.start()
                 if self.mita.status() != "RUNNING":
                     raise MitaError("rollback status failed")
                 self.protocol_probe()
             except BaseException as rollback_error:
-                journal["phase"] = "recovery_failed"
-                _atomic(self.journal_file, journal)
                 raise MitaError(
                     "transaction rollback requires recovery"
                 ) from rollback_error
             self.journal_file.unlink(missing_ok=True)
             _fsync_dir(self.state_dir)
             raise MitaError("transaction failed and was rolled back") from exc
-        state["config_hash"] = _hash(observed)
-        state["revision"] = _hash(
-            {
-                "config": observed,
-                "disabled": state["disabled"],
-                "tombstones": state["tombstones"],
-            }
-        )
+        state["config_hash"] = desired_hash
+        state["revision"] = next_revision
+        state["generation"] = next_generation
         _atomic(self.state_file, state)
         self.journal_file.unlink(missing_ok=True)
         _fsync_dir(self.state_dir)
@@ -723,21 +878,99 @@ class MieruManager:
 
     def _recover(self) -> None:
         try:
-            journal = json.loads(self.journal_file.read_text())
+            raw = _read_secure(self.journal_file, max_size=65_536)
+            journal = json.loads(raw)
+            fields = {
+                "version",
+                "schema",
+                "phase",
+                "operation",
+                "mode",
+                "previous_config_hash",
+                "desired_config_hash",
+                "state_revision",
+                "state_generation",
+                "next_revision",
+                "next_generation",
+                "backup_basename",
+                "backup_size",
+                "backup_sha256",
+            }
             if (
-                set(journal) != {"version", "phase", "backup"}
-                or journal["version"] != 1
-                or journal["phase"] not in {"prepared", "applied", "recovery_failed"}
-                or Path(journal["backup"]).name != journal["backup"]
+                not isinstance(journal, dict)
+                or set(journal) != fields
+                or journal["version"] != 2
+                or journal["schema"] != "mieru-transaction-journal-v2"
+                or journal["phase"] not in {"prepared", "applied", "rollback_applied"}
+                or journal["mode"] not in {"reload", "restart"}
+                or re.fullmatch(r"[a-z]+(?:\.[a-z]+)+", journal["operation"]) is None
+                or Path(journal["backup_basename"]).name != journal["backup_basename"]
+                or not re.fullmatch(r"[0-9a-f]{64}", journal["previous_config_hash"])
+                or not re.fullmatch(r"[0-9a-f]{64}", journal["desired_config_hash"])
+                or not re.fullmatch(r"[0-9a-f]{64}", journal["state_revision"])
+                or not re.fullmatch(r"[0-9a-f]{64}", journal["next_revision"])
+                or isinstance(journal["state_generation"], bool)
+                or not isinstance(journal["state_generation"], int)
+                or journal["state_generation"] < 0
+                or journal["next_generation"] != journal["state_generation"] + 1
+                or isinstance(journal["backup_size"], bool)
+                or not isinstance(journal["backup_size"], int)
+                or journal["backup_size"] < 1
+                or not re.fullmatch(r"[0-9a-f]{64}", journal["backup_sha256"])
             ):
-                raise ValueError
-            backup = self.backup_dir / journal["backup"]
-            config = json.loads(backup.read_text())
+                raise ValueError("invalid journal")
+            state = self._state()
+            observed = self.mita.observe()
+            observed_hash = _hash(observed)
+            if (
+                state["generation"] == journal["next_generation"]
+                and state["revision"] == journal["next_revision"]
+                and state["config_hash"] == journal["desired_config_hash"]
+                and observed_hash == journal["desired_config_hash"]
+            ):
+                self.journal_file.unlink()
+                _fsync_dir(self.state_dir)
+                return
+            if (
+                state["generation"] != journal["state_generation"]
+                or state["revision"] != journal["state_revision"]
+                or state["config_hash"] != journal["previous_config_hash"]
+            ):
+                raise ValueError("journal generation is stale")
+            phase_hashes = {
+                "prepared": {
+                    journal["previous_config_hash"],
+                    journal["desired_config_hash"],
+                },
+                "applied": {journal["desired_config_hash"]},
+                "rollback_applied": {journal["previous_config_hash"]},
+            }
+            if observed_hash not in phase_hashes[journal["phase"]]:
+                raise ValueError("observed config does not match journal phase")
+            backup = self.backup_dir / journal["backup_basename"]
+            if backup.parent != self.backup_dir:
+                raise ValueError("backup escapes state")
+            backup_data = _read_secure(backup, max_size=1_048_576)
+            if (
+                len(backup_data) != journal["backup_size"]
+                or not secrets.compare_digest(
+                    hashlib.sha256(backup_data).hexdigest(), journal["backup_sha256"]
+                )
+            ):
+                raise ValueError("backup digest mismatch")
+            config = json.loads(backup_data)
             validate_config(config, elevated=True)
-            self.mita.apply(config)
+            if _hash(config) != journal["previous_config_hash"]:
+                raise ValueError("backup config mismatch")
+            if observed_hash != journal["previous_config_hash"]:
+                self.mita.apply(config)
             self.mita.stop()
             self.mita.start()
+            if self.mita.status() != "RUNNING":
+                raise MitaError("recovery status failed")
             self.protocol_probe()
+            if _hash(self.mita.observe()) != journal["previous_config_hash"]:
+                raise MitaError("recovery readback mismatch")
             self.journal_file.unlink()
             _fsync_dir(self.state_dir)
         except BaseException as exc:
@@ -787,10 +1020,14 @@ class MieruManager:
             if allow_loopback_ip:
                 user["allowLoopbackIP"] = True
             config.setdefault("users", []).append(user)
-            revision = self._transaction(config, state, mode="reload")
+            share_url = self._share(username, raw, config)
+            mode = "restart" if allow_private_ip or allow_loopback_ip else "reload"
+            revision = self._transaction(
+                config, state, mode=mode, operation="user.create"
+            )
             return {
                 "username": username,
-                "share_url": self._share(username, raw, config),
+                "share_url": share_url,
                 "revision": revision,
             }
 
@@ -805,7 +1042,9 @@ class MieruManager:
             return {
                 "username": username,
                 "enabled": False,
-                "revision": self._transaction(config, state, mode="restart"),
+                "revision": self._transaction(
+                    config, state, mode="restart", operation="user.disable"
+                ),
             }
 
     def enable_user(self, username: str, *, expected_revision: str) -> dict:
@@ -819,7 +1058,9 @@ class MieruManager:
             return {
                 "username": username,
                 "enabled": True,
-                "revision": self._transaction(config, state, mode="restart"),
+                "revision": self._transaction(
+                    config, state, mode="restart", operation="user.enable"
+                ),
             }
 
     def rotate_user(self, username: str, *, expected_revision: str) -> dict:
@@ -835,10 +1076,13 @@ class MieruManager:
                 if key != "hashedPassword"
             }
             config["users"][index]["password"] = raw
-            revision = self._transaction(config, state, mode="restart")
+            share_url = self._share(username, raw, config)
+            revision = self._transaction(
+                config, state, mode="restart", operation="user.rotate"
+            )
             return {
                 "username": username,
-                "share_url": self._share(username, raw, config),
+                "share_url": share_url,
                 "revision": revision,
             }
 
@@ -855,7 +1099,9 @@ class MieruManager:
             state["tombstones"].append(username)
             return {
                 "username": username,
-                "revision": self._transaction(config, state, mode="restart"),
+                "revision": self._transaction(
+                    config, state, mode="restart", operation="user.delete"
+                ),
             }
 
     def set_quotas(
@@ -869,10 +1115,16 @@ class MieruManager:
             row["quotas"] = copy.deepcopy(quotas)
             return {
                 "username": username,
-                "revision": self._transaction(config, state, mode="reload"),
+                "revision": self._transaction(
+                    config, state, mode="reload", operation="user.quotas"
+                ),
             }
 
     def _share(self, username: str, password: str, config: dict) -> str:
+        if "trafficPattern" in config:
+            raise ValidationError(
+                "share-link creation is unavailable for trafficPattern configurations"
+            )
         query: list[tuple[str, str]] = [("profile", username)]
         for binding in config["portBindings"]:
             query.extend(
@@ -882,70 +1134,24 @@ class MieruManager:
                 )
             )
         query.append(("mtu", str(config.get("mtu", 1400))))
-        return f"mierus://{quote(username, safe='')}:{quote(password, safe='')}@{self.public_host}?{urlencode(query)}"
+        host = self.public_host
+        try:
+            if ipaddress.ip_address(host).version == 6:
+                host = f"[{host}]"
+        except ValueError:
+            pass
+        return f"mierus://{quote(username, safe='')}:{quote(password, safe='')}@{host}?{urlencode(query)}"
 
     def metrics(self) -> dict:
         with self._writer():
-            state = self._state()
-            try:
-                payload = self.mita.metrics()
-            except Exception:
-                return {"status": "error", "stale": True, "users": []}
-            rows = payload.get("users")
-            if not isinstance(rows, list):
-                return {"status": "error", "stale": True, "users": []}
-            result = []
-            for row in rows:
-                if not isinstance(row, dict) or not isinstance(row.get("name"), str):
-                    continue
-                upload, download = row.get("uploadBytes"), row.get("downloadBytes")
-                if any(
-                    isinstance(value, bool) or not isinstance(value, int) or value < 0
-                    for value in (upload, download)
-                ):
-                    continue
-                baseline = state["metric_baselines"].get(
-                    row["name"], {"upload": 0, "download": 0}
-                )
-                result.append(
-                    {
-                        "username": row["name"],
-                        "upload_bytes": max(0, upload - baseline["upload"]),
-                        "download_bytes": max(0, download - baseline["download"]),
-                        "application_bytes": max(
-                            0,
-                            upload
-                            + download
-                            - baseline["upload"]
-                            - baseline["download"],
-                        ),
-                        "stale": False,
-                    }
-                )
             return {
-                "status": "ready",
-                "stale": False,
-                "users": result,
-                "semantics": "rolling application-byte admission quota (approximate)",
+                "status": "error",
+                "stale": True,
+                "users": [],
+                "capability": "unavailable",
+                "reason": "mita v3.35 CLI does not expose typed GetUsers histories",
             }
 
     def reset_metric_baseline(self, username: str) -> dict:
         with self._writer():
-            state = self._state()
-            payload = self.mita.metrics()
-            row = next(
-                (
-                    item
-                    for item in payload.get("users", [])
-                    if item.get("name") == username
-                ),
-                None,
-            )
-            if row is None:
-                raise ConfigConflict("user metrics not found")
-            state["metric_baselines"][username] = {
-                "upload": row["uploadBytes"],
-                "download": row["downloadBytes"],
-            }
-            _atomic(self.state_file, state)
-            return {"username": username, "baseline_reset": True}
+            raise ConfigConflict("per-user Mieru metrics capability is unavailable")
