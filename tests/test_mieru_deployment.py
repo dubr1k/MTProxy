@@ -82,7 +82,10 @@ def test_mieru_overlay_supplies_pinned_host_binary_and_read_only_uds_access():
         "-m",
         "mieru_manager.healthcheck",
     ]
-    assert config["services"]["panel"]["depends_on"]["mieru-manager"]["condition"] == "service_healthy"
+    panel = config["services"]["panel"]
+    assert panel["depends_on"]["mieru-manager"]["condition"] == "service_healthy"
+    assert panel["group_add"] == ["10003"]
+    assert panel["environment"]["PANEL_SUPPLEMENTARY_GROUPS"] == "10003"
 
 
 def test_mieru_overlay_has_only_intended_writable_runtime_mounts():

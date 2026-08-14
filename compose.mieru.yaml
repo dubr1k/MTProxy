@@ -43,6 +43,7 @@ services:
       MIERU_ENABLED: "true"
       MIERU_MANAGER_TOKEN_FILE: /run/secrets/mieru-manager-token
       MIERU_MANAGER_SOCKET: /run/mieru-manager/manager.sock
+      PANEL_SUPPLEMENTARY_GROUPS: "10003"
     secrets: [mieru-manager-token]
     volumes:
       - mieru-manager-run:/run/mieru-manager:ro
