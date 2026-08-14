@@ -66,6 +66,10 @@ curl -fL --proto '=https' --tlsv1.2 \
 printf '%s  %s\n' cca7a31e7be692bf10dd5c72f8862b92695a8b06e2a3abcb22ede936e74b2342 mita_3.35.0_amd64.deb | sha256sum -c -
 dpkg-deb -x mita_3.35.0_amd64.deb mita-root
 printf '%s  %s\n' 4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31 mita-root/usr/bin/mita | sha256sum -c -
+export MTPROXY_DOMAIN=proxy.example.com
+export MTPROXY_BACKEND_PORT=18445
+export MTPROXY_COVER_ROOT=/srv/proxy-control/cover
+export MTPROXY_LETSENCRYPT_ROOT=/etc/letsencrypt
 export MIERU_PUBLIC_HOST=mieru.example.com
 export MIERU_MITA_BIN="$(realpath mita-root/usr/bin/mita)"
 test -x "$MIERU_MITA_BIN"

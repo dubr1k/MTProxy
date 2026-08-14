@@ -73,6 +73,7 @@ jobs:
           printf 'Bearer ci-internal-token-0123456789abcdef0123456789abcdef\n' > secrets/telemt-api-token
           printf 'ci-naive-manager-token-0123456789abcdef0123456789abcdef\n' > secrets/naive-manager-token
           printf 'ci-mieru-manager-token-0123456789abcdef0123456789abcdef\n' > secrets/mieru-manager-token
+          printf 'MIERU_MANAGER_TOKEN_FILE=%s\n' "$PWD/secrets/mieru-manager-token" >> .env
       - name: Render every Compose model
         run: |
           docker compose -f compose.yaml config -q
@@ -86,6 +87,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/mieru-render/state"
           : > "$RUNNER_TEMP/mieru-render/token"
           install -m 0755 /bin/true "$RUNNER_TEMP/mieru-render/mita"
+          MTPROXY_DOMAIN=proxy.example.com \
+          MTPROXY_BACKEND_PORT=18445 \
+          MTPROXY_COVER_ROOT="$RUNNER_TEMP/mieru-render/cover" \
+          MTPROXY_LETSENCRYPT_ROOT="$RUNNER_TEMP/mieru-render/letsencrypt" \
           MIERU_PUBLIC_HOST=mieru.example.com \
           MIERU_MITA_BIN="$RUNNER_TEMP/mieru-render/mita" \
           MIERU_MITA_SHA256=4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31 \
