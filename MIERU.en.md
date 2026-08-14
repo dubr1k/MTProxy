@@ -39,19 +39,20 @@ For Compose, combine `compose.yaml` and `compose.mieru.yaml`. Set `MIERU_MITA_BI
 
 The container deliberately runs as fixed numeric UID/GID `10005:10005`. Docker creates a missing bind source as host `root:root`, which is not writable by that identity. A host account named `mieru-manager` may have a dynamically allocated UID/GID; its name does not change the container's numeric identity and does not satisfy this contract. Do not share a state directory with a host-systemd manager that uses a different identity.
 
-Before the first `docker compose up`, choose an absolute normalized path and check whether `10005` collides with an unrelated host principal. No output from these `getent` commands means no host-account collision; any output must identify an intentionally trusted `mieru-manager` principal, otherwise stop and resolve the fixed-ID collision before granting access:
+Before the first `docker compose up`, put the token beneath a trusted root-owned directory tree (for example `/etc/mieru-manager/token`) and check whether `10005` collides with an unrelated host principal. Every token parent must already exist, be root-owned and have no group/other write bits. The preparer deliberately rejects repository-local paths beneath synchronized or developer-writable ancestors. Its parent walk relies on the invariant that only root can rename entries in those directories; the token file itself remains bound to an `O_NOFOLLOW` file descriptor through mutation and final identity verification. No output from these `getent` commands means no host-account collision; any output must identify an intentionally trusted `mieru-manager` principal, otherwise stop and resolve the fixed-ID collision before granting access:
 
 ```sh
+export MIERU_MANAGER_TOKEN_FILE=/etc/mieru-manager/token
 export MIERU_MANAGER_STATE_DIR=/var/lib/mieru-manager
 export MIERU_MITA_GID="$(stat -c %g /var/run/mita/mita.sock)"
 getent passwd 10005 || true
 getent group 10005 || true
-sudo ./scripts/prepare-mieru-token.sh prepare "$(pwd)/secrets/mieru-manager-token"
+sudo ./scripts/prepare-mieru-token.sh prepare "$MIERU_MANAGER_TOKEN_FILE"
 sudo ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
 docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
 ```
 
-Both `prepare` commands are mandatory and must run as root before `docker compose up`. The token preparer requires an explicit absolute normalized path to an existing root-owned regular non-symlink file, checks every path component, validates a content-blind size bound of 32–513 bytes (32–512 ASCII characters with an optional final newline), and changes only that file's group/mode to `root:10005`/`0440`; it never reads or prints token content. Compose preserves this source metadata, allowing manager GID `10005` to read the secret while keeping it unreadable to unrelated identities. The panel root entrypoint copies that source to `/run/panel/mieru-manager-token` as `panel:panel` mode `0400` before dropping permanently to UID `10001`, GID `101`, and only supplementary GID `10005`.
+Both `prepare` commands are mandatory and must run as root before `docker compose up`. The token preparer requires an explicit absolute normalized path to an existing root-owned regular non-symlink file beneath existing root-owned, non-group/other-writable directories. It rejects hardlinks before mutation, validates a content-blind size bound of 32–513 bytes (32–512 ASCII characters with an optional final newline), and uses `fchown`, `fchmod`, `fsync`, and a final path/descriptor identity check; it never reads or prints token content. Compose preserves this source metadata, allowing manager GID `10005` to read the secret while keeping it unreadable to unrelated identities. Only when `MIERU_ENABLED=true`, the panel first validates the immutable Compose source as exactly `root:10005` mode `0440`, one regular link, and 32–513 bytes, then FD-stages an exclusive `panel:panel` mode-`0400` copy at `/run/panel/mieru-manager-token` before dropping permanently to UID `10001`, GID `101`, and only supplementary GID `10005`. Disabled Mieru never touches the source.
 
 The state preparer refuses `/`, relative or non-normalized paths, symlinked path components, non-directories, and non-empty directories. It creates or repairs only an empty state directory, setting exactly numeric owner `10005:10005` and mode `0700`; it never starts a root container or recursively changes restored data. `MIERU_MANAGER_STATE_DIR` defaults to `/var/lib/mieru-manager` in both the script and Compose. UID `10003` remains exclusively the documented Naive Caddy identity and therefore cannot traverse or read/write Mieru state.
 
@@ -64,7 +65,7 @@ export MIERU_MANAGER_STATE_DIR=/var/lib/mieru-manager
 docker compose -f compose.yaml -f compose.mieru.yaml stop panel mieru-manager
 # Restore trusted backup media here, preserving numeric ownership and modes.
 sudo ./scripts/prepare-mieru-state.sh verify "$MIERU_MANAGER_STATE_DIR"
-sudo ./scripts/prepare-mieru-token.sh verify "$(pwd)/secrets/mieru-manager-token"
+sudo ./scripts/prepare-mieru-token.sh verify "$MIERU_MANAGER_TOKEN_FILE"
 docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
 ```
 

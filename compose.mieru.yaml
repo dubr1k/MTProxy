@@ -50,7 +50,7 @@ services:
 
 secrets:
   mieru-manager-token:
-    file: ./secrets/mieru-manager-token
+    file: ${MIERU_MANAGER_TOKEN_FILE:?set the prepared host Mieru token path}
 volumes:
   mieru-manager-run:
     driver_opts:

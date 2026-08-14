@@ -7,6 +7,6 @@ RUN pip install -r /tmp/requirements.txt \
  && addgroup --system panel && adduser --system --ingroup panel --uid 10001 panel \
  && mkdir -p /data && chown panel:panel /data
 COPY --chown=panel:panel . /app/panel
-RUN chmod 0755 /app/panel/entrypoint.sh
+RUN chmod 0755 /app/panel/entrypoint.sh /app/panel/stage_secret.py
 EXPOSE 8787
 ENTRYPOINT ["/app/panel/entrypoint.sh"]

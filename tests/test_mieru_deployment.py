@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import uuid
 
@@ -14,6 +17,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 STATE_PREPARER = ROOT / "scripts" / "prepare-mieru-state.sh"
 TOKEN_PREPARER = ROOT / "scripts" / "prepare-mieru-token.sh"
+TOKEN_PREPARER_HELPER = ROOT / "scripts" / "prepare_mieru_token.py"
 MITA_AMD64_PACKAGE_SHA256 = "cca7a31e7be692bf10dd5c72f8862b92695a8b06e2a3abcb22ede936e74b2342"
 MITA_ARM64_PACKAGE_SHA256 = "66ff435dd5bd6078944cb4eb7fc427366afaac5ab51030ff62561c645c31a9e3"
 MITA_AMD64_EXECUTABLE_SHA256 = "4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31"
@@ -40,6 +44,16 @@ def run_token_preparer(mode: str, token_file: Path | str) -> subprocess.Complete
     )
 
 
+@pytest.fixture
+def trusted_token_dir() -> Path:
+    path = Path(tempfile.mkdtemp(prefix="mtproxy-token-test-", dir="/var/lib"))
+    path.chmod(0o700)
+    try:
+        yield path
+    finally:
+        shutil.rmtree(path)
+
+
 def render_mieru_compose() -> dict:
     env = {
         **os.environ,
@@ -47,6 +61,7 @@ def render_mieru_compose() -> dict:
         "MIERU_MITA_BIN": "/opt/pinned/mita",
         "MIERU_MITA_SHA256": MITA_AMD64_EXECUTABLE_SHA256,
         "MIERU_MITA_GID": "321",
+        "MIERU_MANAGER_TOKEN_FILE": "/etc/mieru-manager/token",
         "MTPROXY_DOMAIN": "mt.example.com",
         "MTPROXY_BACKEND_PORT": "8445",
         "MTPROXY_COVER_ROOT": "/tmp",
@@ -103,6 +118,7 @@ def test_mieru_overlay_supplies_pinned_host_binary_and_read_only_uds_access():
     assert panel["environment"]["PANEL_SUPPLEMENTARY_GROUPS"] == "10005"
     assert panel["environment"]["MIERU_MANAGER_TOKEN_SOURCE"] == "/run/secrets/mieru-manager-token"
     assert "MIERU_MANAGER_TOKEN_FILE" not in panel["environment"]
+    assert config["secrets"]["mieru-manager-token"]["file"] == "/etc/mieru-manager/token"
 
 
 def test_mieru_overlay_has_only_intended_writable_runtime_mounts():
@@ -335,8 +351,8 @@ def test_verify_refuses_non_directory_state_path(tmp_path):
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="token ownership contract requires root")
-def test_prepare_token_changes_only_metadata_and_manager_identity_can_read(tmp_path):
-    token = tmp_path / "mieru-token"
+def test_prepare_token_changes_only_metadata_and_manager_identity_can_read(trusted_token_dir):
+    token = trusted_token_dir / "mieru-token"
     content = b"opaque-token-material-that-is-long-enough\n"
     token.write_bytes(content)
     token.chmod(0o600)
@@ -347,24 +363,17 @@ def test_prepare_token_changes_only_metadata_and_manager_identity_can_read(tmp_p
     assert token.read_bytes() == content
     info = token.stat()
     assert (info.st_uid, info.st_gid, info.st_mode & 0o777) == (0, 10005, 0o440)
-    parents = (tmp_path, tmp_path.parent, tmp_path.parent.parent)
-    original_modes = [parent.stat().st_mode & 0o777 for parent in parents]
-    try:
-        for parent in parents:
-            parent.chmod(0o711)
-        probe = subprocess.run(
-            ["setpriv", "--reuid=10005", "--regid=10005", "--clear-groups", "test", "-r", str(token)],
-            check=False,
-        )
-        assert probe.returncode == 0
-    finally:
-        for parent, mode in zip(parents, original_modes, strict=True):
-            parent.chmod(mode)
+    trusted_token_dir.chmod(0o711)
+    probe = subprocess.run(
+        ["setpriv", "--reuid=10005", "--regid=10005", "--clear-groups", "test", "-r", str(token)],
+        check=False,
+    )
+    assert probe.returncode == 0
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="token ownership contract requires root")
-def test_verify_token_is_nonmutating_for_restored_metadata(tmp_path):
-    token = tmp_path / "mieru-token"
+def test_verify_token_is_nonmutating_for_restored_metadata(trusted_token_dir):
+    token = trusted_token_dir / "mieru-token"
     token.write_bytes(b"x" * 32)
     token.chmod(0o400)
     before = token.stat()
@@ -384,34 +393,34 @@ def test_token_preparer_refuses_unsafe_paths_without_creating_them(unsafe):
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="token ownership contract requires root")
-def test_token_preparer_refuses_symlink_and_wrong_size(tmp_path):
-    target = tmp_path / "target"
+def test_token_preparer_refuses_symlink_and_wrong_size(trusted_token_dir):
+    target = trusted_token_dir / "target"
     target.write_bytes(b"x" * 32)
-    link = tmp_path / "token"
+    link = trusted_token_dir / "token"
     link.symlink_to(target)
     assert run_token_preparer("prepare", link).returncode != 0
     assert (target.stat().st_uid, target.stat().st_gid, target.stat().st_mode & 0o777) == (0, 0, 0o644)
 
-    real_parent = tmp_path / "real"
+    real_parent = trusted_token_dir / "real"
     real_parent.mkdir()
-    parent_link = tmp_path / "linked"
+    parent_link = trusted_token_dir / "linked"
     parent_link.symlink_to(real_parent, target_is_directory=True)
     nested = real_parent / "token"
     nested.write_bytes(b"x" * 32)
     assert run_token_preparer("prepare", parent_link / "token").returncode != 0
     assert nested.stat().st_gid == 0
 
-    short = tmp_path / "short"
+    short = trusted_token_dir / "short"
     short.write_bytes(b"x" * 31)
     assert run_token_preparer("prepare", short).returncode != 0
-    large = tmp_path / "large"
+    large = trusted_token_dir / "large"
     large.write_bytes(b"x" * 514)
     assert run_token_preparer("prepare", large).returncode != 0
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="token ownership contract requires root")
-def test_token_preparer_refuses_non_root_owner_without_mutation(tmp_path):
-    token = tmp_path / "token"
+def test_token_preparer_refuses_non_root_owner_without_mutation(trusted_token_dir):
+    token = trusted_token_dir / "token"
     token.write_bytes(b"x" * 32)
     token.chmod(0o600)
     os.chown(token, 10003, 10003)
@@ -421,6 +430,86 @@ def test_token_preparer_refuses_non_root_owner_without_mutation(tmp_path):
     assert prepared.returncode != 0
     info = token.stat()
     assert (info.st_uid, info.st_gid, info.st_mode & 0o777) == (10003, 10003, 0o600)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="token ownership contract requires root")
+def test_token_preparer_rejects_hardlink_without_mutating_alias(trusted_token_dir):
+    token = trusted_token_dir / "token"
+    alias = trusted_token_dir / "unrelated-alias"
+    token.write_bytes(b"x" * 32)
+    token.chmod(0o600)
+    alias.hardlink_to(token)
+
+    prepared = run_token_preparer("prepare", token)
+
+    assert prepared.returncode != 0
+    assert "hardlink" in prepared.stderr
+    info = alias.stat()
+    assert (info.st_uid, info.st_gid, info.st_mode & 0o777, info.st_nlink) == (0, 0, 0o600, 2)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="token ownership contract requires root")
+def test_token_preparer_rejects_untrusted_writable_parent_without_mutation(tmp_path):
+    token = tmp_path / "token"
+    token.write_bytes(b"x" * 32)
+    token.chmod(0o600)
+
+    prepared = run_token_preparer("prepare", token)
+
+    assert prepared.returncode != 0
+    assert "parent" in prepared.stderr
+    info = token.stat()
+    assert (info.st_uid, info.st_gid, info.st_mode & 0o777) == (0, 0, 0o600)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="token ownership contract requires root")
+def test_token_preparer_rejects_double_slash_path_without_mutation(trusted_token_dir):
+    token = trusted_token_dir / "token"
+    token.write_bytes(b"x" * 32)
+    token.chmod(0o600)
+
+    prepared = run_token_preparer("prepare", f"/{token}")
+
+    assert prepared.returncode != 0
+    assert "normalized" in prepared.stderr
+    info = token.stat()
+    assert (info.st_gid, info.st_mode & 0o777) == (0, 0o600)
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="token ownership contract requires root")
+def test_token_preparer_detects_path_swap_and_does_not_mutate_symlink_target(
+    trusted_token_dir, monkeypatch
+):
+    spec = importlib.util.spec_from_file_location("prepare_mieru_token", TOKEN_PREPARER_HELPER)
+    assert spec is not None and spec.loader is not None
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    token = trusted_token_dir / "token"
+    moved = trusted_token_dir / "moved-token"
+    victim = trusted_token_dir / "victim"
+    token.write_bytes(b"x" * 32)
+    token.chmod(0o600)
+    victim.write_bytes(b"v" * 32)
+    victim.chmod(0o600)
+    victim_before = victim.stat()
+    real_fchmod = helper.os.fchmod
+
+    def swap_after_fd_chmod(fd, mode):
+        real_fchmod(fd, mode)
+        token.rename(moved)
+        token.symlink_to(victim)
+
+    monkeypatch.setattr(helper.os, "fchmod", swap_after_fd_chmod)
+
+    with pytest.raises(helper.TokenError, match="identity changed"):
+        helper.prepare_or_verify("prepare", str(token))
+
+    victim_after = victim.stat()
+    assert (victim_after.st_uid, victim_after.st_gid, victim_after.st_mode) == (
+        victim_before.st_uid,
+        victim_before.st_gid,
+        victim_before.st_mode,
+    )
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="identity preflight requires root")
@@ -439,9 +528,11 @@ def test_state_preparer_rejects_reserved_mita_socket_gid(tmp_path, reserved_gid)
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="container permission contract requires root")
-def test_combined_panel_runtime_has_only_mieru_group_and_private_staged_token(tmp_path):
+def test_combined_panel_runtime_has_only_mieru_group_and_private_staged_token(
+    tmp_path, trusted_token_dir
+):
     tmp_path.chmod(0o755)
-    token = tmp_path / "mieru-token"
+    token = trusted_token_dir / "mieru-token"
     token.write_bytes(b"m" * 32)
     token.chmod(0o600)
     mount = f"type=bind,src={token},dst=/run/secrets/mieru-manager-token,readonly"
@@ -499,6 +590,7 @@ def test_combined_panel_runtime_has_only_mieru_group_and_private_staged_token(tm
         "--cap-add", "DAC_READ_SEARCH", "--cap-add", "FOWNER", "--cap-add", "SETGID",
         "--cap-add", "SETUID", "--security-opt", "no-new-privileges:true",
         "-e", "PANEL_SUPPLEMENTARY_GROUPS=10005",
+        "-e", "MIERU_ENABLED=true",
         "-e", "TELEMT_API_TOKEN_SOURCE=/run/secrets/telemt-api-token",
         "-e", "MIERU_MANAGER_TOKEN_SOURCE=/run/secrets/mieru-manager-token",
         "--mount", f"type=bind,src={telemt},dst=/run/secrets/telemt-api-token,readonly",
