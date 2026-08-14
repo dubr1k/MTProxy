@@ -160,6 +160,34 @@ secrets_scan() {
     /tmp/audit.json /tmp/plan.json 2>/dev/null
 }
 
+write_fake_certbot() {
+  local destination=$1
+  cat > "$destination" <<'EOF'
+#!/bin/bash
+set -eu
+name= domains=()
+while (($#)); do
+  case $1 in --cert-name) name=$2; shift 2;; -d) domains+=("$2"); shift 2;; *) shift;; esac
+done
+test -n "$name"
+live_root=${LETSENCRYPT_LIVE_ROOT:-/etc/letsencrypt/live}
+dir=$live_root/$name
+mkdir -p "$dir"
+test "${#domains[@]}" -eq 2
+san="DNS:${domains[0]},DNS:${domains[1]}"
+openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=$name" -addext "subjectAltName=$san" -keyout "$dir/privkey.pem" -out "$dir/fullchain.pem" >/dev/null 2>&1
+for domain in "${domains[@]}"; do
+  if [[ $domain != "$name" ]]; then
+    target=$live_root/$domain
+    mkdir -p "$target"
+    cp -p "$dir/fullchain.pem" "$target/fullchain.pem"
+    cp -p "$dir/privkey.pem" "$target/privkey.pem"
+  fi
+done
+EOF
+  chmod 755 "$destination"
+}
+
 setup_full_host() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
@@ -206,27 +234,7 @@ test "$3" = --secrets-file
 test -s "$4"
 EOF
   chmod 755 /usr/local/bin/lab-probe
-  cat > /usr/local/bin/certbot <<'EOF'
-#!/bin/bash
-set -eu
-name= domains=()
-while (($#)); do
-  case $1 in --cert-name) name=$2; shift 2;; -d) domains+=("$2"); shift 2;; *) shift;; esac
-done
-test -n "$name"
-dir=/etc/letsencrypt/live/$name
-mkdir -p "$dir"
-test "${#domains[@]}" -eq 2
-san="DNS:${domains[0]},DNS:${domains[1]}"
-openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=$name" -addext "subjectAltName=$san" -keyout "$dir/privkey.pem" -out "$dir/fullchain.pem" >/dev/null 2>&1
-for domain in "${domains[@]}"; do
-  target=/etc/letsencrypt/live/$domain
-  mkdir -p "$target"
-  cp "$dir/fullchain.pem" "$target/fullchain.pem"
-  cp "$dir/privkey.pem" "$target/privkey.pem"
-done
-EOF
-  chmod 755 /usr/local/bin/certbot
+  write_fake_certbot /usr/local/bin/certbot
   sha256sum "$ROUTE" /usr/local/x-ui/bin/config.json > "$BASELINE"
   systemctl is-active nginx lab-xray lab-warp lab-3x-ui > /tmp/status.before
 }
@@ -235,7 +243,7 @@ full_environment_preflight() {
   local started log script
   started=$(python3 -c 'import time; print(time.time())')
   log=$(mktemp)
-  script="$(declare -p PROXY PANEL ROUTE BASELINE); $(declare -f add_hosts setup_full_host); setup_full_host"
+  script="$(declare -p PROXY PANEL ROUTE BASELINE); $(declare -f add_hosts write_fake_certbot setup_full_host); setup_full_host"
   if bash -Eeuo pipefail -c "$script" >"$log" 2>&1; then
     emit environment-preflight passed "$started"
     rm -f "$log"

@@ -18,6 +18,49 @@ spec.loader.exec_module(lab)
 
 
 class QemuLabTests(unittest.TestCase):
+    def test_fake_certbot_avoids_self_copy_and_populates_each_san_with_source_permissions(self):
+        runner = MODULE.parent / "guest-runner.sh"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            certbot = root / "certbot"
+            generated = subprocess.run(
+                ["bash", "-c", f"source {runner!s}; write_fake_certbot {certbot!s}"],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "GUEST_RUNNER_LIB_ONLY": "1"},
+            )
+            self.assertEqual(generated.returncode, 0, generated.stderr)
+
+            completed = subprocess.run(
+                [
+                    str(certbot), "certonly",
+                    "-d", "proxy.lab.test", "-d", "panel.lab.test",
+                    "--cert-name", "proxy.lab.test",
+                ],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "LETSENCRYPT_LIVE_ROOT": str(root / "live")},
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+
+            source = root / "live" / "proxy.lab.test"
+            panel = root / "live" / "panel.lab.test"
+            for filename in ("fullchain.pem", "privkey.pem"):
+                self.assertTrue((source / filename).is_file())
+                self.assertEqual((source / filename).read_bytes(), (panel / filename).read_bytes())
+                self.assertEqual(
+                    (source / filename).stat().st_mode & 0o777,
+                    (panel / filename).stat().st_mode & 0o777,
+                )
+            certificate = subprocess.run(
+                ["openssl", "x509", "-in", str(source / "fullchain.pem"), "-noout", "-ext", "subjectAltName"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn("DNS:proxy.lab.test", certificate.stdout)
+            self.assertIn("DNS:panel.lab.test", certificate.stdout)
+
     def test_case_run_preserves_failure_output_and_does_not_swallow_early_failure(self):
         runner = MODULE.parent / "guest-runner.sh"
         script = f"""
