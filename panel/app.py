@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import ipaddress
 import os
 import re
 import secrets
@@ -10,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -94,7 +96,7 @@ def create_app(settings: Settings | None = None, *, telemt=None):
             response = (JSONResponse({"detail": "request body too large"}, 413)
                         if len(body) > settings.body_limit_bytes else await call_next(request))
         response.headers.update({
-            "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
             "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
             "Referrer-Policy": "no-referrer", "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
             "Cache-Control": "no-store",
@@ -129,11 +131,50 @@ def create_app(settings: Settings | None = None, *, telemt=None):
         candidates = links.get("tls", []) if isinstance(links, dict) else []
         return {"secret": data.get("secret"), "link": candidates[0] if candidates else data.get("link")}
 
+    def qr_data(link: str) -> str:
+        output = io.BytesIO()
+        qrcode.make(link, image_factory=qrcode.image.svg.SvgPathImage).save(output)
+        return "data:image/svg+xml;base64," + base64.b64encode(output.getvalue()).decode()
+
+    def proxy_link(value) -> str:
+        """Accept only canonical Telegram MTProxy links from the upstream API."""
+        if not isinstance(value, str) or len(value) > 2048:
+            raise HTTPException(409, "connection link unavailable")
+        try:
+            parts = urlsplit(value)
+            telegram_target = (
+                (parts.scheme == "tg" and parts.netloc == "proxy" and parts.path in {"", "/"})
+                or (parts.scheme == "https" and parts.netloc in {"t.me", "telegram.me"} and parts.path == "/proxy")
+            )
+            query = parse_qs(parts.query, keep_blank_values=True)
+            server = query.get("server", [])
+            port = query.get("port", [])
+            secret = query.get("secret", [])
+            server_valid = False
+            if len(server) == 1:
+                try:
+                    ipaddress.ip_address(server[0])
+                    server_valid = True
+                except ValueError:
+                    server_valid = re.fullmatch(r"[A-Za-z0-9.-]{1,253}", server[0]) is not None
+            valid = (
+                telegram_target and not parts.fragment and not parts.username and not parts.password
+                and set(query) == {"server", "port", "secret"}
+                and len(server) == len(port) == len(secret) == 1 and server_valid
+                and re.fullmatch(r"[0-9]{1,5}", port[0]) is not None
+                and 1 <= int(port[0]) <= 65535
+                and re.fullmatch(r"[0-9A-Fa-f]{32,512}", secret[0]) is not None
+            )
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            raise HTTPException(409, "connection link unavailable")
+        return value
+
     def reveal(data, owner):
         if data.get("link"):
-            output = io.BytesIO()
-            qrcode.make(data["link"], image_factory=qrcode.image.svg.SvgPathImage).save(output)
-            data = {**data, "qr": "data:image/svg+xml;base64," + base64.b64encode(output.getvalue()).decode()}
+            link = proxy_link(data["link"])
+            data = {**data, "link": link, "qr": qr_data(link)}
         token = secrets.token_urlsafe(32)
         app.state.reveals[token] = (time.monotonic() + settings.reveal_ttl_seconds, owner["token_hash"], data)
         return token
@@ -177,6 +218,10 @@ def create_app(settings: Settings | None = None, *, telemt=None):
         app.state.store.delete_session(request.cookies.get("panel_session"))
         response.delete_cookie("panel_session", path="/"); response.delete_cookie("panel_csrf", path="/")
 
+    @app.get("/api/auth/me")
+    async def me(user=Depends(current)):
+        return {"username": user["username"], "role": user["role"]}
+
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         if not app.state.store.session(request.cookies.get("panel_session")):
@@ -198,6 +243,18 @@ def create_app(settings: Settings | None = None, *, telemt=None):
         audit(user, "user.create", body.username, request)
         token = reveal(secret_reveal(data), user)
         return {"username": body.username, "reveal_token": token}
+
+    @app.post("/api/users/{username}/access")
+    async def user_access(username: str, request: Request, user=Depends(roles("owner", "admin"))):
+        selected = next((item for item in await app.state.telemt.list_users() if item.get("username") == username), None)
+        if selected is None:
+            raise HTTPException(404, "user not found")
+        access = secret_reveal(selected)
+        if not access.get("link"):
+            raise HTTPException(409, "connection link unavailable")
+        link = proxy_link(access["link"])
+        audit(user, "user.access", username, request)
+        return {"username": username, "link": link, "qr": qr_data(link)}
 
     @app.delete("/api/users/{username}", status_code=204)
     async def delete_user(username: str, request: Request, user=Depends(roles("owner", "admin"))):
@@ -248,8 +305,7 @@ def create_app(settings: Settings | None = None, *, telemt=None):
         audit(user, "admin.delete", str(admin_id), request)
 
     @app.get("/api/audit")
-    async def audit_log(user=Depends(current)):
-        if user["role"] not in {"owner", "admin"}: raise HTTPException(403, "insufficient role")
+    async def audit_log(_user=Depends(current)):
         return {"items": app.state.store.audits()}
 
     return app

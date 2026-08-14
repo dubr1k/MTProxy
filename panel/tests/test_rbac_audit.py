@@ -37,3 +37,12 @@ async def test_mutations_create_secret_free_audit_records(client, login_user):
     audit = (await client.get("/api/audit")).json()["items"]
     assert any(row["action"] == "user.create" and row["target"] == "alice" for row in audit)
     assert secret not in str(audit)
+
+
+async def test_viewer_can_read_secret_free_audit(client, login_user):
+    store = client._transport.app.state.store
+    store.create_admin("viewer", "viewer password long enough", "viewer")
+    await login_user(client, "viewer", "viewer password long enough")
+    response = await client.get("/api/audit")
+    assert response.status_code == 200
+    assert "secret" not in str(response.json()).lower()
