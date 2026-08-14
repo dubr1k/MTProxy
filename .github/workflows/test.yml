@@ -31,7 +31,9 @@ jobs:
           mapfile -t shell_files < <(git grep -Il '^#!/.*sh')
           test "${#shell_files[@]}" -gt 0
           printf '%s\n' "${shell_files[@]}"
-          bash -n "${shell_files[@]}"
+          for script in "${shell_files[@]}"; do
+            bash -n "$script"
+          done
           shellcheck "${shell_files[@]}"
       - name: Documentation, notices, service units, and diff hygiene
         run: |
