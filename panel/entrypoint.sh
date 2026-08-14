@@ -24,10 +24,10 @@ STAGE_SECRET=$SCRIPT_DIR/stage_secret.py
 TELEMT_SOURCE=${TELEMT_API_TOKEN_SOURCE:-/run/secrets/telemt-api-token}
 NAIVE_SOURCE=${NAIVE_MANAGER_TOKEN_SOURCE:-/run/secrets/naive-manager-token}
 MIERU_SOURCE=${MIERU_MANAGER_TOKEN_SOURCE:-/run/secrets/mieru-manager-token}
-PANEL_RUNTIME_DIR=${PANEL_RUNTIME_DIR:-/run/panel}
-TELEMT_TARGET=$PANEL_RUNTIME_DIR/telemt-api-token
-NAIVE_TARGET=$PANEL_RUNTIME_DIR/naive-manager-token
-MIERU_TARGET=$PANEL_RUNTIME_DIR/mieru-manager-token
+PANEL_RUNTIME_DIR=/run/panel
+TELEMT_TARGET=/run/panel/telemt-api-token
+NAIVE_TARGET=/run/panel/naive-manager-token
+MIERU_TARGET=/run/panel/mieru-manager-token
 
 # Validate the immutable Compose source before creating or copying any token.
 if [ "$mieru_enabled" = true ]; then
