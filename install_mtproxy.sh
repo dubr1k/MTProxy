@@ -235,10 +235,12 @@ if command -v timedatectl &>/dev/null; then
     timedatectl set-ntp true > /dev/null 2>&1 || true
 fi
 if ! timedatectl show -p NTP --value 2>/dev/null | grep -qi '^yes$'; then
-    apt-get install -y -qq chrony > /dev/null 2>&1 && \
-        systemctl enable --now chrony > /dev/null 2>&1 && \
-        ok "Установлен и запущен chrony" || \
+    if apt-get install -y -qq chrony > /dev/null 2>&1 && \
+        systemctl enable --now chrony > /dev/null 2>&1; then
+        ok "Установлен и запущен chrony"
+    else
         warn "Не удалось настроить NTP — проверьте синхронизацию времени вручную"
+    fi
 else
     ok "NTP уже активен"
 fi
@@ -403,10 +405,12 @@ fi
 if [[ -f "$SECRETS_DIR/default.secret" ]]; then
     SECRET=$(cat "$SECRETS_DIR/default.secret")
 else
-    SECRET=$(cat "$(ls "$SECRETS_DIR"/*.secret | head -n1)")
+    FIRST_SECRET=$(find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.secret' -print -quit)
+    [[ -n "$FIRST_SECRET" ]] || fail "В хранилище не найден файл секрета"
+    SECRET=$(cat "$FIRST_SECRET")
 fi
 
-USER_COUNT=$(ls "$SECRETS_DIR"/*.secret 2>/dev/null | wc -l)
+USER_COUNT=$(find "$SECRETS_DIR" -maxdepth 1 -type f -name '*.secret' -printf '.' | wc -c)
 ok "Секретов в хранилище: $USER_COUNT (управление: mtproxy-user.sh)"
 
 # ─── 7. Сохранение секретов в защищённое хранилище ─────────
@@ -833,16 +837,18 @@ if command -v iptables &>/dev/null; then
 
     # Создание цепочки с hashlimit
     if iptables -N "$RLIMIT_CHAIN" 2>/dev/null; then
-        iptables -A "$RLIMIT_CHAIN" -m hashlimit \
+        if iptables -A "$RLIMIT_CHAIN" -m hashlimit \
             --hashlimit-above "$RATE_LIMIT" \
             --hashlimit-burst "$RATE_BURST" \
             --hashlimit-mode srcip \
             --hashlimit-name mtproxy_ratelimit \
             -j DROP 2>/dev/null && \
-        iptables -A "$RLIMIT_CHAIN" -j ACCEPT 2>/dev/null && \
-        iptables -I INPUT -p tcp --dport "$PROXY_PORT" -m conntrack --ctstate NEW -j "$RLIMIT_CHAIN" 2>/dev/null && \
-        ok "Rate-limiting: $RATE_LIMIT (burst $RATE_BURST) на IP" || \
-        warn "Не удалось настроить rate-limiting (модули hashlimit/conntrack недоступны)"
+            iptables -A "$RLIMIT_CHAIN" -j ACCEPT 2>/dev/null && \
+            iptables -I INPUT -p tcp --dport "$PROXY_PORT" -m conntrack --ctstate NEW -j "$RLIMIT_CHAIN" 2>/dev/null; then
+            ok "Rate-limiting: $RATE_LIMIT (burst $RATE_BURST) на IP"
+        else
+            warn "Не удалось настроить rate-limiting (модули hashlimit/conntrack недоступны)"
+        fi
     else
         warn "Не удалось создать цепочку iptables для rate-limiting"
     fi
