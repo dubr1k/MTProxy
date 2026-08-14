@@ -234,8 +234,20 @@ def test_apply_rolls_back_exactly_when_validation_or_reload_fails(tmp_path):
         if validation_calls == 1:
             raise RuntimeError("bad nginx")
 
+    rollback_reload_calls = 0
+
+    def record_rollback_reload() -> None:
+        nonlocal rollback_reload_calls
+        rollback_reload_calls += 1
+
     with pytest.raises(RuntimeError, match="bad nginx"):
-        apply_plan(plan, root=root, validate=reject_candidate_once)
+        apply_plan(
+            plan,
+            root=root,
+            validate=reject_candidate_once,
+            reload=record_rollback_reload,
+        )
+    assert rollback_reload_calls == 1
     assert route.read_bytes() == original
     assert not (root / "var/lib/proxy-control/ownership.json").exists()
 
