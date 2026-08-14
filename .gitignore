@@ -25,6 +25,8 @@ __pycache__/
 .venv/
 .pytest_cache/
 panel/*.sqlite3*
+.lab-state/
+lab-results/
 
 # Cover-site content is deployment-specific and must stay outside Git history
 docker/site/
