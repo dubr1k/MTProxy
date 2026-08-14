@@ -55,6 +55,20 @@ case_run() {
   rm -f "$log"
 }
 
+run_captured() {
+  local log=$1 rc
+  shift
+  set +e
+  ( set -Eeuo pipefail; "$@" ) >"$log" 2>&1
+  rc=$?
+  set -e
+  if ((rc == 0)); then
+    return 0
+  fi
+  cat "$log" >&2
+  return "$rc"
+}
+
 add_hosts() {
   if ! grep -q "$PROXY" /etc/hosts; then
     printf '10.0.2.15 %s %s\n' "$PROXY" "$PANEL" >> /etc/hosts
@@ -244,7 +258,7 @@ full_install() {
   test ! -e /var/lib/proxy-control/runtime.json
   test ! -e /var/lib/proxy-control/ownership.json
   test ! -e /opt/mtproxy-shared443
-  runtime_cmd install >/tmp/install.out
+  run_captured /tmp/install.out runtime_cmd install
   systemctl is-active docker nginx >/dev/null
   test "$(stat -c %a /var/lib/proxy-control/runtime.json)" = 600
   jq -e '.status == "active" and (.owned_packages == [])' /var/lib/proxy-control/runtime.json >/dev/null
@@ -254,7 +268,7 @@ full_repair() { python3 "$ROOT/scripts/proxyctl.py" repair; test "$(jq -r .statu
 full_idempotence() {
   local before after
   before=$(sha256sum /var/lib/proxy-control/runtime.json | cut -d' ' -f1)
-  runtime_cmd install >/tmp/idempotent.out
+  run_captured /tmp/idempotent.out runtime_cmd install
   after=$(sha256sum /var/lib/proxy-control/runtime.json | cut -d' ' -f1)
   [[ $before == "$after" ]]
 }
@@ -283,7 +297,7 @@ interrupt_install_recovery() {
   test "$interrupted_rc" -eq 137
   test -f /var/lib/proxy-control/runtime.json
   test "$(jq -r .phase /var/lib/proxy-control/runtime.json)" = project_rendered
-  runtime_cmd install >/tmp/recovered-install.out
+  run_captured /tmp/recovered-install.out runtime_cmd install
   test "$(jq -r .status /var/lib/proxy-control/runtime.json)" = active
   test -f /var/lib/proxy-control/ownership.json
 }
@@ -352,11 +366,11 @@ elif [[ $MODE == full ]]; then
   case_run repair full_repair install
   case_run idempotence full_idempotence repair
   case_run secrets-scan full_secrets_scan idempotence
+  case_run dns-tls-preflight full_dns_tls idempotence
   case_run uninstall full_uninstall idempotence
   case_run interrupted-install-recovery interrupt_install_recovery uninstall
   case_run interrupted-uninstall-recovery interrupt_uninstall_recovery interrupted-install-recovery
   case_run coexistence full_coexist interrupted-uninstall-recovery
-  case_run dns-tls-preflight full_dns_tls audit
 else
   printf 'unknown mode: %s\n' "$MODE" >&2
   exit 2

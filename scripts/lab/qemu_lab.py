@@ -25,9 +25,9 @@ SCENARIOS = {
     "smoke": ("archive-integrity", "audit", "plan", "coexistence", "dns-tls-preflight", "secrets-scan"),
     "full": (
         "environment-preflight", "audit", "plan", "install", "docker-build", "repair", "idempotence",
-        "secrets-scan", "uninstall",
+        "secrets-scan", "dns-tls-preflight", "uninstall",
         "interrupted-install-recovery", "interrupted-uninstall-recovery",
-        "coexistence", "dns-tls-preflight",
+        "coexistence",
     ),
 }
 

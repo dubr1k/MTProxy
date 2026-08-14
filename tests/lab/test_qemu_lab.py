@@ -23,7 +23,8 @@ class QemuLabTests(unittest.TestCase):
         script = f"""
 source {runner!s}
 fails_early() {{ printf 'first useful error\\n' >&2; false; printf 'must not run\\n' >&2; }}
-case_run install fails_early
+captured_failure() {{ run_captured /tmp/lab-test-captured.log fails_early; }}
+case_run install captured_failure
 """
         completed = subprocess.run(
             ["bash", "-c", script], capture_output=True, text=True,
