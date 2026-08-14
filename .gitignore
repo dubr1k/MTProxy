@@ -17,6 +17,7 @@ Desktop.ini
 # Local deployment secrets and logs
 secrets/users.conf
 secrets/telemt-api-token
+secrets/naive-manager-token
 .env
 *.log
 __pycache__/

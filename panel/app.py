@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -22,6 +22,7 @@ import qrcode
 import qrcode.image.svg
 
 from .store import ConflictError, Store
+from .naive import NaiveClient, NaiveError
 from .telemt import TelemtClient, TelemtError
 
 
@@ -30,6 +31,10 @@ class Settings:
     database_path: Path = Path(os.getenv("PANEL_DATABASE", "/data/panel.sqlite3"))
     telemt_url: str = os.getenv("TELEMT_API_URL", "http://mtproxy:9091")
     telemt_token: str = field(default_factory=lambda: _secret_setting("TELEMT_API_TOKEN", "TELEMT_API_TOKEN_FILE"))
+    naive_socket: str = os.getenv("NAIVE_MANAGER_SOCKET", "/run/naive-manager/manager.sock")
+    naive_token: str = field(default_factory=lambda: _secret_setting("NAIVE_MANAGER_TOKEN", "NAIVE_MANAGER_TOKEN_FILE"))
+    naive_public_host: str = os.getenv("NAIVE_PUBLIC_HOST", "chrbased.dubr1k-solutions.com")
+    naive_enabled: bool = os.getenv("NAIVE_ENABLED", "false").lower() == "true"
     session_cookie_secure: bool = os.getenv("PANEL_COOKIE_SECURE", "true").lower() == "true"
     allowed_hosts: tuple[str, ...] = field(default_factory=lambda: tuple(filter(None, os.getenv("PANEL_ALLOWED_HOSTS", "localhost,127.0.0.1").split(","))))
     session_ttl_seconds: int = 12 * 3600
@@ -59,6 +64,10 @@ class UserCreate(BaseModel):
         return value
 
 
+class NaiveUserCreate(BaseModel):
+    username: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,64}$")
+
+
 class AdminCreate(BaseModel):
     username: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,64}$")
     password: str = Field(min_length=12, max_length=1024)
@@ -71,12 +80,13 @@ class AdminUpdate(BaseModel):
     active: bool | None = None
 
 
-def create_app(settings: Settings | None = None, *, telemt=None):
+def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
     settings = settings or Settings()
     app = FastAPI(title="MTProxy Panel", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts))
     app.state.store = Store(settings.database_path)
     app.state.telemt = telemt or TelemtClient(settings.telemt_url, settings.telemt_token)
+    app.state.naive = naive or NaiveClient(settings.naive_socket, settings.naive_token)
     app.state.settings = settings
     app.state.reveals = {}
     static = Path(__file__).parent / "static"
@@ -121,6 +131,10 @@ def create_app(settings: Settings | None = None, *, telemt=None):
 
     def ip(request): return request.client.host if request.client else "unknown"
     def audit(user, action, target, request, detail=None): app.state.store.audit(user, action, target, ip(request), detail)
+
+    def require_naive():
+        if not settings.naive_enabled:
+            raise HTTPException(404, "feature unavailable")
 
     def safe_user(data):
         return {key: value for key, value in data.items() if key not in {"secret", "links"}}
@@ -171,16 +185,46 @@ def create_app(settings: Settings | None = None, *, telemt=None):
             raise HTTPException(409, "connection link unavailable")
         return value
 
+    def naive_reveal(value, username: str) -> dict:
+        if not isinstance(value, dict) or not isinstance(value.get("proxy_url"), str):
+            raise HTTPException(409, "NaiveProxy access unavailable")
+        raw = value["proxy_url"]
+        try:
+            parts = urlsplit(raw)
+            valid = (
+                parts.scheme == "https" and parts.hostname == settings.naive_public_host
+                and parts.port in {None, 443} and unquote(parts.username or "") == username
+                and bool(unquote(parts.password or "")) and parts.path in {"", "/"}
+                and not parts.query and not parts.fragment and len(raw) <= 2048
+            )
+        except (TypeError, ValueError, UnicodeError):
+            valid = False
+        if not valid:
+            raise HTTPException(409, "NaiveProxy access unavailable")
+        return {
+            "username": username,
+            "proxy_url": raw,
+            "config": {"listen": "socks://127.0.0.1:1080", "proxy": raw},
+            "qr": qr_data(raw),
+        }
+
     def reveal(data, owner):
         if data.get("link"):
             link = proxy_link(data["link"])
             data = {**data, "link": link, "qr": qr_data(link)}
+        now = time.monotonic()
+        for expired_token, value in list(app.state.reveals.items()):
+            if value[0] < now:
+                app.state.reveals.pop(expired_token, None)
         token = secrets.token_urlsafe(32)
-        app.state.reveals[token] = (time.monotonic() + settings.reveal_ttl_seconds, owner["token_hash"], data)
+        app.state.reveals[token] = (now + settings.reveal_ttl_seconds, owner["token_hash"], data)
         return token
 
     @app.exception_handler(TelemtError)
     async def telemt_error(_request, _exc): return JSONResponse({"detail": "Telemt service unavailable"}, 502)
+
+    @app.exception_handler(NaiveError)
+    async def naive_error(_request, exc): return JSONResponse({"detail": "NaiveProxy manager unavailable"}, exc.status_code)
 
     @app.get("/healthz")
     async def healthz(): return {"status": "ok"}
@@ -220,7 +264,7 @@ def create_app(settings: Settings | None = None, *, telemt=None):
 
     @app.get("/api/auth/me")
     async def me(user=Depends(current)):
-        return {"username": user["username"], "role": user["role"]}
+        return {"username": user["username"], "role": user["role"], "features": {"naive": settings.naive_enabled}}
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
@@ -267,6 +311,51 @@ def create_app(settings: Settings | None = None, *, telemt=None):
             data = {"username": username, "reveal_token": reveal(secret_reveal(result), user)}
         else: data = await app.state.telemt.set_enabled(username, operation == "enable")
         audit(user, f"user.{operation}", username, request); return data
+
+    @app.get("/api/naive/users")
+    async def naive_users(_user=Depends(current)):
+        require_naive()
+        health, items = await asyncio.gather(app.state.naive.health(), app.state.naive.list_users())
+        safe_items = [
+            {"username": item.get("username"), "enabled": item.get("enabled") is True}
+            for item in items if isinstance(item, dict) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(item.get("username", "")))
+        ]
+        return {
+            "items": safe_items,
+            "service": {"ready": health.get("ready") is True, "host": settings.naive_public_host},
+        }
+
+    @app.post("/api/naive/users", status_code=201)
+    async def naive_add(body: NaiveUserCreate, request: Request, user=Depends(roles("owner", "admin"))):
+        require_naive()
+        data = naive_reveal(await app.state.naive.create(body.username), body.username)
+        audit(user, "naive.create", body.username, request)
+        return {"username": body.username, "reveal_token": reveal(data, user)}
+
+    @app.post("/api/naive/users/{username}/access")
+    async def naive_access(username: str, request: Request, user=Depends(roles("owner", "admin"))):
+        require_naive()
+        data = naive_reveal(await app.state.naive.reveal(username), username)
+        audit(user, "naive.access", username, request)
+        return data
+
+    @app.post("/api/naive/users/{username}/{operation}")
+    async def naive_operation(username: str, operation: Literal["enable", "disable", "rotate"], request: Request, user=Depends(roles("owner", "admin"))):
+        require_naive()
+        if operation == "rotate":
+            data = naive_reveal(await app.state.naive.rotate(username), username)
+            result = {"username": username, "reveal_token": reveal(data, user)}
+        else:
+            changed = await app.state.naive.set_enabled(username, operation == "enable")
+            result = {"username": username, "enabled": changed.get("enabled") is True}
+        audit(user, f"naive.{operation}", username, request)
+        return result
+
+    @app.delete("/api/naive/users/{username}", status_code=204)
+    async def naive_delete(username: str, request: Request, user=Depends(roles("owner", "admin"))):
+        require_naive()
+        await app.state.naive.delete(username)
+        audit(user, "naive.delete", username, request)
 
     @app.get("/api/reveal/{token}")
     async def get_reveal(token: str, user=Depends(current)):

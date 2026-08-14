@@ -4,15 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#08090a">
-  <title>MTProxy Control</title>
+  <title>Proxy Control</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <aside class="sidebar">
-    <div class="brand"><span class="brand-mark">M</span><span><b>MTProxy</b><small>CONTROL</small></span></div>
+    <div class="brand"><span class="brand-mark">P</span><span><b>Proxy</b><small>CONTROL</small></span></div>
     <nav aria-label="Основная навигация">
       <button class="nav-item active" data-view="dashboard"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20h-6v-6h-4v6H4z"/></svg><span>Обзор</span></button>
       <button class="nav-item" data-view="users"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="3"/><circle cx="16" cy="12" r="3"/><path d="M11 12h2M3 12H1m22 0h-2"/></svg><span>Подключения</span><span class="nav-count" id="users-count">—</span></button>
+      <button class="nav-item" data-view="naive"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.7 2.8 8.1 7 10 4.2-1.9 7-5.3 7-10V6z"/><path d="M9 12h6M12 9v6"/></svg><span>NaiveProxy</span><span class="nav-count" id="naive-count">—</span></button>
       <button class="nav-item owner-only" data-view="admins" hidden><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.6-4 2.8-6 7-6s6.4 2 7 6"/></svg><span>Администраторы</span></button>
       <button class="nav-item audit-nav" data-view="audit" hidden><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6h13M7 12h13M7 18h13"/><circle cx="3" cy="6" r="1"/><circle cx="3" cy="12" r="1"/><circle cx="3" cy="18" r="1"/></svg><span>Журнал</span></button>
     </nav>
@@ -34,6 +35,7 @@
   <nav class="mobile-nav" aria-label="Мобильная навигация">
     <button class="active" data-view="dashboard"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20h-6v-6h-4v6H4z"/></svg><small>Обзор</small></button>
     <button data-view="users"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="3"/><circle cx="16" cy="12" r="3"/><path d="M11 12h2"/></svg><small>Доступы</small></button>
+    <button data-view="naive"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.7 2.8 8.1 7 10 4.2-1.9 7-5.3 7-10V6z"/><path d="M9 12h6M12 9v6"/></svg><small>Naive</small></button>
     <button class="owner-only" data-view="admins" hidden><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.6-4 2.8-6 7-6s6.4 2 7 6"/></svg><small>Админы</small></button>
     <button class="audit-nav" data-view="audit" hidden><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h14M6 12h14M6 18h14"/></svg><small>Журнал</small></button>
     <button id="mobile-logout"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H4v14h6M14 8l4 4-4 4m4-4H9"/></svg><small>Выйти</small></button>
@@ -46,6 +48,16 @@
       <label>Имя подключения<input id="new-user" pattern="[A-Za-z0-9.\-]+" maxlength="32" autocomplete="off" placeholder="например, phone-sergey" required><small>Латиница, цифры, точка и дефис</small></label>
       <div class="form-error" id="user-error" role="alert"></div>
       <footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-user" type="button" disabled>Создать доступ</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="naive-modal" class="sheet">
+    <form method="dialog" id="naive-form">
+      <div class="modal-head"><div><span class="eyebrow">NAIVEPROXY</span><h2>Новый HTTPS-прокси</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
+      <p class="modal-copy">Создаст отдельную пару логин/пароль и безопасно применит её через проверку Caddy.</p>
+      <label>Имя доступа<input id="new-naive-user" pattern="[A-Za-z0-9_.\-]+" maxlength="64" autocomplete="off" placeholder="например, macbook-sergey" required><small>Латиница, цифры, точка, дефис и подчёркивание</small></label>
+      <div class="form-error" id="naive-error" role="alert"></div>
+      <footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-naive" type="button" disabled>Создать доступ</button></footer>
     </form>
   </dialog>
 
@@ -77,6 +89,18 @@
       </div>
       <div class="security-note">Не публикуйте ссылку открыто: любой, у кого она есть, сможет использовать прокси.</div>
       <footer><button class="secondary" value="cancel">Закрыть</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="naive-access-modal" class="access-dialog">
+    <form method="dialog">
+      <div class="modal-head"><div><span class="eyebrow">NAIVEPROXY</span><h2 id="naive-access-title">Доступ к HTTPS-прокси</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
+      <div class="access-layout">
+        <div class="qr-wrap"><img id="naive-qr-image" alt="QR-код NaiveProxy"><span>URL содержит пароль</span></div>
+        <div class="access-details"><span class="status-pill active"><i></i> Конфигурация готова</span><p>Скопируйте URL в NaiveProxy-клиент или скачайте готовый <code>config.json</code>.</p><label>HTTPS proxy URL<div class="copy-field"><input id="naive-proxy-url" readonly aria-label="NaiveProxy URL"><button id="copy-naive-url" type="button">Копировать</button></div></label><div class="access-actions"><a class="primary button" id="download-naive-config" download="naive-config.json">Скачать config.json</a><button class="secondary" id="copy-naive-config" type="button">Копировать JSON</button></div></div>
+      </div>
+      <div class="security-note">URL содержит пароль. Не публикуйте его и передавайте только доверенному устройству.</div>
+      <footer><button class="secondary" value="cancel" formnovalidate>Закрыть</button></footer>
     </form>
   </dialog>
 

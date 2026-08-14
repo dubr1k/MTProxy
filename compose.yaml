@@ -47,7 +47,6 @@ services:
       - telemt-config:/var/lib/telemt
     cap_drop:
       - ALL
-
     security_opt:
       - no-new-privileges:true
     healthcheck:
