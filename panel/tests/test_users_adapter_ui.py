@@ -69,7 +69,37 @@ async def test_dashboard_summarizes_both_protocols_without_naive_traffic_inventi
         "ready": True,
         "host": "naive.example.com",
         "credentials": {"active": 1, "disabled": 1, "total": 2},
-        "traffic": {"available": False, "reason": "not_collected"},
+        "traffic": {
+            "available": True,
+            "source": "caddy_connect_access_log",
+            "unit": "bytes",
+            "directions": {
+                "upload_bytes": "client_to_proxy",
+                "download_bytes": "proxy_to_client",
+            },
+            "pending": False,
+            "aggregate": {"upload_bytes": 0, "download_bytes": 0, "total_bytes": 0},
+            "users": [
+                {
+                    "username": "web-on", "upload_bytes": 0, "download_bytes": 0,
+                    "total_bytes": 0, "period_start": naive.period_start,
+                    "updated_at": naive.period_start,
+                },
+                {
+                    "username": "web-off", "upload_bytes": 0, "download_bytes": 0,
+                    "total_bytes": 0, "period_start": naive.period_start,
+                    "updated_at": naive.period_start,
+                },
+            ],
+            "semantics": {
+                "closed_connect_tunnels_only": True,
+                "active_tunnels_appear_on_close": True,
+                "crash_can_lose_active_tunnel": True,
+                "completed_records_survive_restart": True,
+                "excludes_tls_ip_overhead": True,
+                "reset_is_local_baseline_only": True,
+            },
+        },
     }
     assert "not-returned" not in str(body)
 
@@ -217,7 +247,10 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'id="naive-access-modal"' in text and 'id="copy-naive-url"' in text
     assert "renderNaive" in js and "naiveAction" in js and "showNaiveAccess" in js
     assert 'class="protocol-overview"' in js
-    assert "Трафик не собирается" in js
+    assert "↑ ${bytes(user.upload_bytes)} · ↓ ${bytes(user.download_bytes)} · Σ ${bytes(user.total_bytes)}" in js
+    assert "Только закрытые CONNECT-туннели" in js
+    assert 'data-naive-action="reset-traffic"' in js
+    assert "Сбросить локальный счётчик?" in js
     assert "NaiveProxy недоступен" in js
     assert 'data-quick="naive-users"' in js
     assert "admin-form');if(!form.reportValidity()" in js

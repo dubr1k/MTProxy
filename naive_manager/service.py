@@ -15,9 +15,13 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
 
+from .traffic import TrafficCollector
+
 
 BEGIN = "# BEGIN NAIVE-MANAGER USERS"
 END = "# END NAIVE-MANAGER USERS"
+ACCOUNTING_BEGIN = "# BEGIN NAIVE-MANAGER ACCOUNTING"
+ACCOUNTING_END = "# END NAIVE-MANAGER ACCOUNTING"
 USERNAME = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
 
 
@@ -110,6 +114,8 @@ class NaiveCredentialManager:
     validate: Callable[[Path], dict]
     reload: Callable[[], None]
     probe: Callable[[], None]
+    caddyfile_mode: int = 0o640
+    traffic: TrafficCollector | None = None
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _recovery_failed: bool = field(default=False, init=False, repr=False)
 
@@ -164,6 +170,10 @@ class NaiveCredentialManager:
             state = self._read_state()
             self._assert_consistent(state)
             self.probe()
+            if self.traffic is not None:
+                self.traffic.collect()
+                if self.traffic.health().get("ready") is not True:
+                    raise ManagerConflict("traffic accounting is unavailable")
             return {"ready": True, "host": self.public_host}
         except Exception:
             return {"ready": False, "host": self.public_host}
@@ -172,6 +182,24 @@ class NaiveCredentialManager:
     def list_users(self) -> list[dict]:
         state = self._read_state()
         return [{"username": row["username"], "enabled": bool(row["enabled"])} for row in state["users"]]
+
+    def traffic_report(self) -> dict:
+        if self.traffic is None:
+            raise ManagerConflict("traffic accounting is unavailable")
+        self.traffic.collect()
+        return self.traffic.list_traffic()
+
+    def reset_traffic(self, username: str) -> dict:
+        with self._lock:
+            self._find(self._read_state(), username)
+        if self.traffic is None:
+            raise ManagerConflict("traffic accounting is unavailable")
+        self.traffic.collect()
+        return self.traffic.reset(username)
+
+    @synchronized
+    def managed_usernames(self) -> set[str]:
+        return {row["username"] for row in self._read_state()["users"]}
 
     @synchronized
     def reveal(self, username: str) -> dict:
@@ -262,7 +290,7 @@ class NaiveCredentialManager:
             transaction["recovery_from"] = recovery_from
             try:
                 self._write_transaction(transaction)
-                _atomic_write(self.caddyfile, config_before)
+                _atomic_write(self.caddyfile, config_before, self.caddyfile_mode)
                 _atomic_write(self.state_file, state_before)
                 self._validate_config(self.caddyfile)
                 self.reload()
@@ -280,14 +308,14 @@ class NaiveCredentialManager:
         fd, temporary = tempfile.mkstemp(prefix=".Caddyfile.naive.", dir=self.caddyfile.parent)
         path = Path(temporary)
         try:
-            os.fchmod(fd, 0o600)
+            os.fchmod(fd, self.caddyfile_mode)
             with os.fdopen(fd, "w") as stream:
                 stream.write(rendered)
                 stream.flush()
                 os.fsync(stream.fileno())
             self._validate_config(path)
             os.replace(path, self.caddyfile)
-            os.chmod(self.caddyfile, 0o600)
+            os.chmod(self.caddyfile, self.caddyfile_mode)
             _fsync_directory(self.caddyfile.parent)
         finally:
             path.unlink(missing_ok=True)
@@ -379,7 +407,7 @@ class NaiveCredentialManager:
             state_backup = self.backup_dir / transaction["state_backup"]
             _assert_regular(config_backup)
             _assert_regular(state_backup)
-            _atomic_write(self.caddyfile, config_backup.read_bytes())
+            _atomic_write(self.caddyfile, config_backup.read_bytes(), self.caddyfile_mode)
             if transaction.get("state_existed", True):
                 _atomic_write(self.state_file, state_backup.read_bytes())
             else:
@@ -414,6 +442,7 @@ class NaiveCredentialManager:
 
     def _assert_consistent(self, state: dict) -> None:
         text = self.caddyfile.read_text()
+        self._assert_accounting_config(text)
         actual = self._managed_credentials(text)
         expected = [(row["username"], row["password"]) for row in state["users"] if row["enabled"]]
         if actual != expected:
@@ -526,7 +555,7 @@ class NaiveCredentialManager:
     @classmethod
     def _render_initial(cls, text: str, state: dict) -> str:
         lines = text.splitlines()
-        if any(line.strip() in {BEGIN, END} for line in lines):
+        if any(line.strip() in {BEGIN, END, ACCOUNTING_BEGIN, ACCOUNTING_END} for line in lines):
             raise ManagerConflict("managed credential markers already present")
         start, end = cls._forward_bounds(lines)
         auth_indexes = [i for i in range(start + 1, end) if re.match(r"^\s*basic_auth\s+", lines[i])]
@@ -537,6 +566,12 @@ class NaiveCredentialManager:
         first = auth_indexes[0]
         lines = [line for i, line in enumerate(lines) if i not in set(auth_indexes)]
         lines[first:first] = block
+        route_indexes = [i for i, line in enumerate(lines) if re.match(r"^\s*route\s*\{", line)]
+        if len(route_indexes) != 1:
+            raise ManagerConflict("exactly one route block is required")
+        route_index = route_indexes[0]
+        site_indent = re.match(r"^(\s*)", lines[route_index]).group(1)
+        lines[route_index:route_index] = cls._accounting_lines(site_indent)
         return "\n".join(lines) + "\n"
 
     @classmethod
@@ -551,6 +586,42 @@ class NaiveCredentialManager:
     def _credential_lines(state: dict, indent: str) -> list[str]:
         rows = [f"{indent}basic_auth {row['username']} {row['password']}" for row in state["users"] if row["enabled"]]
         return [f"{indent}{BEGIN}", *rows, f"{indent}{END}"]
+
+    @staticmethod
+    def _accounting_lines(indent: str) -> list[str]:
+        inner = indent + "    "
+        deep = inner + "    "
+        return [
+            f"{indent}{ACCOUNTING_BEGIN}",
+            f"{indent}log naive_accounting {{",
+            f"{inner}output file /var/log/naive-proxy/access.json {{",
+            f"{deep}mode 0600",
+            f"{deep}roll_size 10MiB",
+            f"{deep}roll_keep 10",
+            f"{deep}roll_keep_for 168h",
+            f"{deep}roll_uncompressed",
+            f"{inner}}}",
+            f"{inner}format filter {{",
+            f"{deep}wrap json",
+            f"{deep}fields {{",
+            f"{deep}    request>headers>Proxy-Authorization delete",
+            f"{deep}    user_id regexp ^(invalidbase64|invalidformat|invalid):.*$ invalid",
+            f"{deep}}}",
+            f"{inner}}}",
+            f"{indent}}}",
+            f"{indent}{ACCOUNTING_END}",
+        ]
+
+    @classmethod
+    def _assert_accounting_config(cls, text: str) -> None:
+        lines = text.splitlines()
+        begins = [i for i, line in enumerate(lines) if line.strip() == ACCOUNTING_BEGIN]
+        ends = [i for i, line in enumerate(lines) if line.strip() == ACCOUNTING_END]
+        if len(begins) != 1 or len(ends) != 1 or begins[0] >= ends[0]:
+            raise ManagerConflict("managed accounting block must have exactly one marker pair")
+        indent = re.match(r"^(\s*)", lines[begins[0]]).group(1)
+        if lines[begins[0]:ends[0] + 1] != cls._accounting_lines(indent):
+            raise ManagerConflict("managed accounting block changed outside manager")
 
     def _prune_backups(self) -> None:
         backups = sorted(self.backup_dir.glob("*.Caddyfile"), reverse=True)

@@ -54,7 +54,7 @@ NAIVE_PUBLIC_HOST=proxy.example.com
 NAIVE_DATA_DIR=/var/lib/naive-manager
 ```
 
-`naive-manager` работает отдельным непривилегированным контейнером, использует host network только для локального Caddy Admin API и TLS-probe и не получает Docker socket. Контейнер панели видит лишь token-authenticated Unix socket в отдельном tmpfs volume. Writable bind mount ограничен каталогом `NAIVE_DATA_DIR`, где находятся:
+`naive-manager` работает отдельным непривилегированным контейнером, использует host network только для loopback Caddy Admin API/TLS-probe и не получает Docker socket. Запись разрешена только в `NAIVE_DATA_DIR` и private runtime socket volume. `/var/log/naive-proxy` подключён read-only как `/logs`; SQLite и WAL учёта лежат под `/data` с mode `0600`. Учитываются только завершённые успешные CONNECT-записи управляемых пользователей: `bytes_read` — client→proxy, `size` — proxy→client. Это payload-байты закрытых туннелей, а не TLS/IP traffic и не enforceable quota.
 
 - `Caddyfile` — источник истины Caddy с управляемым блоком `NAIVE-MANAGER USERS`;
 - `users.json` — root/manager-only состояние, включая отключённые ключи;
@@ -67,21 +67,31 @@ NAIVE_DATA_DIR=/var/lib/naive-manager
 ```sh
 NAIVE_DATA_DIR=${NAIVE_DATA_DIR:-/var/lib/naive-manager}
 test ! -L "${NAIVE_DATA_DIR}" || { echo "NAIVE_DATA_DIR must not be a symlink" >&2; exit 1; }
-install -d -o root -g root -m 0700 "${NAIVE_DATA_DIR}"
+getent group naive-caddy >/dev/null || groupadd --system --gid 101 naive-caddy
+id naive-caddy >/dev/null 2>&1 || useradd --system --uid 10002 --gid naive-caddy --home /nonexistent --shell /usr/sbin/nologin naive-caddy
+test "$(id -u naive-caddy)" = 10002 || { echo "naive-caddy must use UID 10002" >&2; exit 1; }
+test "$(getent group naive-caddy | cut -d: -f3)" = 101 || { echo "naive-caddy must use GID 101" >&2; exit 1; }
+install -d -o 10002 -g 101 -m 0750 "${NAIVE_DATA_DIR}"
+install -d -o naive-caddy -g naive-caddy -m 0700 /var/log/naive-proxy
 for file in Caddyfile manager-token; do
   test -f "${NAIVE_DATA_DIR}/${file}" && test ! -L "${NAIVE_DATA_DIR}/${file}" || exit 1
 done
 chown -h 10002:101 "${NAIVE_DATA_DIR}/Caddyfile" "${NAIVE_DATA_DIR}/manager-token"
-chmod 0600 "${NAIVE_DATA_DIR}/Caddyfile"
+chmod 0640 "${NAIVE_DATA_DIR}/Caddyfile"
 chmod 0400 "${NAIVE_DATA_DIR}/manager-token"
 chown 10002:101 "${NAIVE_DATA_DIR}"
 docker compose -f compose.yaml -f compose.naive.yaml run --rm --build naive-manager --bootstrap-only
 caddy validate --config /var/lib/naive-manager/Caddyfile
+install -o root -g root -m 0755 scripts/check-naive-caddy-build.sh /usr/local/libexec/check-naive-caddy-build
+install -o root -g root -m 0644 deploy/caddy-naive.service /etc/systemd/system/caddy-naive.service
+systemctl daemon-reload
 ```
 
-Каталог `${NAIVE_DATA_DIR}`, `Caddyfile`, создаваемые `users.json`, `transaction.json` и `backups/` должны принадлежать UID/GID `10002:101`. Текущий production unit `caddy-naive.service` работает как `root:root` и поэтому может прочитать mode-`0700` каталог и mode-`0600` Caddyfile. Если host Caddy запускается непривилегированным пользователем `caddy`, до переключения unit выдайте ему только traverse/read через отдельную группу или ACL и проверьте доступ командой от имени этого пользователя; не делайте credential-файлы world-readable.
+Manager-контейнер и host Caddy намеренно используют один dedicated file identity `10002:101`: иначе Caddy access log mode `0600` нельзя безопасно читать через read-only bind manager-а. Systemd unit компенсирует это, делая token, state, journal, backups, traffic DB и WAL недоступными внутри mount namespace Caddy. Остальной sandbox strict, запись разрешена только в `/var/log/naive-proxy`. До cutover выполните `systemd-analyze verify`, проверьте User/Group через `systemctl show` и подтвердите недоступность sensitive paths из namespace работающего unit.
 
-После validation переключите host Caddy service на этот Caddyfile и сделайте controlled reload. Manager применяет каждое дальнейшее изменение по схеме paired backup → Caddy adapt с `validate=true` → fsync-журнал → atomic replace → Caddy `/load` → HTTPS probe. При ошибке оба файла восстанавливаются, а восстановленная live-конфигурация обязательно проходит reload и probe; если rollback не подтверждён, manager остаётся unhealthy и сохраняет журнал для startup recovery. Create/reveal/rotate responses имеют `Cache-Control: no-store`; список и аудит не содержат паролей или proxy URL. Viewer видит только имена и статусы.
+Для миграции сначала остановите mutations и сохраните unit, Caddy binary, Caddyfile, manager data и log directory. Установите pinned binary/checker, выполните checker и точный `caddy adapt --validate`, bootstrap manager, затем переключите unit и запустите Compose override. Старый unit и backup не удаляйте до успешных health, cover HTTPS, authenticated CONNECT, traffic collection и регрессии соседних SNI. Дальнейшие изменения идут через paired backup → adapt/validate → fsync journal → atomic replace → `/load` → HTTPS probe; неподтверждённый rollback оставляет manager unhealthy и сохраняет journal.
+
+Rollback выполняется на host: остановите `naive-manager`, одной генерацией восстановите Caddyfile/unit/binary и snapshot manager data, провалидируйте восстановленным build, перезапустите Caddy и повторите cover/authenticated/SNI probes. Не копируйте один `traffic.sqlite3` без `-wal`/`-shm` при работающем manager. Reset меняет только локальный baseline; viewer reset запрещён, audit сохраняет только action/username без credentials и authorization headers.
 
 Клиенту выдаются HTTPS proxy URL, QR и готовый `config.json`:
 

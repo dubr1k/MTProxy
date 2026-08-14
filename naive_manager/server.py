@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from .service import ManagerConflict, ManagerNotFound, NaiveCredentialManager
+from .traffic import TrafficCollector
 
 
 class ManagerHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -83,6 +84,8 @@ class ManagerHandler(BaseHTTPRequestHandler):
                 return self._send(200 if health.get("ready") is True else 503, health)
             if self.command == "GET" and path == "/v1/users":
                 return self._send(200, self.server.manager.list_users())
+            if self.command == "GET" and path == "/v1/traffic":
+                return self._send(200, self.server.manager.traffic_report())
             if self.command == "POST" and path == "/v1/users":
                 return self._send(201, self.server.manager.create(self._body().get("username", "")))
             prefix = "/v1/users/"
@@ -103,6 +106,9 @@ class ManagerHandler(BaseHTTPRequestHandler):
                         return self._send(200, self.server.manager.set_enabled(username, True))
                     if operation == "disable":
                         return self._send(200, self.server.manager.set_enabled(username, False))
+                if self.command == "POST" and len(tail) == 3 and tail[1:] == ["traffic", "reset"]:
+                    self._body()
+                    return self._send(200, self.server.manager.reset_traffic(username))
             self._send(404, {"detail": "not found"})
         except ManagerNotFound:
             self._send(404, {"detail": "not found"})
@@ -162,7 +168,7 @@ def https_probe(host: str, port: int = 4443) -> None:
 
 def build_manager() -> NaiveCredentialManager:
     host = os.getenv("NAIVE_PUBLIC_HOST", "chrbased.dubr1k-solutions.com")
-    return NaiveCredentialManager(
+    manager = NaiveCredentialManager(
         caddyfile=Path(os.getenv("NAIVE_CADDYFILE", "/data/Caddyfile")),
         state_file=Path(os.getenv("NAIVE_STATE_FILE", "/data/users.json")),
         backup_dir=Path(os.getenv("NAIVE_BACKUP_DIR", "/data/backups")),
@@ -171,6 +177,12 @@ def build_manager() -> NaiveCredentialManager:
         reload=command_reload,
         probe=lambda: https_probe(host),
     )
+    manager.traffic = TrafficCollector(
+        Path(os.getenv("NAIVE_TRAFFIC_LOG", "/logs/access.json")),
+        Path(os.getenv("NAIVE_TRAFFIC_DATABASE", "/data/traffic.sqlite3")),
+        manager.managed_usernames,
+    )
+    return manager
 
 
 def main() -> None:
@@ -181,6 +193,10 @@ def main() -> None:
     manager.bootstrap()
     if args.bootstrap_only:
         return
+    traffic = manager.traffic
+    if traffic is None:
+        raise SystemExit("traffic accounting is unavailable")
+    traffic.collect()
     token_file = Path(os.getenv("NAIVE_MANAGER_TOKEN_FILE", "/etc/naive-manager/token"))
     token = token_file.read_text().strip()
     if len(token) < 32:
@@ -196,6 +212,7 @@ def main() -> None:
         server.serve_forever()
     finally:
         server.server_close()
+        traffic.close()
 
 
 if __name__ == "__main__":

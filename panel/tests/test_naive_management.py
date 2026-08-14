@@ -17,8 +17,16 @@ async def test_naive_list_is_secret_free_and_viewer_is_read_only(client, login_u
     listed = await client.get("/api/naive/users")
     assert listed.status_code == 200
     assert listed.json() == {
-        "items": [{"username": "phone", "enabled": True}],
+        "items": [{
+            "username": "phone", "enabled": True, "upload_bytes": 0,
+            "download_bytes": 0, "total_bytes": 0,
+            "period_start": naive.period_start, "updated_at": naive.period_start,
+        }],
         "service": {"ready": True, "host": "naive.example.com"},
+        "traffic": {
+            "source": "caddy_connect_access_log", "unit": "bytes", "pending": False,
+            "directions": {"upload_bytes": "client_to_proxy", "download_bytes": "proxy_to_client"},
+        },
     }
     assert "hidden-password" not in listed.text
 
@@ -161,7 +169,7 @@ async def test_dashboard_stays_available_when_enabled_naive_manager_is_degraded(
         "ready": False,
         "host": "naive.example.com",
         "credentials": {"available": False},
-        "traffic": {"available": False, "reason": "not_collected"},
+        "traffic": {"available": False, "reason": "manager_unavailable"},
     }
     assert "internal details" not in response.text
 
@@ -185,3 +193,42 @@ async def test_creating_reveal_purges_expired_password_bearing_entries(client, l
     )
 
     assert first_token not in client._transport.app.state.reveals
+
+
+async def test_naive_traffic_is_allowlisted_in_users_and_dashboard_and_admin_can_reset(
+    client, login_user, naive,
+):
+    naive.seed("phone", "hidden", enabled=True)
+    naive.set_traffic("phone", upload=12345, download=67890)
+    await login_user(client)
+    listed = (await client.get("/api/naive/users")).json()
+    assert listed["items"][0]["upload_bytes"] == 12345
+    assert listed["items"][0]["download_bytes"] == 67890
+    assert listed["items"][0]["total_bytes"] == 80235
+    assert "password" not in str(listed).lower()
+    dashboard = (await client.get("/api/dashboard")).json()["protocols"]["naive"]["traffic"]
+    assert dashboard["aggregate"] == {
+        "upload_bytes": 12345, "download_bytes": 67890, "total_bytes": 80235,
+    }
+    csrf = client.cookies["panel_csrf"]
+    reset = await client.post(
+        "/api/naive/users/phone/traffic/reset", headers={"X-CSRF-Token": csrf},
+    )
+    assert reset.status_code == 200
+    assert reset.json()["total_bytes"] == 0
+    assert naive.users["phone"]["password"] == "hidden"
+    assert ("reset_traffic", "phone") in naive.calls
+    audit = (await client.get("/api/audit")).json()["items"]
+    assert any(row["action"] == "naive.traffic.reset" for row in audit)
+
+
+async def test_viewer_cannot_reset_naive_traffic(client, login_user, naive):
+    naive.seed("phone", "hidden", enabled=True)
+    client._transport.app.state.store.create_admin("reader", "viewer correct horse battery", "viewer")
+    await login_user(client, "reader", "viewer correct horse battery")
+    response = await client.post(
+        "/api/naive/users/phone/traffic/reset",
+        headers={"X-CSRF-Token": client.cookies["panel_csrf"]},
+    )
+    assert response.status_code == 403
+    assert not any(call[0] == "reset_traffic" for call in naive.calls)

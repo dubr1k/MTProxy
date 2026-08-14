@@ -10,8 +10,11 @@ services:
       NAIVE_PUBLIC_HOST: ${NAIVE_PUBLIC_HOST:-chrbased.dubr1k-solutions.com}
       NAIVE_MANAGER_TOKEN_FILE: /data/manager-token
       NAIVE_SOCKET_MODE: "660"
+      NAIVE_TRAFFIC_LOG: /logs/access.json
+      NAIVE_TRAFFIC_DATABASE: /data/traffic.sqlite3
     volumes:
       - ${NAIVE_DATA_DIR:-/var/lib/naive-manager}:/data
+      - /var/log/naive-proxy:/logs:ro
       - naive-manager-run:/run/naive-manager
     read_only: true
     tmpfs:

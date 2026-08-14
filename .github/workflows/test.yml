@@ -14,14 +14,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Shell syntax
         run: |
-          bash -n install.sh uninstall.sh install_mtproxy.sh uninstall_mtproxy.sh scripts/check-deployment.sh docker/telemt-entrypoint.sh panel/entrypoint.sh
-          shellcheck install.sh uninstall.sh install_mtproxy.sh uninstall_mtproxy.sh scripts/check-deployment.sh docker/telemt-entrypoint.sh panel/entrypoint.sh
+          bash -n install.sh uninstall.sh install_mtproxy.sh uninstall_mtproxy.sh scripts/check-deployment.sh scripts/check-naive-caddy-build.sh docker/telemt-entrypoint.sh panel/entrypoint.sh
+          shellcheck install.sh uninstall.sh install_mtproxy.sh uninstall_mtproxy.sh scripts/check-deployment.sh scripts/check-naive-caddy-build.sh docker/telemt-entrypoint.sh panel/entrypoint.sh
+          test -x scripts/check-naive-caddy-build.sh
       - name: Python tests
         run: |
           python3 -m venv .venv
           .venv/bin/pip install -r panel/requirements-dev.txt
           .venv/bin/ruff check .
-          .venv/bin/python -m pytest -q panel/tests tests/test_naive_manager.py tests/test_proxyctl.py tests/test_proxyctl_transactions.py tests/test_proxyctl_runtime.py
+          .venv/bin/python -m pytest -q panel/tests tests/test_naive_manager.py tests/test_naive_traffic.py tests/test_proxyctl.py tests/test_proxyctl_transactions.py tests/test_proxyctl_runtime.py
           python3 -m unittest -v tests/test_deploy.py
       - name: Compose render
         run: |

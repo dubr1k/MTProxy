@@ -12,6 +12,22 @@ CLI = ROOT / "scripts" / "mtproxy-deploy"
 
 
 class DeployCliTests(unittest.TestCase):
+    def test_naive_caddy_unit_and_compose_preserve_least_privilege_log_contract(self):
+        unit = (ROOT / "deploy/caddy-naive.service").read_text()
+        compose = (ROOT / "compose.naive.yaml").read_text()
+        checker = (ROOT / "scripts/check-naive-caddy-build.sh").read_text()
+        self.assertIn("User=naive-caddy", unit)
+        self.assertIn("Group=naive-caddy", unit)
+        self.assertIn("NoNewPrivileges=true", unit)
+        self.assertIn("ProtectSystem=strict", unit)
+        self.assertIn("ReadWritePaths=/var/log/naive-proxy", unit)
+        self.assertIn("InaccessiblePaths=-/var/lib/naive-manager/manager-token", unit)
+        self.assertNotIn("User=root", unit)
+        self.assertIn("/var/log/naive-proxy:/logs:ro", compose)
+        self.assertIn("v2.11.4", checker)
+        self.assertIn("http.handlers.forward_proxy", checker)
+        self.assertIn("h1:XKxkMTgNSizEvKG6QHue6cAsFOteU2qA61w2tKkCWi0=", checker)
+        self.assertTrue(os.access(ROOT / "scripts/check-naive-caddy-build.sh", os.X_OK))
     def run_cli(self, *args, root: Path, check=True):
         env = os.environ.copy()
         env["MTPROXY_TEST_ROOT"] = str(root)

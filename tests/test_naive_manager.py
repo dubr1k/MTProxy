@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import threading
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 
 from naive_manager.server import ManagerHTTPServer, caddy_adapt
 from naive_manager.service import ManagerConflict, ManagerRecoveryError, NaiveCredentialManager
+from naive_manager.traffic import TrafficCollector
 
 
 CADDY = """{
@@ -96,10 +98,21 @@ def test_bootstrap_imports_existing_credentials_without_changing_them(tmp_path):
     assert "# BEGIN NAIVE-MANAGER USERS" in rendered
     assert "basic_auth old-user old-password" in rendered
     assert "upstream socks5://127.0.0.1:40000" in rendered
-    assert stat.S_IMODE(service.caddyfile.stat().st_mode) == 0o600
+    assert stat.S_IMODE(service.caddyfile.stat().st_mode) == 0o640
     assert stat.S_IMODE(service.state_file.stat().st_mode) == 0o600
     state = json.loads(service.state_file.read_text())
     assert state["version"] == 1
+    assert "# BEGIN NAIVE-MANAGER ACCOUNTING" in rendered
+    assert "output file /var/log/naive-proxy/access.json" in rendered
+    assert "mode 0600" in rendered and "roll_uncompressed" in rendered
+    assert "request>headers>Proxy-Authorization delete" in rendered
+    assert "wrap json" in rendered
+    assert "sampling" not in rendered
+    assert "user_id regexp ^(invalidbase64|invalidformat|invalid):.*$ invalid" in rendered
+    accounting = rendered.split("# BEGIN NAIVE-MANAGER ACCOUNTING", 1)[1].split(
+        "# END NAIVE-MANAGER ACCOUNTING", 1
+    )[0]
+    assert "old-password" not in accounting
 
 
 def test_bootstrap_rejects_preexisting_managed_markers(tmp_path):
@@ -808,3 +821,71 @@ def test_caddy_adapt_unwraps_caddy_211_envelope(tmp_path, monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", open_validated)
     assert caddy_adapt(candidate) == {"apps": {"http": {}}}
+
+
+def test_authenticated_traffic_api_lists_and_resets_without_changing_credentials(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    log = tmp_path / "access.json"
+    log.write_text(json.dumps({
+        "request": {"method": "CONNECT"}, "status": 200, "user_id": "old-user",
+        "bytes_read": 12, "size": 34,
+    }) + "\n")
+    service.traffic = TrafficCollector(
+        log, tmp_path / "traffic.sqlite3",
+        lambda: {row["username"] for row in service.list_users()},
+    )
+    before = service.reveal("old-user")["proxy_url"]
+    socket_path = tmp_path / "manager.sock"
+    server = ManagerHTTPServer(socket_path, service, "internal-token")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        transport = httpx.HTTPTransport(uds=str(socket_path))
+        with httpx.Client(transport=transport, base_url="http://manager") as client:
+            assert client.get("/v1/traffic").status_code == 401
+            listed = client.get("/v1/traffic", headers={"X-Naive-Token": "internal-token"})
+            assert listed.status_code == 200
+            assert listed.json()["users"][0]["total_bytes"] == 46
+            reset = client.post(
+                "/v1/users/old-user/traffic/reset", json={},
+                headers={"X-Naive-Token": "internal-token"},
+            )
+            assert reset.status_code == 200
+            assert reset.json()["total_bytes"] == 0
+            assert client.post(
+                "/v1/users/unknown/traffic/reset", json={},
+                headers={"X-Naive-Token": "internal-token"},
+            ).status_code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert service.reveal("old-user")["proxy_url"] == before
+
+
+@pytest.mark.skipif(not Path("/usr/local/bin/caddy").is_file(), reason="exact local Caddy is absent")
+def test_exact_local_caddy_accepts_managed_accounting_config_when_forwardproxy_module_present(tmp_path):
+    modules = subprocess.run(
+        ["/usr/local/bin/caddy", "list-modules"], check=True, capture_output=True, text=True,
+    ).stdout.splitlines()
+    if "http.handlers.forward_proxy" not in modules:
+        pytest.skip("exact local Caddy lacks http.handlers.forward_proxy")
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.caddyfile.write_text(
+        service.caddyfile.read_text().replace(
+            "file_server { root /var/www/naive }", "file_server {\n            root /var/www/naive\n        }"
+        )
+    )
+    service.bootstrap()
+    result = subprocess.run(
+        ["/usr/local/bin/caddy", "validate", "--config", str(service.caddyfile)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    version = subprocess.run(
+        ["/usr/local/bin/caddy", "version"], check=True, capture_output=True, text=True,
+    ).stdout
+    assert version.startswith("v2.11.4 ")

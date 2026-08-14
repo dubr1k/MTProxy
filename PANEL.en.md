@@ -56,28 +56,38 @@ NAIVE_PUBLIC_HOST=proxy.example.com
 NAIVE_DATA_DIR=/var/lib/naive-manager
 ```
 
-`naive-manager` is a dedicated unprivileged container. It uses host networking only for the loopback Caddy Admin API and TLS probe, has no Docker socket, and has a single writable bind mount: `NAIVE_DATA_DIR`. The panel sees only a token-authenticated Unix socket in a dedicated tmpfs volume. The data directory contains the managed Caddyfile, `users.json`, paired transactional backups, an fsync-backed recovery journal, and a mode-`0400` manager-token copy. The latest 20 backup generations are retained.
+`naive-manager` is a dedicated unprivileged container. It uses host networking only for the loopback Caddy Admin API and TLS probe, has no Docker socket, and can write only `NAIVE_DATA_DIR` and its private runtime socket volume. `/var/log/naive-proxy` is mounted read-only at `/logs`; accounting state is the mode-`0600` SQLite/WAL set under `/data`. The panel sees only the token-authenticated Unix socket. The manager accepts only complete, successful CONNECT records for managed usernames and exposes explicit secret-free response allowlists. Counters are payload bytes (`bytes_read` client→proxy and `size` proxy→client), appear when a tunnel closes, and are not TLS/IP usage or an enforceable quota.
 
 Before first start, copy the active Caddyfile to `${NAIVE_DATA_DIR}/Caddyfile`, create `secrets/naive-manager-token` with mode `0600`, provide the same token as `${NAIVE_DATA_DIR}/manager-token`, and run the initial import:
 
 ```sh
 NAIVE_DATA_DIR=${NAIVE_DATA_DIR:-/var/lib/naive-manager}
 test ! -L "${NAIVE_DATA_DIR}" || { echo "NAIVE_DATA_DIR must not be a symlink" >&2; exit 1; }
-install -d -o root -g root -m 0700 "${NAIVE_DATA_DIR}"
+getent group naive-caddy >/dev/null || groupadd --system --gid 101 naive-caddy
+id naive-caddy >/dev/null 2>&1 || useradd --system --uid 10002 --gid naive-caddy --home /nonexistent --shell /usr/sbin/nologin naive-caddy
+test "$(id -u naive-caddy)" = 10002 || { echo "naive-caddy must use UID 10002" >&2; exit 1; }
+test "$(getent group naive-caddy | cut -d: -f3)" = 101 || { echo "naive-caddy must use GID 101" >&2; exit 1; }
+install -d -o 10002 -g 101 -m 0750 "${NAIVE_DATA_DIR}"
+install -d -o naive-caddy -g naive-caddy -m 0700 /var/log/naive-proxy
 for file in Caddyfile manager-token; do
   test -f "${NAIVE_DATA_DIR}/${file}" && test ! -L "${NAIVE_DATA_DIR}/${file}" || exit 1
 done
 chown -h 10002:101 "${NAIVE_DATA_DIR}/Caddyfile" "${NAIVE_DATA_DIR}/manager-token"
-chmod 0600 "${NAIVE_DATA_DIR}/Caddyfile"
+chmod 0640 "${NAIVE_DATA_DIR}/Caddyfile"
 chmod 0400 "${NAIVE_DATA_DIR}/manager-token"
 chown 10002:101 "${NAIVE_DATA_DIR}"
 docker compose -f compose.yaml -f compose.naive.yaml run --rm --build naive-manager --bootstrap-only
 caddy validate --config /var/lib/naive-manager/Caddyfile
+install -o root -g root -m 0755 scripts/check-naive-caddy-build.sh /usr/local/libexec/check-naive-caddy-build
+install -o root -g root -m 0644 deploy/caddy-naive.service /etc/systemd/system/caddy-naive.service
+systemctl daemon-reload
 ```
 
-`${NAIVE_DATA_DIR}`, `Caddyfile`, and the generated `users.json`, `transaction.json`, and `backups/` must be owned by UID/GID `10002:101`. The current production `caddy-naive.service` runs as `root:root`, so it can read the mode-`0700` directory and mode-`0600` Caddyfile. If host Caddy runs as an unprivileged `caddy` user, grant only traverse/read through a dedicated group or ACL and verify access as that user before switching the unit; never make credential-bearing files world-readable.
+The container manager and host Caddy deliberately share the dedicated file identity `10002:101`; this is required for Caddy's mode-`0600` access log to remain readable through the manager's read-only bind mount. The systemd unit compensates by making the token, state, journal, backups, traffic DB, and WAL paths inaccessible inside Caddy's mount namespace. It otherwise has a strict filesystem sandbox and can write only `/var/log/naive-proxy`. Verify `systemd-analyze verify`, inspect `systemctl show caddy-naive -p User -p Group`, and confirm the sensitive paths are unreadable from the running service namespace before cutover.
 
-After validation, point the host Caddy service at that Caddyfile and perform a controlled reload. Every mutation follows paired backup → Caddy adapt with `validate=true` → fsync journal → atomic replace → Caddy `/load` → HTTPS probe. Failure restores both files and requires the restored live configuration to pass reload and probe. An unconfirmed rollback leaves the manager unhealthy and preserves the journal for startup recovery. A restart either restores the previous generation or reloads a completely written new generation according to the journal phase. Create/reveal/rotate responses use `Cache-Control: no-store`; list and audit responses contain no passwords or proxy URLs. Viewers can only see names and status.
+For migration, first stop mutations, back up the active unit, Caddy binary, Caddyfile, manager data, and log directory; install the pinned binary and checker; run the checker and exact `caddy adapt --validate`; bootstrap the manager; then switch the unit and start the Compose override. Do not delete the old unit or backup until health, cover HTTPS, authenticated CONNECT, traffic collection, and all adjacent SNI routes pass. Every later credential mutation follows paired backup → Caddy adapt with `validate=true` → fsync journal → atomic replace → Caddy `/load` → HTTPS probe. Failure restores both files and verifies the restored live generation. An unconfirmed rollback leaves the manager unhealthy and keeps the journal for startup recovery.
+
+Rollback is deliberately host-controlled: stop `naive-manager`, restore the saved Caddyfile/unit/binary and manager-data snapshot as one generation, run the restored build's validation, restart Caddy, and re-run cover/authenticated/SNI probes before removing the override. Never copy only `traffic.sqlite3` without its `-wal`/`-shm` files while the manager is running. A traffic reset changes only the local baseline; viewers are denied reset, and audit records the username/action without credentials or authorization headers.
 
 The UI provides an HTTPS proxy URL, QR, and ready-to-download `config.json`:
 

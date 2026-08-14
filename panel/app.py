@@ -226,6 +226,46 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
                 result[key] = value
         return result
 
+    def safe_naive_traffic(data):
+        if not isinstance(data, dict):
+            raise NaiveError("Invalid NaiveProxy traffic response")
+        rows = []
+        for row in data.get("users", []):
+            if not isinstance(row, dict) or re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(row.get("username", ""))) is None:
+                continue
+            values = [row.get(key) for key in ("upload_bytes", "download_bytes", "total_bytes")]
+            if any(type(value) is not int or not 0 <= value <= 2**63 - 1 for value in values):
+                continue
+            if values[0] + values[1] != values[2]:
+                continue
+            if not isinstance(row.get("period_start"), str) or not isinstance(row.get("updated_at"), str):
+                continue
+            rows.append({
+                "username": row["username"], "upload_bytes": values[0],
+                "download_bytes": values[1], "total_bytes": values[2],
+                "period_start": row["period_start"], "updated_at": row["updated_at"],
+            })
+        directions = {"upload_bytes": "client_to_proxy", "download_bytes": "proxy_to_client"}
+        if data.get("source") != "caddy_connect_access_log" or data.get("unit") != "bytes" or data.get("directions") != directions:
+            raise NaiveError("Invalid NaiveProxy traffic response")
+        semantics = data.get("semantics") if isinstance(data.get("semantics"), dict) else {}
+        semantic_keys = (
+            "closed_connect_tunnels_only", "active_tunnels_appear_on_close",
+            "crash_can_lose_active_tunnel", "completed_records_survive_restart",
+            "excludes_tls_ip_overhead", "reset_is_local_baseline_only",
+        )
+        return {
+            "source": "caddy_connect_access_log", "unit": "bytes", "directions": directions,
+            "pending": data.get("pending") is True,
+            "aggregate": {
+                "upload_bytes": sum(row["upload_bytes"] for row in rows),
+                "download_bytes": sum(row["download_bytes"] for row in rows),
+                "total_bytes": sum(row["total_bytes"] for row in rows),
+            },
+            "users": rows,
+            "semantics": {key: semantics[key] for key in semantic_keys if type(semantics.get(key)) is bool},
+        }
+
     def quota_by_username(data):
         rows = data.get("users", []) if isinstance(data, dict) else []
         return {
@@ -407,9 +447,10 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
         }
         if settings.naive_enabled:
             try:
-                naive_health, naive_items = await asyncio.gather(
-                    app.state.naive.health(), app.state.naive.list_users(),
+                naive_health, naive_items, naive_traffic_raw = await asyncio.gather(
+                    app.state.naive.health(), app.state.naive.list_users(), app.state.naive.traffic(),
                 )
+                naive_traffic = safe_naive_traffic(naive_traffic_raw)
             except NaiveError:
                 protocols["naive"] = {
                     "available": True,
@@ -417,7 +458,7 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
                     "ready": False,
                     "host": settings.naive_public_host,
                     "credentials": {"available": False},
-                    "traffic": {"available": False, "reason": "not_collected"},
+                    "traffic": {"available": False, "reason": "manager_unavailable"},
                 }
             else:
                 naive_active = sum(
@@ -438,7 +479,7 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
                         "active": naive_active, "disabled": naive_disabled,
                         "total": naive_active + naive_disabled,
                     },
-                    "traffic": {"available": False, "reason": "not_collected"},
+                    "traffic": {"available": True, **naive_traffic},
                 }
         else:
             protocols["naive"] = {"available": False, "status": "disabled"}
@@ -511,14 +552,28 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
     @app.get("/api/naive/users")
     async def naive_users(_user=Depends(current)):
         require_naive()
-        health, items = await asyncio.gather(app.state.naive.health(), app.state.naive.list_users())
+        health, items, traffic_raw = await asyncio.gather(
+            app.state.naive.health(), app.state.naive.list_users(), app.state.naive.traffic(),
+        )
+        traffic = safe_naive_traffic(traffic_raw)
+        by_username = {row["username"]: row for row in traffic["users"]}
         safe_items = [
-            {"username": item.get("username"), "enabled": item.get("enabled") is True}
+            {
+                "username": item.get("username"), "enabled": item.get("enabled") is True,
+                **by_username.get(item.get("username"), {
+                    "upload_bytes": 0, "download_bytes": 0, "total_bytes": 0,
+                    "period_start": "", "updated_at": "",
+                }),
+            }
             for item in items if isinstance(item, dict) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(item.get("username", "")))
         ]
         return {
             "items": safe_items,
             "service": {"ready": health.get("ready") is True, "host": settings.naive_public_host},
+            "traffic": {
+                "source": traffic["source"], "unit": traffic["unit"],
+                "directions": traffic["directions"], "pending": traffic["pending"],
+            },
         }
 
     @app.post("/api/naive/users", status_code=201)
@@ -546,6 +601,20 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
             result = {"username": username, "enabled": changed.get("enabled") is True}
         audit(user, f"naive.{operation}", username, request)
         return result
+
+    @app.post("/api/naive/users/{username}/traffic/reset")
+    async def naive_traffic_reset(username: str, request: Request, user=Depends(roles("owner", "admin"))):
+        require_naive()
+        data = await app.state.naive.reset_traffic(username)
+        traffic = safe_naive_traffic({
+            "source": "caddy_connect_access_log", "unit": "bytes",
+            "directions": {"upload_bytes": "client_to_proxy", "download_bytes": "proxy_to_client"},
+            "pending": False, "users": [data], "semantics": {},
+        })
+        if not traffic["users"]:
+            raise HTTPException(502, "Invalid NaiveProxy traffic response")
+        audit(user, "naive.traffic.reset", username, request)
+        return traffic["users"][0]
 
     @app.delete("/api/naive/users/{username}", status_code=204)
     async def naive_delete(username: str, request: Request, user=Depends(roles("owner", "admin"))):

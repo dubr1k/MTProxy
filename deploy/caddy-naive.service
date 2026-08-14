@@ -1,0 +1,36 @@
+[Unit]
+Description=NaiveProxy Caddy (unprivileged, pinned build)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=naive-caddy
+Group=naive-caddy
+ExecStartPre=/usr/local/libexec/check-naive-caddy-build
+ExecStart=/usr/local/bin/caddy run --environ --config /var/lib/naive-manager/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /var/lib/naive-manager/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+ReadOnlyPaths=/var/lib/naive-manager/Caddyfile
+InaccessiblePaths=-/var/lib/naive-manager/manager-token -/var/lib/naive-manager/users.json -/var/lib/naive-manager/transaction.json -/var/lib/naive-manager/backups -/var/lib/naive-manager/traffic.sqlite3 -/var/lib/naive-manager/traffic.sqlite3-wal -/var/lib/naive-manager/traffic.sqlite3-shm
+ReadWritePaths=/var/log/naive-proxy
+
+[Install]
+WantedBy=multi-user.target
