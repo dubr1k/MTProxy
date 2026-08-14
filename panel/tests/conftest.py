@@ -7,6 +7,7 @@ import pytest
 
 from panel.app import Settings, create_app
 from panel.naive import MemoryNaive
+from panel.mieru import MemoryMieru
 from panel.telemt import MemoryTelemt
 
 
@@ -26,7 +27,12 @@ def naive() -> MemoryNaive:
 
 
 @pytest.fixture
-async def client(tmp_path: Path, telemt: MemoryTelemt, naive: MemoryNaive):
+def mieru() -> MemoryMieru:
+    return MemoryMieru()
+
+
+@pytest.fixture
+async def client(tmp_path: Path, telemt: MemoryTelemt, naive: MemoryNaive, mieru: MemoryMieru):
     settings = Settings(
         database_path=tmp_path / "panel.sqlite3",
         session_cookie_secure=False,
@@ -36,8 +42,9 @@ async def client(tmp_path: Path, telemt: MemoryTelemt, naive: MemoryNaive):
         reveal_ttl_seconds=60,
         naive_public_host="naive.example.com",
         naive_enabled=True,
+        mieru_enabled=True,
     )
-    app = create_app(settings, telemt=telemt, naive=naive)
+    app = create_app(settings, telemt=telemt, naive=naive, mieru=mieru)
     app.state.store.create_admin("owner", "correct horse battery staple", "owner")
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(

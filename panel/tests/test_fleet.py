@@ -9,7 +9,9 @@ import httpx
 import pytest
 
 from panel.fleet import CommandConflict, FleetStore, ProtocolError, TypedCommand
-from panel.node_agent import AgentJournal, ExecutionIndeterminate, LocalTelemtExecutor, NodeAgent
+from panel.agent_service import build_executor
+from panel.mieru import MieruError
+from panel.node_agent import AgentJournal, ExecutionIndeterminate, LocalMieruExecutor, LocalTelemtExecutor, NodeAgent, RoutingExecutor
 
 
 pytestmark = pytest.mark.anyio
@@ -38,6 +40,83 @@ def test_typed_protocol_rejects_generic_commands_and_unknown_payload_fields():
         command(payload={"username": "alice", "url": "https://attacker.invalid"})
     with pytest.raises(ProtocolError, match="node_id"):
         TypedCommand.parse({**command().as_dict(), "node_id": "../../etc"})
+
+
+def test_mieru_fleet_boundary_allows_only_secret_free_inspection_and_lifecycle():
+    inspect = command(operation="mieru.inspect", payload={})
+    assert inspect.operation == "mieru.inspect"
+    restart = command(operation="mieru.lifecycle.restart", payload={})
+    assert restart.payload == {}
+    with pytest.raises(ProtocolError, match="sealed payload"):
+        command(operation="mieru.config.apply", payload={"config": {"portBindings": []}})
+    with pytest.raises(ProtocolError, match="operation"):
+        command(operation="mieru.user.rotate", payload={"username": "alice"})
+
+
+def test_fleet_inventory_accepts_mieru_version_and_capabilities(tmp_path):
+    store = FleetStore(tmp_path / "fleet.sqlite3")
+    node = store.register_node("edge-01", "edge", {
+        "mieru_version": "3.35.0", "capabilities": ["mieru.inspect", "mieru.metrics", "mieru.lifecycle.restart"],
+    })
+    assert node["inventory"]["mieru_version"] == "3.35.0"
+
+
+async def test_node_agent_routes_typed_mieru_operations_without_generic_paths():
+    class Client:
+        async def health(self): return {"status": "running", "ready": True, "revision": "mrev-1"}
+        async def metrics(self): return {"status": "ready", "stale": False, "users": []}
+        async def lifecycle(self, action):
+            assert action == "restart"
+            return {"status": "running", "ready": True, "revision": "mrev-1"}
+
+    executor = RoutingExecutor(telemt=None, mieru=LocalMieruExecutor(Client()))
+    inspected = await executor.execute(command(operation="mieru.inspect", payload={}))
+    assert inspected == {"mieru_status": "running", "mieru_ready": True, "mieru_revision": "mrev-1"}
+    restarted = await executor.execute(command(operation="mieru.lifecycle.restart", payload={}))
+    assert restarted["mieru_status"] == "running"
+
+
+async def test_uncertain_mieru_lifecycle_is_durable_indeterminate(tmp_path):
+    class Client:
+        async def lifecycle(self, _action):
+            raise MieruError("manager unavailable")
+
+    agent = NodeAgent(
+        "edge-01",
+        AgentJournal(tmp_path / "mieru-agent.sqlite3"),
+        LocalMieruExecutor(Client()),
+    )
+    result = await agent.apply(
+        command(operation="mieru.lifecycle.restart", payload={})
+    )
+    assert result["status"] == "indeterminate"
+    assert result["result"] == {"message": "outcome requires Mieru reconciliation"}
+
+
+def test_agent_service_builds_optional_mieru_routing_from_uds_token_file(
+    tmp_path, monkeypatch
+):
+    token_file = tmp_path / "mieru-token"
+    token_file.write_text("m" * 32)
+    monkeypatch.setenv("TELEMT_API_TOKEN", "Bearer local-only")
+    monkeypatch.setenv("MIERU_MANAGER_SOCKET", "/run/mieru-manager/manager.sock")
+    monkeypatch.setenv("MIERU_MANAGER_TOKEN_FILE", str(token_file))
+
+    executor = build_executor()
+
+    assert isinstance(executor, RoutingExecutor)
+    assert isinstance(executor.telemt, LocalTelemtExecutor)
+    assert isinstance(executor.mieru, LocalMieruExecutor)
+    assert executor.mieru.client.socket_path == "/run/mieru-manager/manager.sock"
+    assert executor.mieru.client.token == "m" * 32
+
+
+def test_agent_service_rejects_partial_mieru_configuration(monkeypatch):
+    monkeypatch.setenv("TELEMT_API_TOKEN", "Bearer local-only")
+    monkeypatch.setenv("MIERU_MANAGER_TOKEN", "m" * 32)
+    monkeypatch.delenv("MIERU_MANAGER_SOCKET", raising=False)
+    with pytest.raises(ProtocolError, match="both socket and token"):
+        build_executor()
 
 
 def test_fleet_store_assigns_monotonic_sequences_and_enforces_idempotency(tmp_path):

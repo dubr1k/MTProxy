@@ -1,0 +1,57 @@
+services:
+  mieru-manager:
+    build:
+      context: .
+      dockerfile: mieru_manager/Dockerfile
+    restart: unless-stopped
+    user: "10003:10003"
+    group_add:
+      - ${MIERU_MITA_GID:?set the host mita socket group GID}
+    environment:
+      MIERU_PUBLIC_HOST: ${MIERU_PUBLIC_HOST:?set an explicit public host}
+      MIERU_MANAGER_TOKEN_FILE: /run/secrets/mieru-manager-token
+      MIERU_MITA_SHA256: ${MIERU_MITA_SHA256:?set the pinned host mita binary SHA-256}
+      MIERU_SOCKET_MODE: "660"
+      MITA_UDS_PATH: /run/mita/mita.sock
+    secrets: [mieru-manager-token]
+    volumes:
+      - ${MIERU_MITA_BIN:-/usr/bin/mita}:/usr/bin/mita:ro
+      - /var/run/mita:/run/mita:ro
+      - ${MIERU_MANAGER_STATE_DIR:-/var/lib/mieru-manager}:/var/lib/mieru-manager
+      - mieru-manager-run:/run/mieru-manager
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=0700
+    pids_limit: 128
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-m", "mieru_manager.healthcheck"]
+      interval: 20s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  panel:
+    depends_on:
+      mieru-manager:
+        condition: service_healthy
+    group_add:
+      - "10003"
+    environment:
+      MIERU_ENABLED: "true"
+      MIERU_MANAGER_TOKEN_FILE: /run/secrets/mieru-manager-token
+      MIERU_MANAGER_SOCKET: /run/mieru-manager/manager.sock
+    secrets: [mieru-manager-token]
+    volumes:
+      - mieru-manager-run:/run/mieru-manager:ro
+
+secrets:
+  mieru-manager-token:
+    file: ./secrets/mieru-manager-token
+volumes:
+  mieru-manager-run:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: uid=10003,gid=10003,mode=0770

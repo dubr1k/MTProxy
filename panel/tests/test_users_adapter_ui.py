@@ -287,6 +287,10 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert "/limits`" in js and "/reset-quota`" in js
     assert "текущего runtime-поколения" in js
     assert "Автоматического ежемесячного сброса нет" in text
+    assert 'data-view="mieru"' in text and 'id="mieru-modal"' in text
+    assert "renderMieru" in js and "mieruAction" in js
+    assert "rolling application-byte admission quota" in js
+    assert 'data-quick="mieru-users"' in js
 
 
 async def test_telemt_adapter_sends_auth_and_maps_envelope():

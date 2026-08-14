@@ -12,6 +12,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
+from .mieru import MieruError
 from .fleet import ProtocolError, TypedCommand, validate_result
 
 
@@ -172,6 +173,57 @@ class LocalTelemtExecutor:
         return validate_result(result)
 
 
+class LocalMieruExecutor:
+    """Typed adapter to the local authenticated Mieru manager; no caller supplied path/body."""
+
+    def __init__(self, client):
+        self.client = client
+
+    async def execute(self, item: TypedCommand) -> dict:
+        if item.operation == "mieru.inspect":
+            data = await self.client.health()
+            result = {"mieru_status": data.get("status"), "mieru_ready": data.get("ready"),
+                      "mieru_revision": data.get("revision")}
+        elif item.operation == "mieru.metrics":
+            data = await self.client.metrics()
+            result = {"metrics_status": data.get("status"), "metrics_stale": data.get("stale") is True}
+        elif item.operation in {
+            "mieru.lifecycle.start",
+            "mieru.lifecycle.stop",
+            "mieru.lifecycle.restart",
+        }:
+            try:
+                data = await self.client.lifecycle(item.operation.rsplit(".", 1)[1])
+            except MieruError as exc:
+                if exc.status_code >= 500:
+                    raise ExecutionIndeterminate(
+                        "Mieru lifecycle outcome requires reconciliation"
+                    ) from exc
+                raise ProtocolError("local Mieru manager rejected lifecycle command") from exc
+            result = {
+                "mieru_status": data.get("status"),
+                "mieru_ready": data.get("ready"),
+                "mieru_revision": data.get("revision"),
+            }
+        else:
+            raise ProtocolError("Mieru operation is not executable without sealed payload support")
+        return validate_result(result)
+
+
+class RoutingExecutor:
+    def __init__(self, *, telemt, mieru):
+        self.telemt, self.mieru = telemt, mieru
+
+    async def execute(self, item: TypedCommand) -> dict:
+        if item.operation.startswith("mieru."):
+            if self.mieru is None:
+                raise ProtocolError("local Mieru manager is unavailable")
+            return await self.mieru.execute(item)
+        if self.telemt is None:
+            raise ProtocolError("local Telemt manager is unavailable")
+        return await self.telemt.execute(item)
+
+
 class NodeAgent:
     def __init__(self, node_id: str, journal: AgentJournal, executor):
         self.node_id = node_id
@@ -191,7 +243,12 @@ class NodeAgent:
         try:
             result = await self.executor.execute(item)
         except ExecutionIndeterminate:
-            return self.journal.finish(item, "indeterminate", {"message": "outcome requires Telemt reconciliation"})
+            protocol = "Mieru" if item.operation.startswith("mieru.") else "Telemt"
+            return self.journal.finish(
+                item,
+                "indeterminate",
+                {"message": f"outcome requires {protocol} reconciliation"},
+            )
         except Exception as exc:
             # Never persist exception text: third-party errors can contain headers/bodies.
             code = type(exc).__name__ if isinstance(exc, (ProtocolError, ValueError)) else "ExecutorError"

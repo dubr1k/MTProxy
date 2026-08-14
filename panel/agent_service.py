@@ -7,7 +7,15 @@ import stat
 from pathlib import Path
 
 from .fleet import ProtocolError
-from .node_agent import AgentJournal, AgentTransportClient, LocalTelemtExecutor, NodeAgent
+from .mieru import MieruClient
+from .node_agent import (
+    AgentJournal,
+    AgentTransportClient,
+    LocalMieruExecutor,
+    LocalTelemtExecutor,
+    NodeAgent,
+    RoutingExecutor,
+)
 
 
 def required(name: str) -> str:
@@ -22,6 +30,35 @@ def secret(name: str, file_name: str) -> str:
     return Path(path).read_text().strip() if path else required(name)
 
 
+def build_executor():
+    telemt = LocalTelemtExecutor(
+        os.getenv("TELEMT_API_URL", "http://127.0.0.1:9091"),
+        secret("TELEMT_API_TOKEN", "TELEMT_API_TOKEN_FILE"),
+        timeout=float(os.getenv("TELEMT_API_TIMEOUT", "5")),
+    )
+    socket_path = os.getenv("MIERU_MANAGER_SOCKET")
+    token_configured = bool(
+        os.getenv("MIERU_MANAGER_TOKEN") or os.getenv("MIERU_MANAGER_TOKEN_FILE")
+    )
+    if bool(socket_path) != token_configured:
+        raise ProtocolError("Mieru manager requires both socket and token configuration")
+    mieru = None
+    if socket_path:
+        if not Path(socket_path).is_absolute():
+            raise ProtocolError("Mieru manager socket must be an absolute UDS path")
+        token = secret("MIERU_MANAGER_TOKEN", "MIERU_MANAGER_TOKEN_FILE")
+        if len(token) < 32:
+            raise ProtocolError("Mieru manager token is too short")
+        mieru = LocalMieruExecutor(
+            MieruClient(
+                socket_path,
+                token,
+                timeout=float(os.getenv("MIERU_MANAGER_TIMEOUT", "5")),
+            )
+        )
+    return RoutingExecutor(telemt=telemt, mieru=mieru)
+
+
 async def run():
     node_id = required("FLEET_NODE_ID")
     key = Path(required("FLEET_CLIENT_KEY"))
@@ -29,11 +66,7 @@ async def run():
         raise ProtocolError("FLEET_CLIENT_KEY must not be group/world accessible")
     journal = AgentJournal(Path(os.getenv("FLEET_JOURNAL", "/var/lib/mtproxy-agent/journal.sqlite3")))
     journal.recover_interrupted()
-    executor = LocalTelemtExecutor(
-        os.getenv("TELEMT_API_URL", "http://127.0.0.1:9091"),
-        secret("TELEMT_API_TOKEN", "TELEMT_API_TOKEN_FILE"),
-        timeout=float(os.getenv("TELEMT_API_TIMEOUT", "5")),
-    )
+    executor = build_executor()
     agent = NodeAgent(node_id, journal, executor)
     custom_ca = os.getenv("FLEET_SERVER_CA")
     client = AgentTransportClient(

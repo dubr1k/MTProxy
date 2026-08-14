@@ -19,13 +19,19 @@ USER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$")
 REVISION_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 FORBIDDEN_KEYS = {"secret", "password", "token", "authorization", "link", "links", "proxy_url", "api_token", "credential"}
-INVENTORY_KEYS = {"agent_version", "telemt_version", "region", "hostname", "platform", "capabilities"}
+INVENTORY_KEYS = {"agent_version", "telemt_version", "mieru_version", "region", "hostname", "platform", "capabilities"}
 OPERATIONS = {
     "telemt.inventory.refresh",
     "telemt.user.enable",
     "telemt.user.disable",
     "telemt.user.update_limits",
     "telemt.user.reset_quota",
+    "mieru.inspect",
+    "mieru.metrics",
+    "mieru.lifecycle.start",
+    "mieru.lifecycle.stop",
+    "mieru.lifecycle.restart",
+    "mieru.config.apply",
 }
 LIMIT_FIELDS = {
     "data_quota_bytes": (1, 2**63 - 1),
@@ -86,6 +92,12 @@ def validate_payload(operation: str, payload: Any) -> dict:
     _walk_secret_free(payload, "payload")
     if not isinstance(payload, dict):
         raise ProtocolError("payload must be an object")
+    if operation == "mieru.config.apply":
+        raise ProtocolError("Mieru remote config mutation requires a sealed payload layer")
+    if operation.startswith("mieru."):
+        if payload:
+            raise ProtocolError("payload must be empty")
+        return payload
     if operation == "telemt.inventory.refresh":
         if payload:
             raise ProtocolError("payload must be empty")
@@ -109,7 +121,8 @@ def validate_result(value: Any, operation: str | None = None, status: str | None
     _walk_secret_free(value, "result")
     if not isinstance(value, dict):
         raise ProtocolError("result must be an object")
-    allowed = {"username", "enabled", "used_bytes", "telemt_revision", "inventory", "message"}
+    allowed = {"username", "enabled", "used_bytes", "telemt_revision", "inventory", "message",
+               "mieru_status", "mieru_ready", "mieru_revision", "metrics_status", "metrics_stale"}
     if set(value) - allowed:
         raise ProtocolError("result contains unsupported fields")
     if "username" in value and (not isinstance(value["username"], str) or not USER_RE.fullmatch(value["username"])):
@@ -121,16 +134,32 @@ def validate_result(value: Any, operation: str | None = None, status: str | None
     if "telemt_revision" in value and (not isinstance(value["telemt_revision"], str) or not REVISION_RE.fullmatch(value["telemt_revision"])):
         raise ProtocolError("result telemt_revision is invalid")
     if "message" in value and value["message"] not in {
-        "outcome requires Telemt reconciliation", "command rejected (ProtocolError)",
+        "outcome requires Telemt reconciliation",
+        "outcome requires Mieru reconciliation",
+        "command rejected (ProtocolError)",
         "command rejected (ValueError)", "command rejected (ExecutorError)",
     }:
         raise ProtocolError("result message is invalid")
+    if "mieru_status" in value and value["mieru_status"] not in {"running", "idle", "stopped", "starting", "stopping"}:
+        raise ProtocolError("result Mieru status is invalid")
+    if "mieru_ready" in value and not isinstance(value["mieru_ready"], bool):
+        raise ProtocolError("result Mieru readiness is invalid")
+    if "mieru_revision" in value and (not isinstance(value["mieru_revision"], str) or not REVISION_RE.fullmatch(value["mieru_revision"])):
+        raise ProtocolError("result Mieru revision is invalid")
+    if "metrics_status" in value and value["metrics_status"] not in {"ready", "error"}:
+        raise ProtocolError("result metrics status is invalid")
+    if "metrics_stale" in value and not isinstance(value["metrics_stale"], bool):
+        raise ProtocolError("result metrics stale flag is invalid")
     if "inventory" in value:
         validate_inventory(value["inventory"])
     if status in {"failed", "indeterminate"} and set(value) != {"message"}:
         raise ProtocolError("failure result is invalid")
     if status == "succeeded" and operation:
-        if operation == "telemt.inventory.refresh":
+        if operation.startswith("mieru."):
+            required = {"metrics_status", "metrics_stale"} if operation == "mieru.metrics" else {"mieru_status", "mieru_ready", "mieru_revision"}
+            if set(value) != required:
+                raise ProtocolError("Mieru result is invalid")
+        elif operation == "telemt.inventory.refresh":
             if set(value) != {"inventory", "telemt_revision"}:
                 raise ProtocolError("inventory result is invalid")
         elif not {"username", "telemt_revision"} <= set(value) or "inventory" in value or "message" in value:
