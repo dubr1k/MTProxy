@@ -28,7 +28,7 @@ jobs:
           .venv/bin/python -m unittest -v tests/test_deploy.py
       - name: Every tracked shell script
         run: |
-          mapfile -t shell_files < <(git grep -Il '^#!/.*sh')
+          mapfile -d '' -t shell_files < <(git ls-files -z '*.sh')
           test "${#shell_files[@]}" -gt 0
           printf '%s\n' "${shell_files[@]}"
           for script in "${shell_files[@]}"; do
@@ -79,6 +79,18 @@ jobs:
           NAIVE_PUBLIC_HOST=naive.example.com MIERU_PUBLIC_HOST=mieru.example.com MIERU_MITA_GID=321 MIERU_MITA_BIN=/bin/true MIERU_MITA_SHA256=4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31 docker compose -f compose.yaml -f compose.naive.yaml -f compose.mieru.yaml config -q
           FLEET_NODE_ID=node-ci FLEET_CENTRAL_URL=https://fleet.example.com:8790 FLEET_CLIENT_CERT=/tmp/client.crt FLEET_CLIENT_KEY=/tmp/client.key TELEMT_API_TOKEN_FILE="$PWD/secrets/telemt-api-token" docker compose -f compose.agent.yaml config -q
           FLEET_SERVER_CERT=/tmp/server.crt FLEET_SERVER_KEY=/tmp/server.key FLEET_CLIENT_CA=/tmp/client-ca.crt docker compose -f compose.fleet-central.yaml config -q
+      - name: Render documented Mieru quickstart without secret contents
+        run: |
+          mkdir -p "$RUNNER_TEMP/mieru-render/state"
+          : > "$RUNNER_TEMP/mieru-render/token"
+          install -m 0755 /bin/true "$RUNNER_TEMP/mieru-render/mita"
+          MIERU_PUBLIC_HOST=mieru.example.com \
+          MIERU_MITA_BIN="$RUNNER_TEMP/mieru-render/mita" \
+          MIERU_MITA_SHA256=4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31 \
+          MIERU_MITA_GID=321 \
+          MIERU_MANAGER_STATE_DIR="$RUNNER_TEMP/mieru-render/state" \
+          MIERU_MANAGER_TOKEN_FILE="$RUNNER_TEMP/mieru-render/token" \
+          docker compose --env-file /dev/null -f compose.yaml -f compose.mieru.yaml config -q
       - name: Build project images
         run: |
           NAIVE_PUBLIC_HOST=naive.example.com docker compose -f compose.yaml -f compose.naive.yaml build panel naive-manager
@@ -88,7 +100,17 @@ jobs:
           docker build -f deploy/Dockerfile.ingress -t proxy-control-ingress:test .
           test "$(docker run --rm --entrypoint id proxy-control-ingress:test -u)" = 10001
           test "$(docker run --rm --entrypoint id proxy-control-ingress:test -g)" = 10001
-      - name: Validate pinned Caddy checker contract
+      - name: Build and validate pinned Caddy
         run: |
-          grep -q "EXPECTED='v2.11.4 " scripts/check-naive-caddy-build.sh
-          grep -q "http.handlers.forward_proxy" scripts/check-naive-caddy-build.sh
+          mkdir -p "$RUNNER_TEMP/caddy-naive"
+          timeout 10m docker buildx build \
+            --file docker/Dockerfile.caddy-naive \
+            --output "type=local,dest=$RUNNER_TEMP/caddy-naive" .
+          timeout 10s env CADDY_BIN="$RUNNER_TEMP/caddy-naive/caddy" \
+            scripts/check-naive-caddy-build.sh
+          if timeout 10s env CADDY_BIN=/bin/true scripts/check-naive-caddy-build.sh \
+            2>"$RUNNER_TEMP/caddy-negative.log"; then
+            echo 'checker accepted a non-Caddy executable' >&2
+            exit 1
+          fi
+          grep -Fq 'refusing unpinned Caddy build' "$RUNNER_TEMP/caddy-negative.log"

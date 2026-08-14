@@ -8,12 +8,12 @@ python3 -m venv .venv
 .venv/bin/ruff check .
 .venv/bin/python -m pytest -q
 python3 -m unittest -v tests/test_deploy.py
-bash -n $(git ls-files '*.sh')
-shellcheck $(git ls-files '*.sh')
+git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
+git ls-files -z '*.sh' | xargs -0 -r shellcheck
 python3 scripts/check-doc-links.py
 ```
 
-CI also renders core, core+Naive, core+Mieru, agent and fleet-central Compose models; builds panel/managers/agents/ingress; verifies service units where host tooling permits; and enforces diff hygiene and third-party notices.
+CI also renders core, core+Naive, core+Mieru, combined core+Naive+Mieru, agent and fleet-central Compose models, plus the documented Mieru render with an executable placeholder and an empty secret file. It builds panel/managers/agents/ingress and the pinned Caddy+forward-proxy artifact, executes the bounded Caddy checker against that artifact and a negative fixture, verifies service units where host tooling permits, and enforces diff hygiene and third-party notices.
 
 ## Runtime acceptance
 

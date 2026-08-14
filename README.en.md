@@ -59,14 +59,28 @@ docker compose -f compose.yaml -f compose.naive.yaml config
 docker compose -f compose.yaml -f compose.naive.yaml up -d --build
 ```
 
-Mieru requires a separately obtained, executable-digest-verified `mita` binary and mandatory state preflight:
+Mieru requires the separately supplied GPLv3+ v3.35.0 `mita` executable. The amd64 example below obtains and extracts the exact pinned upstream package documented in [MIERU.en.md](MIERU.en.md#pinned-upstream-artifacts); use that guide's arm64 URL and both arm64 digests on arm64. Before assigning fixed IDs or public ports, read the mandatory [identity/state collision preflight](MIERU.en.md#mandatory-compose-state-provisioning) and [listener coexistence checks](MIERU.en.md#listener-coexistence), and stop on any unrelated UID/GID or port collision.
 
 ```sh
+curl -fL --proto '=https' --tlsv1.2 \
+  https://github.com/enfein/mieru/releases/download/v3.35.0/mita_3.35.0_amd64.deb \
+  -o mita_3.35.0_amd64.deb
+printf '%s  %s\n' cca7a31e7be692bf10dd5c72f8862b92695a8b06e2a3abcb22ede936e74b2342 mita_3.35.0_amd64.deb | sha256sum -c -
+dpkg-deb -x mita_3.35.0_amd64.deb mita-root
+printf '%s  %s\n' 4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31 mita-root/usr/bin/mita | sha256sum -c -
+export MIERU_PUBLIC_HOST=mieru.example.com
+export MIERU_MITA_BIN="$(realpath mita-root/usr/bin/mita)"
+test -x "$MIERU_MITA_BIN"
+export MIERU_MITA_SHA256=4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31
+export MIERU_MITA_GID="$(stat -c %g /var/run/mita/mita.sock)"
+export MIERU_MANAGER_STATE_DIR=/var/lib/mieru-manager
+export MIERU_MANAGER_TOKEN_FILE=/etc/mieru-manager/token
 sudo install -d -o root -g root -m 0700 /etc/mieru-manager
 sudo sh -c 'umask 077; openssl rand -base64 48 > /etc/mieru-manager/token'
-export MIERU_MANAGER_TOKEN_FILE=/etc/mieru-manager/token
-sudo ./scripts/prepare-mieru-state.sh prepare "${MIERU_MANAGER_STATE_DIR:-/var/lib/mieru-manager}"
+getent passwd 10005 || true
+getent group 10005 || true
 sudo ./scripts/prepare-mieru-token.sh prepare "$MIERU_MANAGER_TOKEN_FILE"
+sudo ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
 docker compose -f compose.yaml -f compose.mieru.yaml config
 docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
 ```

@@ -1,0 +1,7 @@
+FROM caddy:2.11.4-builder AS builder
+
+RUN xcaddy build v2.11.4 \
+    --with github.com/caddyserver/forwardproxy@caddy2
+
+FROM scratch
+COPY --from=builder /usr/bin/caddy /caddy

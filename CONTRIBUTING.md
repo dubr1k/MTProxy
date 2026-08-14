@@ -14,8 +14,8 @@ python3 -m venv .venv
 .venv/bin/pytest -q
 .venv/bin/ruff check .
 python3 -m unittest -v tests/test_deploy.py
-bash -n $(git ls-files '*.sh')
-shellcheck $(git ls-files '*.sh')
+git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
+git ls-files -z '*.sh' | xargs -0 -r shellcheck
 python3 scripts/check-doc-links.py
 ```
 
