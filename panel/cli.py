@@ -17,7 +17,8 @@ def main():
     args = parser.parse_args()
     if args.command == "create-admin":
         password = sys.stdin.readline().rstrip("\r\n")
-        if not password: parser.error("password is required on stdin")
+        if not password:
+            parser.error("password is required on stdin")
         Store(Settings().database_path).create_admin(args.username, password, args.role)
         print(f"Administrator {args.username!r} created.")
 
