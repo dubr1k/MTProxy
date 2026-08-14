@@ -12,10 +12,18 @@ from scripts.proxyctl import InstallerConflict, RuntimeInstaller, RuntimePlan
 class FakeRunner:
     """External-command seam; filesystem and transaction behavior remain real."""
 
-    def __init__(self, *, installed: set[str] | None = None, fail_on: tuple[str, ...] | None = None, fail_once=False):
+    def __init__(
+        self,
+        *,
+        installed: set[str] | None = None,
+        fail_on: tuple[str, ...] | None = None,
+        fail_once: bool = False,
+        failure: type[BaseException] = RuntimeError,
+    ):
         self.installed = set(installed or ())
         self.fail_on = fail_on
         self.fail_once = fail_once
+        self.failure = failure
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
 
     def package_installed(self, name: str) -> bool:
@@ -27,7 +35,7 @@ class FakeRunner:
         if self.fail_on and command[: len(self.fail_on)] == self.fail_on:
             if self.fail_once:
                 self.fail_on = None
-            raise RuntimeError("injected command failure")
+            raise self.failure("injected command failure")
         if command[:3] == ("apt-get", "install", "-y"):
             self.installed.update(command[3:])
 
@@ -120,7 +128,7 @@ def test_runtime_uninstall_removes_only_owned_runtime_and_preserves_credentials_
     assert any(call[0][:3] == ("apt-get", "purge", "-y") for call in runner.calls)
 
 
-def test_runtime_install_failure_rolls_back_routes_sites_compose_and_project(tmp_path):
+def test_runtime_install_failure_rolls_back_routes_sites_compose_and_preserves_credentials(tmp_path):
     root, route = runtime_root(tmp_path)
     original_route = route.read_text()
     runner = FakeRunner(fail_on=("/usr/local/bin/mtproxy-respq-probe",))
@@ -132,8 +140,12 @@ def test_runtime_install_failure_rolls_back_routes_sites_compose_and_project(tmp
     assert route.read_text() == original_route
     assert not (root / "etc/nginx/sites-available/proxy-control-acme.conf").exists()
     assert not (root / "etc/nginx/sites-available/proxy-control-panel.conf").exists()
-    assert not (root / "opt/mtproxy-shared443").exists()
-    assert not (root / "var/lib/proxy-control/runtime.json").exists()
+    project = root / "opt/mtproxy-shared443"
+    assert {child.name for child in project.iterdir()} == {".mtproxy-owned", "secrets"}
+    assert (project / "secrets/users.conf").is_file()
+    state = json.loads((root / "var/lib/proxy-control/runtime.json").read_text())
+    assert state["status"] == "installing"
+    assert state["phase"] == "rollback_complete"
     assert any(call[0][-3:] == ("down", "--remove-orphans", "--volumes") for call in runner.calls)
 
 
@@ -181,3 +193,99 @@ def test_runtime_uninstall_restores_sites_when_route_removal_fails(tmp_path):
     assert panel_site.read_text() == panel_before
     assert (root / "etc/nginx/sites-enabled/proxy-control-panel.conf").is_symlink()
     assert (root / "var/lib/proxy-control/runtime.json").is_file()
+
+
+@pytest.mark.parametrize("crash_command", [
+    ("apt-get", "install", "-y"),
+    ("certbot", "certonly"),
+    ("docker", "compose", "--project-directory", "/opt/mtproxy-shared443", "up"),
+    ("/usr/local/bin/mtproxy-respq-probe",),
+])
+def test_install_resumes_after_crash_at_each_durable_phase_without_rotating_credentials(tmp_path, crash_command):
+    root, _ = runtime_root(tmp_path)
+    runner = FakeRunner(fail_on=crash_command, fail_once=True, failure=SystemExit)
+    manager = RuntimeInstaller(plan(Path(__file__).parents[1]), root=root, runner=runner)
+
+    with pytest.raises(SystemExit, match="injected"):
+        manager.install()
+    manifest = root / "var/lib/proxy-control/runtime.json"
+    interrupted = json.loads(manifest.read_text())
+    assert interrupted["status"] == "installing"
+    password = root / "opt/mtproxy-shared443/secrets/panel-bootstrap-password"
+    preserved_password = password.read_bytes() if password.exists() else None
+
+    manager.install()
+
+    assert json.loads(manifest.read_text())["status"] == "active"
+    if preserved_password is not None:
+        assert password.read_bytes() == preserved_password
+
+
+@pytest.mark.parametrize("crash_command", [
+    ("docker", "compose", "--project-directory", "/opt/mtproxy-shared443", "down"),
+    ("apt-get", "purge", "-y"),
+    ("systemctl", "reload", "nginx"),
+])
+def test_uninstall_retries_each_destructive_phase_and_preserves_credentials(tmp_path, crash_command):
+    root, route = runtime_root(tmp_path)
+    original_route = route.read_bytes()
+    runner = FakeRunner()
+    manager = RuntimeInstaller(plan(Path(__file__).parents[1]), root=root, runner=runner)
+    manager.install()
+    secret = (root / "opt/mtproxy-shared443/secrets/users.conf").read_bytes()
+    runner.fail_on = crash_command
+    runner.fail_once = True
+    runner.failure = SystemExit
+
+    with pytest.raises(SystemExit, match="injected"):
+        manager.uninstall()
+    interrupted = json.loads((root / "var/lib/proxy-control/runtime.json").read_text())
+    assert interrupted["status"] == "uninstalling"
+
+    manager.uninstall()
+
+    assert route.read_bytes() == original_route
+    assert not (root / "var/lib/proxy-control/runtime.json").exists()
+    assert (root / "opt/mtproxy-shared443/secrets/users.conf").read_bytes() == secret
+
+
+def test_failed_install_rollback_is_retried_before_reinstall(tmp_path):
+    root, route = runtime_root(tmp_path)
+    original_route = route.read_bytes()
+    runner = FakeRunner(fail_on=("/usr/local/bin/mtproxy-respq-probe",))
+    manager = RuntimeInstaller(plan(Path(__file__).parents[1]), root=root, runner=runner)
+
+    with pytest.raises(RuntimeError, match="injected"):
+        manager.install()
+    state = json.loads((root / "var/lib/proxy-control/runtime.json").read_text())
+    assert state["status"] in {"installing", "rollback_failed"}
+    runner.fail_on = None
+
+    manager.install()
+
+    assert route.read_bytes() != original_route
+    assert json.loads((root / "var/lib/proxy-control/runtime.json").read_text())["status"] == "active"
+
+
+def test_rollback_failed_state_recovers_but_refuses_foreign_file_drift(tmp_path):
+    root, _ = runtime_root(tmp_path)
+    runner = FakeRunner(fail_on=("certbot", "certonly"), fail_once=True, failure=SystemExit)
+    manager = RuntimeInstaller(plan(Path(__file__).parents[1]), root=root, runner=runner)
+    with pytest.raises(SystemExit):
+        manager.install()
+    manifest = root / "var/lib/proxy-control/runtime.json"
+    state = json.loads(manifest.read_text())
+    state["status"] = "rollback_failed"
+    state["phase"] = "rollback_sites"
+    manifest.write_text(json.dumps(state))
+    acme = root / "etc/nginx/sites-available/proxy-control-acme.conf"
+    acme.write_text(acme.read_text() + "# foreign edit\n")
+
+    with pytest.raises(InstallerConflict, match="managed file has drifted"):
+        manager.install()
+    assert acme.exists()
+    assert json.loads(manifest.read_text())["status"] == "rollback_failed"
+
+    acme.write_text(acme.read_text().removesuffix("# foreign edit\n"))
+    manager.install()
+    assert json.loads(manifest.read_text())["status"] == "active"

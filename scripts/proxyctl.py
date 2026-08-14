@@ -845,7 +845,17 @@ def uninstall_installation(
 
 
 RUNTIME_STATE_PATH = "/var/lib/proxy-control/runtime.json"
+RUNTIME_STATE_SCHEMA = 2
 RUNTIME_CORE_PACKAGES = ("ca-certificates", "certbot", "curl", "openssl", "python3")
+INSTALL_PHASES = {
+    "initialized", "packages_installed", "project_rendered", "sites_installed",
+    "compose_started", "route_installed", "rollback_routes", "rollback_compose",
+    "rollback_sites", "rollback_project", "rollback_packages", "rollback_complete",
+}
+UNINSTALL_PHASES = {
+    "started", "compose_down", "packages_purged", "route_removed",
+    "sites_removing", "sites_removed", "project_cleaned",
+}
 
 
 @dataclass(frozen=True)
@@ -972,24 +982,18 @@ class RuntimeInstaller:
             if _root_path(self.root, host_path).exists() or _root_path(self.root, host_path).is_symlink():
                 raise InstallerConflict(f"refusing to replace unowned Nginx file: {host_path}")
 
-    def _write_acme_site(self) -> None:
-        for domain in (self.plan.proxy_domain, self.plan.panel_domain):
-            _root_path(self.root, f"/var/www/{domain}/.well-known/acme-challenge").mkdir(parents=True)
-        acme = (
+    def _acme_site_content(self) -> bytes:
+        return (
             f"server {{ listen 80; server_name {self.plan.proxy_domain}; "
             f"location ^~ /.well-known/acme-challenge/ {{ root /var/www/{self.plan.proxy_domain}; }} "
             "location / { return 301 https://$host$request_uri; } }\n"
             f"server {{ listen 80; server_name {self.plan.panel_domain}; "
             f"location ^~ /.well-known/acme-challenge/ {{ root /var/www/{self.plan.panel_domain}; }} "
             "location / { return 301 https://$host$request_uri; } }\n"
-        )
-        available = _root_path(self.root, "/etc/nginx/sites-available")
-        enabled = _root_path(self.root, "/etc/nginx/sites-enabled")
-        _atomic_write(available / "proxy-control-acme.conf", acme.encode(), mode=0o644)
-        os.symlink("../sites-available/proxy-control-acme.conf", enabled / "proxy-control-acme.conf")
+        ).encode()
 
-    def _write_panel_site(self) -> None:
-        panel = (
+    def _panel_site_content(self) -> bytes:
+        return (
             f"server {{ listen 127.0.0.1:{self.plan.panel_tls_port} ssl; "
             f"server_name {self.plan.panel_domain}; "
             f"ssl_certificate /etc/letsencrypt/live/{self.plan.proxy_domain}/fullchain.pem; "
@@ -997,18 +1001,40 @@ class RuntimeInstaller:
             f"location / {{ proxy_pass http://127.0.0.1:{self.plan.panel_app_port}; "
             "proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto https; "
             "proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }} }\n"
-        )
+        ).encode()
+
+    def _expected_managed_hashes(self) -> dict[str, str]:
+        return {
+            self._managed_paths()[0]: _sha256(self._acme_site_content()),
+            self._managed_paths()[1]: _sha256(self._panel_site_content()),
+            self._managed_paths()[2]: _sha256(b"symlink:../sites-available/proxy-control-acme.conf"),
+            self._managed_paths()[3]: _sha256(b"symlink:../sites-available/proxy-control-panel.conf"),
+        }
+
+    def _write_acme_site(self) -> None:
+        for domain in (self.plan.proxy_domain, self.plan.panel_domain):
+            _root_path(self.root, f"/var/www/{domain}/.well-known/acme-challenge").mkdir(
+                parents=True, exist_ok=True
+            )
         available = _root_path(self.root, "/etc/nginx/sites-available")
         enabled = _root_path(self.root, "/etc/nginx/sites-enabled")
-        _atomic_write(available / "proxy-control-panel.conf", panel.encode(), mode=0o640)
+        _atomic_write(available / "proxy-control-acme.conf", self._acme_site_content(), mode=0o644)
+        os.symlink("../sites-available/proxy-control-acme.conf", enabled / "proxy-control-acme.conf")
+
+    def _write_panel_site(self) -> None:
+        available = _root_path(self.root, "/etc/nginx/sites-available")
+        enabled = _root_path(self.root, "/etc/nginx/sites-enabled")
+        _atomic_write(available / "proxy-control-panel.conf", self._panel_site_content(), mode=0o640)
         os.symlink("../sites-available/proxy-control-panel.conf", enabled / "proxy-control-panel.conf")
 
-    def _render_project(self) -> bool:
+    def _render_project(self, *, recovery: bool = False) -> bool:
         project = _root_path(self.root, self.plan.project_dir)
         marker = project / ".mtproxy-owned"
         created = not project.exists()
         if project.exists() and any(project.iterdir()):
-            raise InstallerConflict("pre-existing project requires explicit migration; refusing overwrite")
+            names = {entry.name for entry in project.iterdir()}
+            if not recovery or ".mtproxy-owned" not in names or not names <= {".mtproxy-owned", "secrets"}:
+                raise InstallerConflict("pre-existing project requires explicit migration; refusing overwrite")
         project.mkdir(parents=True, exist_ok=True)
         if not marker.exists():
             _atomic_write(marker, (uuid.uuid4().hex + "\n").encode(), mode=0o600)
@@ -1057,12 +1083,15 @@ class RuntimeInstaller:
             _atomic_write(cover, b"<!doctype html><title>Welcome</title><h1>Welcome</h1>\n", mode=0o644)
         return created
 
-    def _remove_managed_files(self, state: dict, *, check_hashes: bool) -> None:
+    def _remove_managed_files(self, state: dict, *, check_hashes: bool, allow_missing: bool = False) -> None:
         hashes = state.get("managed_hashes", {})
         paths = [(host_path, _root_path(self.root, host_path)) for host_path in state.get("managed_files", [])]
         if check_hashes:
             for host_path, path in paths:
-                if (not path.exists() and not path.is_symlink()) or self._path_hash(path) != hashes.get(host_path):
+                exists = path.exists() or path.is_symlink()
+                if not exists and allow_missing:
+                    continue
+                if not exists or host_path not in hashes or self._path_hash(path) != hashes[host_path]:
                     raise InstallerConflict(f"managed file has drifted: {host_path}")
         for _host_path, path in reversed(paths):
             if path.exists() or path.is_symlink():
@@ -1090,6 +1119,91 @@ class RuntimeInstaller:
             else:
                 _atomic_write(path, snapshot[1], mode=snapshot[2])
 
+    def _read_runtime_state(self) -> dict:
+        try:
+            state = json.loads(self.state_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise InstallerConflict("runtime manifest is unreadable") from exc
+        required = {
+            "schema", "status", "phase", "plan", "owned_packages", "managed_files",
+            "managed_hashes", "project_created",
+        }
+        if frozenset(state) not in {frozenset(required), frozenset(required | {"rollback_error"})}:
+            raise InstallerConflict("runtime manifest schema is invalid")
+        if state.get("schema") != RUNTIME_STATE_SCHEMA:
+            raise InstallerConflict("runtime manifest schema is invalid")
+        status, phase = state.get("status"), state.get("phase")
+        if status == "active" and phase != "route_installed":
+            raise InstallerConflict("runtime manifest phase is invalid")
+        if status in {"installing", "rollback_failed"} and phase not in INSTALL_PHASES:
+            raise InstallerConflict("runtime manifest phase is invalid")
+        if status == "uninstalling" and phase not in UNINSTALL_PHASES:
+            raise InstallerConflict("runtime manifest phase is invalid")
+        if status not in {"installing", "rollback_failed", "active", "uninstalling"}:
+            raise InstallerConflict("runtime manifest status is invalid")
+        if state.get("plan") != self.plan.to_dict():
+            raise InstallerConflict("runtime transaction belongs to another plan")
+        packages = state.get("owned_packages")
+        if not isinstance(packages, list) or packages != sorted(set(packages)) or any(
+            not isinstance(item, str) for item in packages
+        ):
+            raise InstallerConflict("runtime package ownership is invalid")
+        if state.get("managed_files") != self._managed_paths():
+            raise InstallerConflict("runtime managed-file ownership is invalid")
+        if state.get("managed_hashes") != self._expected_managed_hashes():
+            raise InstallerConflict("runtime managed-file ownership is invalid")
+        if not isinstance(state.get("project_created"), bool):
+            raise InstallerConflict("runtime project ownership is invalid")
+        return state
+
+    def _checkpoint(self, state: dict, *, status: str | None = None, phase: str | None = None) -> None:
+        if status is not None:
+            state["status"] = status
+        if phase is not None:
+            state["phase"] = phase
+        state.pop("rollback_error", None)
+        _write_state(self.state_path, state)
+
+    def _clean_project_preserving_credentials(self) -> None:
+        project = _root_path(self.root, self.plan.project_dir)
+        if project.is_dir():
+            for child in list(project.iterdir()):
+                if child.name not in {"secrets", ".mtproxy-owned"}:
+                    shutil.rmtree(child) if child.is_dir() else child.unlink()
+
+    def _rollback_runtime(self, state: dict) -> None:
+        """Idempotently restore host routing while retaining generated credentials."""
+        try:
+            self._checkpoint(state, status="rollback_failed", phase="rollback_routes")
+            if _load_state(self.root) is not None:
+                _repair_installation_unlocked(
+                    root=self.root,
+                    validate=lambda: self._run("nginx", "-t"),
+                    reload=lambda: self._run("systemctl", "reload", "nginx"),
+                )
+                if _load_state(self.root) is not None:
+                    _uninstall_installation_unlocked(
+                        root=self.root,
+                        validate=lambda: self._run("nginx", "-t"),
+                        reload=lambda: self._run("systemctl", "reload", "nginx"),
+                    )
+            self._checkpoint(state, status="rollback_failed", phase="rollback_compose")
+            self._compose("down", "--remove-orphans", "--volumes")
+            self._checkpoint(state, status="rollback_failed", phase="rollback_sites")
+            self._remove_managed_files(state, check_hashes=True, allow_missing=True)
+            self._validate_reload()
+            self._checkpoint(state, status="rollback_failed", phase="rollback_project")
+            self._clean_project_preserving_credentials()
+            self._checkpoint(state, status="rollback_failed", phase="rollback_packages")
+            if state["owned_packages"]:
+                self._run("apt-get", "purge", "-y", *state["owned_packages"])
+            self._checkpoint(state, status="installing", phase="rollback_complete")
+        except BaseException as exc:
+            state["status"] = "rollback_failed"
+            state["rollback_error"] = type(exc).__name__
+            _write_state(self.state_path, state)
+            raise
+
     def _validate_reload(self) -> None:
         self._run("nginx", "-t")
         self._run("systemctl", "reload", "nginx")
@@ -1105,37 +1219,49 @@ class RuntimeInstaller:
 
     def install(self) -> Path:
         with _operation_lock(self.root):
+            recovering = False
             if self.state_path.exists():
-                self.repair(_locked=True)
-                return self.state_path
+                state = self._read_runtime_state()
+                if state["status"] == "active":
+                    self.repair(_locked=True)
+                    return self.state_path
+                if state["status"] == "uninstalling":
+                    raise InstallerConflict("runtime uninstall is incomplete; retry uninstall")
+                self._rollback_runtime(state)
+                recovering = True
+            else:
+                project = _root_path(self.root, self.plan.project_dir)
+                if project.exists() and any(project.iterdir()):
+                    raise InstallerConflict("pre-existing project requires explicit migration; refusing overwrite")
+                missing = {name for name in RUNTIME_CORE_PACKAGES if not self.runner.package_installed(name)}
+                command_available = getattr(self.runner, "command_available", None)
+                compose_available = getattr(self.runner, "compose_available", None)
+                if not (command_available("nginx") if command_available else self.runner.package_installed("nginx-full")):
+                    missing.add("nginx-full")
+                if not (command_available("docker") if command_available else self.runner.package_installed("docker.io")):
+                    missing.add("docker.io")
+                if not (compose_available() if compose_available else self.runner.package_installed("docker-compose-v2")):
+                    missing.add("docker-compose-v2")
+                state = {
+                    "schema": RUNTIME_STATE_SCHEMA, "status": "installing", "phase": "initialized",
+                    "plan": self.plan.to_dict(), "owned_packages": sorted(missing),
+                    "managed_files": self._managed_paths(),
+                    "managed_hashes": self._expected_managed_hashes(),
+                    "project_created": not project.exists(),
+                }
+                _write_state(self.state_path, state)
             route_plan = InstallPlan(
                 self.plan.proxy_domain, self.plan.panel_domain, self.plan.route_file,
                 self.plan.proxy_backend_port, self.plan.panel_tls_port,
             )
-            missing = {name for name in RUNTIME_CORE_PACKAGES if not self.runner.package_installed(name)}
-            command_available = getattr(self.runner, "command_available", None)
-            compose_available = getattr(self.runner, "compose_available", None)
-            if not (command_available("nginx") if command_available else self.runner.package_installed("nginx-full")):
-                missing.add("nginx-full")
-            if not (command_available("docker") if command_available else self.runner.package_installed("docker.io")):
-                missing.add("docker.io")
-            if not (compose_available() if compose_available else self.runner.package_installed("docker-compose-v2")):
-                missing.add("docker-compose-v2")
-            missing = sorted(missing)
-            state = {
-                "schema": 1, "status": "installing", "plan": self.plan.to_dict(),
-                "owned_packages": missing, "managed_files": self._managed_paths(),
-                "managed_hashes": {}, "project_created": False,
-            }
-            _write_state(self.state_path, state)
-            route_applied = False
             try:
-                if missing:
+                if state["owned_packages"]:
                     self._run("apt-get", "update")
-                    self._run("apt-get", "install", "-y", *missing)
+                    self._run("apt-get", "install", "-y", *state["owned_packages"])
+                self._checkpoint(state, status="installing", phase="packages_installed")
                 self._run("systemctl", "enable", "--now", "docker", "nginx")
-                state["project_created"] = self._render_project()
-                _write_state(self.state_path, state)
+                self._render_project(recovery=recovering)
+                self._checkpoint(state, status="installing", phase="project_rendered")
                 self._check_unowned_paths()
                 self._write_acme_site()
                 self._validate_reload()
@@ -1150,7 +1276,7 @@ class RuntimeInstaller:
                 state["managed_hashes"] = {
                     path: self._path_hash(_root_path(self.root, path)) for path in state["managed_files"]
                 }
-                _write_state(self.state_path, state)
+                self._checkpoint(state, status="installing", phase="sites_installed")
                 self._validate_reload()
                 self._compose("config", "-q")
                 self._compose("pull", "-q")
@@ -1162,43 +1288,42 @@ class RuntimeInstaller:
                     "--username", "owner", "--role", "owner", "--password-stdin",
                     stdin_path=password,
                 )
-                _apply_plan_unlocked(route_plan, root=self.root, validate=lambda: self._run("nginx", "-t"), reload=lambda: self._run("systemctl", "reload", "nginx"))
-                route_applied = True
+                self._checkpoint(state, status="installing", phase="compose_started")
+                _apply_plan_unlocked(
+                    route_plan, root=self.root,
+                    validate=lambda: self._run("nginx", "-t"),
+                    reload=lambda: self._run("systemctl", "reload", "nginx"),
+                )
+                self._checkpoint(state, status="installing", phase="route_installed")
                 self._health_and_protocol()
-                state["status"] = "active"
-                _write_state(self.state_path, state)
+                self._checkpoint(state, status="active", phase="route_installed")
                 return self.state_path
-            except BaseException:
+            except Exception:
                 try:
-                    if route_applied:
-                        _uninstall_installation_unlocked(root=self.root, validate=lambda: self._run("nginx", "-t"), reload=lambda: self._run("systemctl", "reload", "nginx"))
-                    self._compose("down", "--remove-orphans", "--volumes")
-                    self._remove_managed_files(state, check_hashes=False)
-                    self._run("nginx", "-t")
-                    self._run("systemctl", "reload", "nginx")
-                    if state["project_created"]:
-                        shutil.rmtree(_root_path(self.root, self.plan.project_dir), ignore_errors=True)
-                    if missing:
-                        self._run("apt-get", "purge", "-y", *missing)
-                    self.state_path.unlink(missing_ok=True)
-                except BaseException as rollback_error:
-                    state["status"] = "rollback-failed"
-                    state["rollback_error"] = type(rollback_error).__name__
-                    _write_state(self.state_path, state)
+                    self._rollback_runtime(state)
+                except BaseException:
+                    pass
                 raise
 
     def repair(self, *, _locked: bool = False) -> None:
         def operation() -> None:
             if not self.state_path.exists():
                 return
-            state = json.loads(self.state_path.read_text())
-            if state.get("status") != "active" or state.get("plan") != self.plan.to_dict():
-                raise InstallerConflict("runtime transaction is incomplete or belongs to another plan")
-            for host_path, expected in state.get("managed_hashes", {}).items():
+            state = self._read_runtime_state()
+            if state["status"] in {"installing", "rollback_failed"}:
+                self._rollback_runtime(state)
+                return
+            if state["status"] == "uninstalling":
+                raise InstallerConflict("runtime uninstall is incomplete; retry uninstall")
+            for host_path, expected in state["managed_hashes"].items():
                 path = _root_path(self.root, host_path)
                 if (not path.exists() and not path.is_symlink()) or self._path_hash(path) != expected:
                     raise InstallerConflict(f"managed file has drifted: {host_path}")
-            _repair_installation_unlocked(root=self.root, validate=lambda: self._run("nginx", "-t"), reload=lambda: self._run("systemctl", "reload", "nginx"))
+            _repair_installation_unlocked(
+                root=self.root,
+                validate=lambda: self._run("nginx", "-t"),
+                reload=lambda: self._run("systemctl", "reload", "nginx"),
+            )
             self._compose("up", "-d", "--wait")
             self._health_and_protocol()
         if _locked:
@@ -1211,31 +1336,48 @@ class RuntimeInstaller:
         with _operation_lock(self.root):
             if not self.state_path.exists():
                 return
-            state = json.loads(self.state_path.read_text())
-            if state.get("status") != "active" or state.get("plan") != self.plan.to_dict():
-                raise InstallerConflict("runtime manifest is not an active matching installation")
-            snapshots = self._snapshot_managed_files(state)
-            self._remove_managed_files(state, check_hashes=True)
-            try:
+            state = self._read_runtime_state()
+            if state["status"] in {"installing", "rollback_failed"}:
+                self._rollback_runtime(state)
+                return
+            if state["status"] == "active":
+                self._checkpoint(state, status="uninstalling", phase="started")
+            phase = state["phase"]
+            if phase == "started":
+                self._compose("down", "--remove-orphans", "--volumes")
+                self._checkpoint(state, status="uninstalling", phase="compose_down")
+                phase = "compose_down"
+            if phase == "compose_down":
                 _uninstall_installation_unlocked(
                     root=self.root,
                     validate=lambda: self._run("nginx", "-t"),
                     reload=lambda: self._run("systemctl", "reload", "nginx"),
                 )
-            except BaseException:
-                self._restore_managed_files(snapshots)
+                self._checkpoint(state, status="uninstalling", phase="route_removed")
+                phase = "route_removed"
+            if phase == "route_removed":
+                # Validate the complete owned generation before making removal retryable.
+                for host_path, expected in state["managed_hashes"].items():
+                    path = _root_path(self.root, host_path)
+                    if (not path.exists() and not path.is_symlink()) or self._path_hash(path) != expected:
+                        raise InstallerConflict(f"managed file has drifted: {host_path}")
+                self._checkpoint(state, status="uninstalling", phase="sites_removing")
+                phase = "sites_removing"
+            if phase == "sites_removing":
+                self._remove_managed_files(state, check_hashes=True, allow_missing=True)
                 self._validate_reload()
-                raise
-            self._compose("down", "--remove-orphans", "--volumes")
-            project = _root_path(self.root, self.plan.project_dir)
-            if project.is_dir():
-                for child in list(project.iterdir()):
-                    if child.name != "secrets":
-                        shutil.rmtree(child) if child.is_dir() else child.unlink()
-            owned_packages = state.get("owned_packages", [])
-            if owned_packages:
-                self._run("apt-get", "purge", "-y", *owned_packages)
+                self._checkpoint(state, status="uninstalling", phase="sites_removed")
+                phase = "sites_removed"
+            if phase == "sites_removed":
+                self._clean_project_preserving_credentials()
+                self._checkpoint(state, status="uninstalling", phase="project_cleaned")
+                phase = "project_cleaned"
+            if phase == "project_cleaned":
+                if state["owned_packages"]:
+                    self._run("apt-get", "purge", "-y", *state["owned_packages"])
+                self._checkpoint(state, status="uninstalling", phase="packages_purged")
             self.state_path.unlink()
+            _fsync_dir(self.state_path.parent)
 
 
 def _add_runtime_arguments(command: argparse.ArgumentParser) -> None:
