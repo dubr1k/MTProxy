@@ -37,5 +37,6 @@ jobs:
           docker compose config -q
           printf 'ci-naive-manager-token-0123456789abcdef0123456789abcdef\n' > secrets/naive-manager-token
           docker compose -f compose.yaml -f compose.naive.yaml config -q
+          docker compose -f compose.yaml -f compose.naive.yaml build panel naive-manager
       - name: Diff hygiene
         run: git diff --check

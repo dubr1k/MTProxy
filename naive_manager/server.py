@@ -118,8 +118,8 @@ class ManagerHandler(BaseHTTPRequestHandler):
     do_DELETE = _dispatch
 
 
-def command_validate(path: Path) -> None:
-    caddy_adapt(path)
+def command_validate(path: Path) -> dict:
+    return caddy_adapt(path)
 
 
 def command_reload() -> None:
