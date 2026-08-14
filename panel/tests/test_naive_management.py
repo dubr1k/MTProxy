@@ -1,0 +1,146 @@
+from __future__ import annotations
+
+import pytest
+import httpx
+
+from panel.app import Settings, create_app
+from panel.naive import MemoryNaive, NaiveClient
+from panel.telemt import MemoryTelemt
+
+pytestmark = pytest.mark.anyio
+
+
+async def test_naive_list_is_secret_free_and_viewer_is_read_only(client, login_user, naive):
+    naive.seed("phone", "hidden-password", enabled=True)
+    await login_user(client)
+
+    listed = await client.get("/api/naive/users")
+    assert listed.status_code == 200
+    assert listed.json() == {
+        "items": [{"username": "phone", "enabled": True}],
+        "service": {"ready": True, "host": "naive.example.com"},
+    }
+    assert "hidden-password" not in listed.text
+
+    await client.post("/api/auth/logout", headers={"X-CSRF-Token": client.cookies["panel_csrf"]})
+    client.cookies.clear()
+    client._transport.app.state.store.create_admin("naive-viewer", "viewer correct horse battery", "viewer")
+    await login_user(client, "naive-viewer", "viewer correct horse battery")
+    csrf = client.cookies["panel_csrf"]
+    assert (await client.get("/api/naive/users")).status_code == 200
+    assert (await client.post("/api/naive/users", json={"username": "new"}, headers={"X-CSRF-Token": csrf})).status_code == 403
+    assert (await client.post("/api/naive/users/phone/access", headers={"X-CSRF-Token": csrf})).status_code == 403
+
+
+async def test_naive_owner_can_create_reveal_rotate_toggle_and_delete(client, login_user, naive):
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+
+    created = await client.post(
+        "/api/naive/users",
+        json={"username": "ios-phone"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert created.status_code == 201
+    first = await client.get("/api/reveal/" + created.json()["reveal_token"])
+    assert first.status_code == 200
+    assert first.headers["cache-control"] == "no-store"
+    assert first.json()["proxy_url"].startswith("https://ios-phone:")
+    assert first.json()["proxy_url"].endswith("@naive.example.com")
+    assert first.json()["config"]["proxy"] == first.json()["proxy_url"]
+    assert first.json()["config"]["listen"] == "socks://127.0.0.1:1080"
+
+    access = await client.post("/api/naive/users/ios-phone/access", headers={"X-CSRF-Token": csrf})
+    assert access.status_code == 200
+    assert access.json()["proxy_url"] == first.json()["proxy_url"]
+
+    rotated = await client.post("/api/naive/users/ios-phone/rotate", headers={"X-CSRF-Token": csrf})
+    assert rotated.status_code == 200
+    second = await client.get("/api/reveal/" + rotated.json()["reveal_token"])
+    assert second.json()["proxy_url"] != first.json()["proxy_url"]
+
+    assert (await client.post("/api/naive/users/ios-phone/disable", headers={"X-CSRF-Token": csrf})).status_code == 200
+    assert (await client.get("/api/naive/users")).json()["items"][0]["enabled"] is False
+    assert (await client.post("/api/naive/users/ios-phone/enable", headers={"X-CSRF-Token": csrf})).status_code == 200
+    assert (await client.delete("/api/naive/users/ios-phone", headers={"X-CSRF-Token": csrf})).status_code == 204
+
+    audit = (await client.get("/api/audit")).json()["items"]
+    actions = [row["action"] for row in audit]
+    assert {"naive.create", "naive.access", "naive.rotate", "naive.disable", "naive.enable", "naive.delete"} <= set(actions)
+    audit_text = str(audit)
+    assert "hidden-password" not in audit_text
+    assert "https://ios-phone:" not in audit_text
+
+
+async def test_naive_usernames_are_validated_before_manager_call(client, login_user, naive):
+    await login_user(client)
+    response = await client.post(
+        "/api/naive/users",
+        json={"username": "bad user"},
+        headers={"X-CSRF-Token": client.cookies["panel_csrf"]},
+    )
+    assert response.status_code == 422
+    assert naive.calls == []
+
+
+async def test_naive_adapter_accepts_empty_204_delete_response():
+    async def handler(request):
+        assert request.method == "DELETE"
+        return httpx.Response(204)
+
+    adapter = NaiveClient("/run/manager.sock", "internal-token", transport=httpx.MockTransport(handler))
+    assert await adapter.delete("phone") is None
+
+
+async def test_naive_feature_is_hidden_and_routes_fail_closed_when_disabled(tmp_path):
+    settings = Settings(
+        database_path=tmp_path / "panel.sqlite3",
+        session_cookie_secure=False,
+        allowed_hosts=("testserver",),
+        naive_enabled=False,
+    )
+    app = create_app(settings, telemt=MemoryTelemt(), naive=MemoryNaive())
+    app.state.store.create_admin("owner", "correct horse battery staple", "owner")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        follow_redirects=False,
+    ) as client:
+        login_page = await client.get("/login")
+        login = await client.post(
+            "/api/auth/login",
+            json={"username": "owner", "password": "correct horse battery staple"},
+            headers={"X-CSRF-Token": login_page.cookies["panel_csrf"]},
+        )
+        assert login.status_code == 204
+        identity = await client.get("/api/auth/me")
+        assert identity.json()["features"]["naive"] is False
+        assert (await client.get("/api/naive/users")).status_code == 404
+        assert (
+            await client.post(
+                "/api/naive/users",
+                json={"username": "phone"},
+                headers={"X-CSRF-Token": client.cookies["panel_csrf"]},
+            )
+        ).status_code == 404
+
+
+async def test_creating_reveal_purges_expired_password_bearing_entries(client, login_user, monkeypatch):
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+    monkeypatch.setattr("panel.app.time.monotonic", lambda: 100.0)
+    first = await client.post(
+        "/api/naive/users",
+        json={"username": "first"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    first_token = first.json()["reveal_token"]
+    monkeypatch.setattr("panel.app.time.monotonic", lambda: 1000.0)
+
+    await client.post(
+        "/api/naive/users",
+        json={"username": "second"},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert first_token not in client._transport.app.state.reveals

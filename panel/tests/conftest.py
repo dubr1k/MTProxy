@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from panel.app import Settings, create_app
+from panel.naive import MemoryNaive
 from panel.telemt import MemoryTelemt
 
 
@@ -20,7 +21,12 @@ def telemt() -> MemoryTelemt:
 
 
 @pytest.fixture
-async def client(tmp_path: Path, telemt: MemoryTelemt):
+def naive() -> MemoryNaive:
+    return MemoryNaive()
+
+
+@pytest.fixture
+async def client(tmp_path: Path, telemt: MemoryTelemt, naive: MemoryNaive):
     settings = Settings(
         database_path=tmp_path / "panel.sqlite3",
         session_cookie_secure=False,
@@ -28,8 +34,10 @@ async def client(tmp_path: Path, telemt: MemoryTelemt):
         login_attempts=3,
         login_window_seconds=60,
         reveal_ttl_seconds=60,
+        naive_public_host="naive.example.com",
+        naive_enabled=True,
     )
-    app = create_app(settings, telemt=telemt)
+    app = create_app(settings, telemt=telemt, naive=naive)
     app.state.store.create_admin("owner", "correct horse battery staple", "owner")
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
