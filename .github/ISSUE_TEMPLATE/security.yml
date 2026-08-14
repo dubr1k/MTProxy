@@ -1,0 +1,14 @@
+name: Security reporting guidance
+description: Do not disclose vulnerabilities in a public issue
+title: "Do not submit public security details"
+body:
+  - type: markdown
+    attributes:
+      value: Stop here. Use GitHub private vulnerability reporting if available; otherwise follow SECURITY.md. Never submit exploit details, credentials, keys, certificates, access URLs or production metadata publicly.
+  - type: checkboxes
+    id: acknowledge
+    attributes:
+      label: Acknowledgement
+      options:
+        - label: I will use the private reporting path and will not submit security details here.
+          required: true

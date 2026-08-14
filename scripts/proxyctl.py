@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed host auditor and owned Nginx SNI route transaction manager."""
+"""Proxy Control fail-closed host lifecycle and Nginx transaction manager."""
 from __future__ import annotations
 
 import argparse

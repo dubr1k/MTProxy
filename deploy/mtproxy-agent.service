@@ -1,5 +1,5 @@
 [Unit]
-Description=MTProxy outbound mTLS fleet node agent
+Description=Proxy Control outbound mTLS fleet node agent
 After=network-online.target telemt.service
 Wants=network-online.target
 

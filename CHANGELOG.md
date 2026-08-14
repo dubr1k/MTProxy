@@ -1,5 +1,28 @@
 # Changelog
 
+All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Historical entries below are preserved as originally recorded.
+
+## [Unreleased]
+
+### Added
+
+- Standalone Proxy Control documentation, governance templates, screenshot policy, and third-party notices.
+- CI coverage for the complete Python suite, Ruff, all tracked shell scripts, all Compose variants, project image builds, documentation links, and provenance notices.
+
+### Changed
+
+- Neutral product descriptions cover Telemt/MTProto, NaiveProxy/Caddy, Mieru/mita, panel, and fleet while preserving protocol-specific and migration-sensitive MTProxy identifiers.
+- NaiveProxy now requires explicit `NAIVE_PUBLIC_HOST`; the personal fallback was removed.
+- Documentation accurately describes persistent Telemt configuration and its authenticated private API.
+
+### Security
+
+- Documented panel/RBAC, local managers, accounting, Mieru external-process, fleet mTLS, transactional host mutation, backup, and fail-closed boundaries.
+
+### Validation status
+
+- Ubuntu 24.04 QEMU lifecycle and production Mieru/fleet deployment remain pending.
+
 ## [1.3.0] - 2026-08-11
 
 ### New Features

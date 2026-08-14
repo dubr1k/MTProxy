@@ -1,0 +1,35 @@
+name: Bug report
+description: Report a reproducible, sanitized defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, access links, QR codes, certificates, production hostnames/IPs, or unsanitized logs. Report security issues privately.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Installer/auditor, Panel, Telemt/MTProto, NaiveProxy/Caddy, Mieru, Fleet, Documentation/CI]
+    validations: {required: true}
+  - type: input
+    id: revision
+    attributes: {label: Revision, description: Commit SHA or release}
+    validations: {required: true}
+  - type: textarea
+    id: reproduce
+    attributes: {label: Sanitized environment and reproduction steps}
+    validations: {required: true}
+  - type: textarea
+    id: expected
+    attributes: {label: Expected and actual behavior}
+    validations: {required: true}
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed all secrets, access URLs, QR codes, certificates and production metadata.
+          required: true
+        - label: This is not an exploitable security vulnerability.
+          required: true

@@ -1,6 +1,6 @@
-# Secure outbound mTLS fleet transport (v1)
+# Proxy Control secure outbound mTLS fleet transport (v1)
 
-Fleet nodes now make **outbound-only HTTPS connections** to a dedicated central ingress. The ingress performs TLS itself and derives node identity from the verified peer certificate; it does not trust HTTP identity headers and has no bearer-token fallback. The panel never receives SSH, a Docker socket, arbitrary commands, arbitrary URLs, or direct public Telemt access.
+Fleet nodes make **outbound-only HTTPS connections** to a dedicated central ingress. The ingress performs TLS itself and derives node identity from the verified peer certificate; it does not trust HTTP identity headers and has no bearer-token fallback. The panel never receives SSH, a Docker socket, arbitrary commands, arbitrary URLs, or direct public Telemt access.
 
 ## Security and protocol contract
 

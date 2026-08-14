@@ -9,7 +9,7 @@ services:
     group_add:
       - "10004"
     environment:
-      NAIVE_PUBLIC_HOST: ${NAIVE_PUBLIC_HOST:-chrbased.dubr1k-solutions.com}
+      NAIVE_PUBLIC_HOST: ${NAIVE_PUBLIC_HOST:?set an explicit NaiveProxy public host}
       NAIVE_MANAGER_TOKEN_FILE: /data/manager-token
       NAIVE_SOCKET_MODE: "660"
       NAIVE_TRAFFIC_LOG: /logs/access.json
@@ -40,7 +40,7 @@ services:
       NAIVE_ENABLED: "true"
       NAIVE_MANAGER_TOKEN_SOURCE: /run/secrets/naive-manager-token
       NAIVE_MANAGER_SOCKET: /run/naive-manager/manager.sock
-      NAIVE_PUBLIC_HOST: ${NAIVE_PUBLIC_HOST:-chrbased.dubr1k-solutions.com}
+      NAIVE_PUBLIC_HOST: ${NAIVE_PUBLIC_HOST:?set an explicit NaiveProxy public host}
     secrets:
       - naive-manager-token
     volumes:

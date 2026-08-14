@@ -65,8 +65,8 @@ def runtime_root(tmp_path: Path) -> tuple[Path, Path]:
 
 def plan(repo: Path) -> RuntimePlan:
     return RuntimePlan(
-        proxy_domain="tga.dubr1kkk.uk",
-        panel_domain="tga-panel.dubr1kkk.uk",
+        proxy_domain="proxy.example.com",
+        panel_domain="panel.example.com",
         email="ops@example.com",
         route_file="/etc/nginx/stream.d/routes.conf",
         source_dir=str(repo),
@@ -95,8 +95,8 @@ def test_runtime_install_owns_complete_stack_and_never_exposes_password(tmp_path
         "/etc/nginx/sites-enabled/proxy-control-panel.conf",
     ]
     assert stat.S_IMODE(manifest_path.stat().st_mode) == 0o600
-    assert "tga.dubr1kkk.uk 127.0.0.1:8445;" in route.read_text()
-    assert "tga-panel.dubr1kkk.uk 127.0.0.1:8443;" in route.read_text()
+    assert "proxy.example.com 127.0.0.1:8445;" in route.read_text()
+    assert "panel.example.com 127.0.0.1:8443;" in route.read_text()
     assert original_route != route.read_text()
 
     project = root / "opt/mtproxy-shared443"
@@ -109,7 +109,7 @@ def test_runtime_install_owns_complete_stack_and_never_exposes_password(tmp_path
     assert password not in serialized_calls
     bootstrap = next(call for call in runner.calls if "panel.cli" in call[0])
     assert bootstrap[1] == str(password_file)
-    assert any(call[0][:2] == ("certbot", "certonly") and "tga-panel.dubr1kkk.uk" in call[0] for call in runner.calls)
+    assert any(call[0][:2] == ("certbot", "certonly") and "panel.example.com" in call[0] for call in runner.calls)
     assert any(call[0][0] == "/usr/local/bin/mtproxy-respq-probe" for call in runner.calls)
 
 
@@ -320,7 +320,7 @@ def test_runtime_phase_checkpoints_follow_durable_filesystem_mutations(tmp_path,
     assert project / "scripts/proxyctl.py" in phase_syncs["project_rendered"]
     assert project / "docker" in phase_syncs["project_rendered"]
     assert project / "panel" in phase_syncs["project_rendered"]
-    assert root / "var/www/tga.dubr1kkk.uk/.well-known/acme-challenge" in phase_syncs["sites_installed"]
+    assert root / "var/www/proxy.example.com/.well-known/acme-challenge" in phase_syncs["sites_installed"]
     assert root / "etc/nginx/sites-enabled" in phase_syncs["sites_installed"]
 
     manager.uninstall()

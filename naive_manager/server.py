@@ -172,7 +172,9 @@ def https_probe(host: str, port: int = 4443) -> None:
 
 
 def build_manager() -> NaiveCredentialManager:
-    host = os.getenv("NAIVE_PUBLIC_HOST", "chrbased.dubr1k-solutions.com")
+    host = os.getenv("NAIVE_PUBLIC_HOST", "").strip()
+    if not host:
+        raise SystemExit("NAIVE_PUBLIC_HOST is required")
     manager = NaiveCredentialManager(
         caddyfile=Path(os.getenv("NAIVE_CADDYFILE", "/data/Caddyfile")),
         state_file=Path(os.getenv("NAIVE_STATE_FILE", "/data/users.json")),

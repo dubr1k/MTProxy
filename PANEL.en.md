@@ -1,4 +1,6 @@
-# MTProxy and NaiveProxy control panel
+# Proxy Control panel
+
+The panel manages distinct Telemt/MTProto, NaiveProxy/Caddy, Mieru/mita, and fleet boundaries. Protocol-specific capabilities and accounting semantics are not interchangeable.
 
 The panel binds to host loopback only at `http://127.0.0.1:8787`. Use an SSH tunnel (`ssh -L 8787:127.0.0.1:8787 server`) or your own HTTPS reverse proxy remotely. Never publish Telemt port `9091`; Compose intentionally exposes no host port for it.
 

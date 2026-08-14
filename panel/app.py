@@ -47,9 +47,7 @@ class Settings:
             "NAIVE_MANAGER_TOKEN", "NAIVE_MANAGER_TOKEN_FILE"
         )
     )
-    naive_public_host: str = os.getenv(
-        "NAIVE_PUBLIC_HOST", "chrbased.dubr1k-solutions.com"
-    )
+    naive_public_host: str = os.getenv("NAIVE_PUBLIC_HOST", "")
     naive_enabled: bool = os.getenv("NAIVE_ENABLED", "false").lower() == "true"
     mieru_socket: str = os.getenv(
         "MIERU_MANAGER_SOCKET", "/run/mieru-manager/manager.sock"
@@ -193,8 +191,10 @@ def create_app(
     settings: Settings | None = None, *, telemt=None, naive=None, mieru=None
 ):
     settings = settings or Settings()
+    if settings.naive_enabled and not settings.naive_public_host.strip():
+        raise ValueError("NAIVE_PUBLIC_HOST is required when NaiveProxy is enabled")
     app = FastAPI(
-        title="MTProxy Panel", docs_url=None, redoc_url=None, openapi_url=None
+        title="Proxy Control API", docs_url=None, redoc_url=None, openapi_url=None
     )
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts)

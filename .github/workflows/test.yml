@@ -1,4 +1,4 @@
-name: deployment-tests
+name: CI
 
 on:
   push:
@@ -7,48 +7,84 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
+  quality:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - name: Shell syntax
-        run: |
-          bash -n install.sh uninstall.sh install_mtproxy.sh uninstall_mtproxy.sh scripts/check-deployment.sh scripts/check-naive-caddy-build.sh docker/telemt-entrypoint.sh panel/entrypoint.sh
-          shellcheck install.sh uninstall.sh install_mtproxy.sh uninstall_mtproxy.sh scripts/check-deployment.sh scripts/check-naive-caddy-build.sh docker/telemt-entrypoint.sh panel/entrypoint.sh
-          test -x scripts/check-naive-caddy-build.sh
-      - name: Python tests
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Python environment
         run: |
           python3 -m venv .venv
           .venv/bin/pip install -r panel/requirements-dev.txt
+      - name: Ruff and full tests
+        run: |
           .venv/bin/ruff check .
-          .venv/bin/python -m pytest -q panel/tests tests/test_naive_manager.py tests/test_naive_traffic.py tests/test_proxyctl.py tests/test_proxyctl_transactions.py tests/test_proxyctl_runtime.py
-          python3 -m unittest -v tests/test_deploy.py
-      - name: Compose render
+          .venv/bin/python -m pytest -q
+          .venv/bin/python -m unittest -v tests/test_deploy.py
+      - name: Every tracked shell script
+        run: |
+          mapfile -t shell_files < <(git grep -Il '^#!/.*sh')
+          test "${#shell_files[@]}" -gt 0
+          printf '%s\n' "${shell_files[@]}"
+          bash -n "${shell_files[@]}"
+          shellcheck "${shell_files[@]}"
+      - name: Documentation, notices, service units, and diff hygiene
+        run: |
+          .venv/bin/python scripts/check-doc-links.py
+          test -s LICENSE
+          test -s THIRD_PARTY_NOTICES.md
+          grep -q 'Mieru/mita' THIRD_PARTY_NOTICES.md
+          grep -q 'not bundled' THIRD_PARTY_NOTICES.md
+          sudo install -d /usr/local/libexec /opt/proxy-control/venv/bin /opt/mtproxy-agent/venv/bin /opt/mtproxy-panel/venv/bin
+          sudo install -m 0755 /bin/true /usr/local/libexec/check-naive-caddy-build
+          sudo install -m 0755 /bin/true /usr/local/bin/caddy
+          sudo install -m 0755 /bin/true /opt/proxy-control/venv/bin/python
+          sudo install -m 0755 /bin/true /opt/mtproxy-agent/venv/bin/python
+          sudo install -m 0755 /bin/true /opt/mtproxy-panel/venv/bin/python
+          printf '[Unit]\nDescription=CI stub mita dependency\n[Service]\nType=oneshot\nExecStart=/bin/true\n' | sudo tee /etc/systemd/system/mita.service >/dev/null
+          systemd-analyze verify deploy/*.service
+          git diff --check
+
+  compose-and-images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Prepare synthetic render inputs
         run: |
           cat > .env <<'EOF'
           MTPROXY_DOMAIN=proxy.example.com
           MTPROXY_BACKEND_PORT=18445
           MTPROXY_COVER_ROOT=/tmp/cover
           MTPROXY_LETSENCRYPT_ROOT=/tmp/letsencrypt
+          NAIVE_PUBLIC_HOST=naive.example.com
           EOF
           mkdir -p secrets
           printf 'ci=0123456789abcdef0123456789abcdef\n' > secrets/users.conf
           printf 'Bearer ci-internal-token-0123456789abcdef0123456789abcdef\n' > secrets/telemt-api-token
-          docker compose config -q
           printf 'ci-naive-manager-token-0123456789abcdef0123456789abcdef\n' > secrets/naive-manager-token
-          docker compose -f compose.yaml -f compose.naive.yaml config -q
-          docker compose -f compose.yaml -f compose.naive.yaml build panel naive-manager
-          FLEET_NODE_ID=vpn-nl2 FLEET_CENTRAL_URL=https://fleet.example.com:8790 \
-            FLEET_CLIENT_CERT=/tmp/client.crt FLEET_CLIENT_KEY=/tmp/client.key \
-            TELEMT_API_TOKEN_FILE="$PWD/secrets/telemt-api-token" \
-            docker compose -f compose.agent.yaml config -q
-          FLEET_SERVER_CERT=/tmp/server.crt FLEET_SERVER_KEY=/tmp/server.key \
-            FLEET_CLIENT_CA=/tmp/client-ca.crt \
-            docker compose -f compose.fleet-central.yaml config -q
-          docker build -f deploy/Dockerfile.agent -t mtproxy-agent:test .
-          docker build -f deploy/Dockerfile.ingress -t mtproxy-fleet-ingress:test .
-          test "$(docker run --rm --entrypoint id mtproxy-fleet-ingress:test -u)" = 10001
-          test "$(docker run --rm --entrypoint id mtproxy-fleet-ingress:test -g)" = 10001
-      - name: Diff hygiene
-        run: git diff --check
+          printf 'ci-mieru-manager-token-0123456789abcdef0123456789abcdef\n' > secrets/mieru-manager-token
+      - name: Render every Compose model
+        run: |
+          docker compose -f compose.yaml config -q
+          NAIVE_PUBLIC_HOST=naive.example.com docker compose -f compose.yaml -f compose.naive.yaml config -q
+          MIERU_PUBLIC_HOST=mieru.example.com MIERU_MITA_GID=10003 MIERU_MITA_BIN=/bin/true MIERU_MITA_SHA256=4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31 docker compose -f compose.yaml -f compose.mieru.yaml config -q
+          FLEET_NODE_ID=node-ci FLEET_CENTRAL_URL=https://fleet.example.com:8790 FLEET_CLIENT_CERT=/tmp/client.crt FLEET_CLIENT_KEY=/tmp/client.key TELEMT_API_TOKEN_FILE="$PWD/secrets/telemt-api-token" docker compose -f compose.agent.yaml config -q
+          FLEET_SERVER_CERT=/tmp/server.crt FLEET_SERVER_KEY=/tmp/server.key FLEET_CLIENT_CA=/tmp/client-ca.crt docker compose -f compose.fleet-central.yaml config -q
+      - name: Build project images
+        run: |
+          NAIVE_PUBLIC_HOST=naive.example.com docker compose -f compose.yaml -f compose.naive.yaml build panel naive-manager
+          MIERU_PUBLIC_HOST=mieru.example.com MIERU_MITA_GID=10003 MIERU_MITA_BIN=/bin/true MIERU_MITA_SHA256=4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31 docker compose -f compose.yaml -f compose.mieru.yaml build mieru-manager
+          docker build -f deploy/Dockerfile.agent -t proxy-control-agent:test .
+          docker build -f deploy/Dockerfile.ingress -t proxy-control-ingress:test .
+          test "$(docker run --rm --entrypoint id proxy-control-ingress:test -u)" = 10001
+          test "$(docker run --rm --entrypoint id proxy-control-ingress:test -g)" = 10001
+      - name: Validate pinned Caddy checker contract
+        run: |
+          grep -q "EXPECTED='v2.11.4 " scripts/check-naive-caddy-build.sh
+          grep -q "http.handlers.forward_proxy" scripts/check-naive-caddy-build.sh

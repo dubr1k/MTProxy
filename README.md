@@ -1,297 +1,141 @@
-**Русский** | [English](README.en.md)
+[English](README.en.md) | **Русский**
 
-# MTProxy за общим TCP/443: Telemt, Nginx SNI и внешний cover-сайт
+# Proxy Control
 
-> Docker-развёртывание MTProto-прокси для сервера, где публичный TCP/443 уже занят Nginx `stream`, HTTPS-сайтами и Xray/3x-ui.
+Мультипротокольная панель управления Telemt/MTProto, NaiveProxy/Caddy и Mieru с транзакционным lifecycle, учётом трафика, адаптивным UI и исходящими mTLS fleet-агентами.
 
-В Compose включена FastAPI-панель для пользователей Telemt, ролей администраторов и аудита. Она слушает только `127.0.0.1:8787`, а Telemt REST API доступен лишь внутри Compose-сети. Безопасный первый запуск описан в [PANEL.ru.md](PANEL.ru.md).
+> **Зрелость:** локальные и CI-проверки покрывают код, рендер конфигураций и сборку образов. Полный lifecycle в Ubuntu 24.04/QEMU и production-развёртывание Mieru/fleet пока не подтверждены. Рассматривайте релиз как требующий проверки оператором release candidate, а не как готовый managed service.
 
+[![CI](https://github.com/dubr1k/proxy-control/actions/workflows/test.yml/badge.svg)](https://github.com/dubr1k/proxy-control/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Runtime: Telemt 3.4.25](https://img.shields.io/badge/Runtime-Telemt%203.4.25-6f42c1.svg)](https://github.com/telemt/telemt)
-[![Container: digest pinned](https://img.shields.io/badge/Container-digest--pinned-success.svg)](compose.yaml)
 
-Этот проект использует **Docker production-путь** на современном движке [Telemt](https://github.com/telemt/telemt). Он не требует отдавать MTProxy весь публичный порт `443`: Nginx читает SNI без завершения TLS и направляет только выделенный домен на loopback listener контейнера.
+## Чем управляет проект
 
-## Быстрая установка на VPS
+- **Telemt / MTProto:** пользователи, секреты, лимиты, runtime- и quota-счётчики через аутентифицированный приватный API Telemt.
+- **NaiveProxy / Caddy:** учётные данные, транзакционные reload Caddy, ссылки доступа и durable-учёт по завершённым CONNECT.
+- **Mieru / mita:** пользователи, rolling quota, lifecycle и fail-closed транзакции через отдельно установленный GPLv3+ runtime.
+- **Control plane:** FastAPI-панель с RBAC/audit, исходящие mTLS-агенты и durable fleet-очередь команд.
 
-Полный installer безопасно сосуществует с уже настроенным Nginx/Xray/3x-ui и управляет двумя доменами:
+## Статус поддержки
 
-```bash
-sudo ./install.sh \
-  --proxy-domain tga.dubr1kkk.uk \
-  --panel-domain tga-panel.dubr1kkk.uk \
-  --email ops@example.com \
-  --route-file /etc/nginx/stream.d/routes.conf \
-  --users owner,phone \
-  --protocol-probe /usr/local/bin/mtproxy-respq-probe
+| Область | Статус | Проверка |
+|---|---|---|
+| Python managers, panel, installer transactions | Проверено локально и в CI | Полный pytest, unittest, Ruff |
+| Compose-модели и образы проекта | Проверено локально и в CI | Рендер/сборка core, Naive, Mieru, agent, ingress |
+| Установка на существующий shared TCP/443 host | Advanced/manual | Обязательны fail-closed audit/plan и внешний protocol probe |
+| Полный lifecycle Ubuntu 24.04 в QEMU | Ожидает проверки | Пока не required gate |
+| Production Mieru и fleet enrollment | Ожидает проверки | Проект не заявляет изменённый production host/node |
+
+## Быстрый старт
+
+```sh
+git clone https://github.com/dubr1k/proxy-control.git
+cd proxy-control
 ```
 
-Он устанавливает недостающие пакеты, выпускает двухдоменный ACME-сертификат, разворачивает Telemt и панель, создаёт внутренний TLS-vhost панели, транзакционно меняет SNI-карту и выполняет обязательный `resPQ` hook. Firewall не меняется, секреты не печатаются. Полные режимы `audit/plan/install/repair/uninstall`, rollback и ограничения: **[INSTALLER_AUDITOR.md](INSTALLER_AUDITOR.md)**.
+Read-only discovery (полный installer поддерживает Ubuntu 24.04):
 
-## Зачем заменён старый движок
-
-Официальный `TelegramMessenger/MTProxy` использует устаревшую цепочку через Telegram Middle-End на TCP/8888. На части сетей TCP-соединение с клиентом и Fake-TLS проходят успешно, но пул Middle-End остаётся пустым (`ready_targets = 0`), поэтому Telegram бесконечно показывает `Connecting`.
-
-Telemt работает с актуальными Telegram DC напрямую по TCP/443. В этом форке образ зафиксирован по digest, а успешность проверяется не только healthcheck'ом, но и полным протокольным тестом:
-
-```text
-TCP connect → Fake-TLS → Obfuscated2 → req_pq_multi → Telegram resPQ
+```sh
+sudo python3 scripts/proxyctl.py audit --proxy-domain proxy.example.com --panel-domain panel.example.com --json
+sudo python3 scripts/proxyctl.py plan --proxy-domain proxy.example.com --panel-domain panel.example.com \
+  --email admin@example.com --route-file /etc/nginx/stream.d/routes.conf \
+  --users owner --protocol-probe /usr/local/bin/mtproxy-respq-probe
 ```
+
+Core Telemt + panel (сначала подготовьте `.env` и mode-0600 secrets):
+
+```sh
+docker compose config
+docker compose up -d
+```
+
+Naive override требует явный hostname:
+
+```sh
+export NAIVE_PUBLIC_HOST=naive.example.com
+docker compose -f compose.yaml -f compose.naive.yaml config
+docker compose -f compose.yaml -f compose.naive.yaml up -d --build
+```
+
+Mieru требует отдельно полученный и проверенный по digest executable `mita` и обязательный state preflight:
+
+```sh
+sudo ./scripts/prepare-mieru-state.sh prepare "${MIERU_MANAGER_STATE_DIR:-/var/lib/mieru-manager}"
+docker compose -f compose.yaml -f compose.mieru.yaml config
+docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
+```
+
+Fleet preview: рендерьте `compose.agent.yaml` и `compose.fleet-central.yaml` с тестовыми путями только после чтения [FLEET.en.md](FLEET.en.md). Успешный рендер не означает enrollment или production validation.
 
 ## Архитектура
 
 ```text
-Интернет TCP/443
-  → Nginx stream + ssl_preread
-  → SNI выбранного MTProxy-домена
-  → 127.0.0.1:8445
-  → контейнер Telemt:443
-  → Telegram DC:443
-
-Обычный браузер или активный probe
-  → Telemt mask fallback
-  → контейнер Caddy:443
-  → статический cover-сайт
+Internet → host Nginx stream/SNI → loopback proxy listeners → Telemt или protocol runtime
+                                  ↘ panel TLS → loopback FastAPI + SQLite
+Panel → authenticated local Unix/private-network managers → Caddy / mita
+Node agent → outbound mTLS → central ingress → durable typed queue
 ```
 
-- Telemt опубликован только на `127.0.0.1:8445` и не конкурирует за `0.0.0.0:443`.
-- Caddy доступен только во внутренней Docker-сети.
-- Неопознанный TLS-трафик передаётся на реальный HTTPS cover backend.
-- Секреты не входят в образ, Compose-конфигурацию или Git.
-- Runtime-конфигурация Telemt создаётся в приватном `tmpfs`.
-- API Telemt отключён; пользовательские ссылки не печатаются в production-логи.
-- Root filesystem обоих контейнеров работает read-only.
-- У Telemt удалены все Linux capabilities (`cap_drop: ALL`).
+Nginx остаётся владельцем публичного TCP/443. Managers имеют ограниченные API и не получают Docker socket. Подробнее: [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Состав Docker-развёртывания
+## Матрица возможностей
 
-| Файл | Назначение |
-|---|---|
-| `compose.yaml` | Telemt и Caddy, loopback-публикация, healthchecks и hardening |
-| `docker/telemt-entrypoint.sh` | Безопасно преобразует `users.conf` в runtime TOML |
-| `docker/Caddyfile` | Внутренний HTTPS cover backend |
-| `docker/links.py` | Локальная генерация Fake-TLS ссылок без вывода секретов в логи |
-| `install.sh` / `uninstall.sh` | Идемпотентное VPS-развёртывание и точечное удаление |
-| `scripts/mtproxy-deploy` | Тестируемый генератор файлов и безопасных SNI-маршрутов |
-| `DOCKER_DEPLOYMENT.md` | Краткие эксплуатационные заметки |
+| Возможность | Telemt | Naive | Mieru | Fleet v1 |
+|---|---|---|---|---|
+| User lifecycle | Да | Да | Да | Telemt enable/disable; без secret mutation |
+| Limits / quota | Quota, rate, connections, IPs, expiry | Только accounting reset | Rolling approximate quotas | Typed Telemt limit/reset |
+| Accounting | Runtime + quota | Completed CONNECT payload | Degraded/unavailable | Secret-free inventory/results |
+| Transactional apply / rollback | Installer/runtime checks | Paired config/state journal | CAS snapshot journal | Durable command/result queue |
+| Remote lifecycle | Локальная panel | Local manager | Start/stop/restart | Mieru lifecycle allowlist |
 
-## Требования
+## Матрица учёта
 
-- Linux-сервер с Docker Engine и Docker Compose v2;
-- Nginx, собранный с `stream` и `stream_ssl_preread`;
-- отдельный DNS hostname с A-записью на сервер;
-- режим **DNS-only**, если DNS обслуживает Cloudflare: обычное orange-cloud proxy не передаёт произвольный MTProto TCP;
-- действующий TLS-сертификат для cover backend;
-- свободный loopback-порт `127.0.0.1:8445`.
-
-`compose.yaml` параметризован через локальный `.env`; `install.sh` создаёт его автоматически для выбранного домена, сертификата, document root и loopback-порта.
+| Runtime | Что отображается | Обязательное ограничение |
+|---|---|---|
+| Telemt | runtime `total_octets` и resettable quota usage | Runtime generations и аварийное завершение влияют на persistence; не billing-grade. |
+| Naive/Caddy | payload bytes завершённых CONNECT, сохранённые collector | Появляются при закрытии tunnel; без TLS/IP; незавершённые tunnels могут потеряться при сбое процесса. |
+| Mieru/mita | quota configuration; metrics degraded/unavailable в adapter | Approximate application-byte session-admission quota, не hard billing cap. |
 
-## 1. Клонирование
+Подробнее: [ACCOUNTING.md](docs/ACCOUNTING.md).
 
-```bash
-git clone https://github.com/dubr1k/MTProxy.git
-cd MTProxy
-```
-
-## 2. Пользовательские секреты
+## Матрица безопасности и доверия
 
-Создайте отдельный 16-байтовый hex-секрет для каждого пользователя:
+| Граница | Exposure / trust | Failure semantics |
+|---|---|---|
+| Public listeners | Только host Nginx и явно выбранные proxy ports | SNI collision, занятые ports и invalid Nginx config fail closed |
+| Telemt management | Authenticated API в private Compose network; клиент — panel | API не публикуется на host |
+| Naive / Mieru management | Token-authenticated Unix sockets, pinned local runtime | Unknown fields, drift, invalid journals и degraded accounting fail closed |
+| Credentials/state | Mode-restricted secrets, named volumes/bind state, SQLite/WAL | Backup как secret-bearing generations; не публиковать links/keys |
+| Fleet | Outbound mTLS, certificate identity, typed operations | Durable replay-safe queue; без SSH, Docker socket и arbitrary command/URL |
+| Service identities | Раздельные unprivileged identities, read-only roots, dropped caps | Preflight numeric-ID и file-mode collisions |
 
-```bash
-mkdir -p secrets
-umask 077
-{
-  printf 'phone=%s\n' "$(openssl rand -hex 16)"
-  printf 'laptop=%s\n' "$(openssl rand -hex 16)"
-} > secrets/users.conf
-chmod 600 secrets/users.conf
-```
+Перед deployment прочитайте [SECURITY.md](SECURITY.md).
 
-Формат файла:
+## Руководства по развёртыванию
 
-```text
-phone=0123456789abcdef0123456789abcdef
-laptop=fedcba9876543210fedcba9876543210
-```
+- [Полный installer/auditor](INSTALLER_AUDITOR.md)
+- [Panel и Naive](PANEL.ru.md)
+- [MTProto-specific Docker deployment](DOCKER_DEPLOYMENT.md)
+- [Mieru](MIERU.en.md)
+- [Fleet](FLEET.en.md)
+- [Validation gates](docs/VALIDATION.md)
 
-Допустимы имена из латинских букв, цифр, `_` и `-`. Значение должно содержать ровно 32 hex-символа. Файл исключён из Git и Docker build context.
+## Upgrade, rollback и совместимость
 
-## 3. Сертификат и внешний cover-сайт
+Runtime identifiers `/opt/mtproxy-shared443`, Compose project `mtproxy`, существующие volumes, unit filenames, installed commands и fleet URI prefix — compatibility contracts и не переименовываются вместе с продуктом. Перед изменением образов, binaries, routes или state прочитайте [COMPATIBILITY.md](docs/COMPATIBILITY.md) и [UPGRADING.md](docs/UPGRADING.md).
 
-Caddy не выпускает сертификат сам: он читает существующие файлы Let's Encrypt в режиме read-only. Для текущего hostname ожидаются:
+## Известные ограничения
 
-```text
-/etc/letsencrypt/live/tga.unicorndubr1k.org/fullchain.pem
-/etc/letsencrypt/live/tga.unicorndubr1k.org/privkey.pem
-```
+- QEMU lifecycle install → audit → repair → upgrade → uninstall → rollback ожидает проверки.
+- Production Mieru deployment и fleet enrollment ожидают проверки.
+- Mieru per-user metrics намеренно degraded; fleet v1 исключает secret-bearing remote mutations.
+- Shared-443 installation требует однозначную Nginx map и внешний реальный `resPQ` probe.
+- Счётчики — operational telemetry, а не billing records.
 
-Для другого домена измените пути и адрес сайта в `docker/Caddyfile`.
+## Лицензии, provenance и third-party software
 
-Содержимое cover-сайта **намеренно не хранится в Git**. До запуска создайте внешний document root:
+Код repository распространяется по MIT согласно [LICENSE](LICENSE); существующий copyright не изменён. Telemt, Caddy/modules, Mieru/mita, legacy MTProxy sources, images и Python packages имеют собственные лицензии. GPLv3+ Mieru/mita скачивается или монтируется как отдельный процесс и не включён в repository или его images. См. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-```bash
-sudo install -d -m 0755 /var/www/tga.unicorndubr1k.org
-sudo install -m 0644 /path/to/private/index.html \
-  /var/www/tga.unicorndubr1k.org/index.html
-```
+## Contributing и security
 
-`compose.yaml` монтирует `/var/www/tga.unicorndubr1k.org` в `/srv/tga` только для чтения. Для другого пути измените bind mount. Не добавляйте содержимое production-сайта в этот репозиторий; `docker/site/` включён в `.gitignore`.
-
-## 4. Nginx stream SNI routing
-
-Минимальная схема выглядит так:
-
-```nginx
-map $ssl_preread_server_name $stream_backend {
-    tga.unicorndubr1k.org  mtproxy_backend;
-    default                existing_backend;
-}
-
-upstream mtproxy_backend {
-    server 127.0.0.1:8445;
-}
-
-server {
-    listen 443 reuseport;
-    proxy_pass $stream_backend;
-    ssl_preread on;
-}
-```
-
-Это пример, а не готовая замена существующей карты. На сервере с Xray/REALITY и несколькими HTTPS-сайтами добавляйте только новую SNI-запись в уже действующую конфигурацию.
-
-Проверка перед reload обязательна:
-
-```bash
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-## 5. Запуск
-
-```bash
-docker compose config
-docker compose pull
-docker compose up -d
-```
-
-Проверьте runtime:
-
-```bash
-docker compose ps
-docker inspect mtproxy --format \
-  'health={{.State.Health.Status}} restarts={{.RestartCount}} readonly={{.HostConfig.ReadonlyRootfs}}'
-ss -lnt | grep '127.0.0.1:8445'
-docker compose logs --tail 100 mtproxy
-```
-
-Ожидается:
-
-- `mtproxy` и `mask` — `healthy`;
-- `RestartCount=0`;
-- listener только на `127.0.0.1:8445`;
-- в логах все Telegram DC доступны через `direct`;
-- отсутствуют `panic`, `fatal` и циклические ошибки подключения.
-
-## 6. Генерация ссылок
-
-Ссылки генерируются локально и содержат секреты — не публикуйте их в issue, CI-логах или shell history общего сервера.
-
-```bash
-python3 docker/links.py \
-  --server tga.unicorndubr1k.org \
-  --port 443 \
-  --domain tga.unicorndubr1k.org \
-  --secrets secrets/users.conf
-```
-
-Формат Fake-TLS секрета:
-
-```text
-ee + 32 hex-символа пользовательского секрета + hex(домен)
-```
-
-Для ручного добавления в Telegram Android выберите **MTProto Proxy** и укажите server, port и полный `ee...` secret.
-
-## 7. Правильная проверка
-
-HTTPS-код `200`, открытый TCP/443 и Docker healthcheck **не доказывают**, что MTProto работает. Нужен клиент или checker, который получает настоящий Telegram `resPQ`.
-
-Проверочный сценарий для каждого секрета:
-
-1. соединиться с публичным hostname на `443`;
-2. выполнить Fake-TLS handshake с тем же SNI;
-3. отправить Obfuscated2 init;
-4. отправить зашифрованный `req_pq_multi`;
-5. получить и проверить `resPQ` от Telegram DC.
-
-Дополнительно проверьте cover и соседние маршруты:
-
-```bash
-curl -fsS https://tga.unicorndubr1k.org/ >/dev/null
-sudo nginx -t
-systemctl is-active nginx
-```
-
-На shared-443 сервере также протестируйте все существующие SNI hostname после каждого изменения карты.
-
-## Обновление
-
-Образ Telemt закреплён digest'ом, поэтому `docker compose pull` не заменит движок неожиданно. Обновляйте осознанно:
-
-1. изучите changelog и лицензию новой версии Telemt;
-2. получите новый image digest;
-3. измените digest в `compose.yaml`;
-4. выполните `docker compose config`;
-5. пересоздайте контейнер;
-6. повторите полный `resPQ`-тест для каждого секрета и регрессию SNI-маршрутов;
-7. откатите digest, если любой этап не прошёл.
-
-Обычное обновление файлов форка:
-
-```bash
-git pull --ff-only
-docker compose config
-docker compose pull
-docker compose up -d
-```
-
-## Отзыв пользователя
-
-Удалите строку пользователя из `secrets/users.conf` и пересоздайте только Telemt:
-
-```bash
-docker compose up -d --force-recreate mtproxy
-```
-
-Остальные секреты сохранятся. Перед удалением сделайте защищённую резервную копию файла.
-
-## Диагностика
-
-| Симптом | Что проверять |
-|---|---|
-| Ссылка не открывается на Android | Добавить вручную как MTProto Proxy; проверить обработку `tg://` отдельно от сети |
-| Вечный `Connecting` | Полный `resPQ`-тест; доступность Telegram DC; формат полного `ee...` секрета |
-| Браузер не показывает cover | Caddy health, сертификат, `mask_host`, SNI routing |
-| Виден сайт, но MTProto не работает | HTTPS fallback и MTProto — разные ветви; health сайта не доказывает upstream Telegram |
-| Не приходит трафик | DNS A/AAAA, Cloudflare DNS-only, публичный firewall, Nginx stream map |
-| Сломались другие сервисы на 443 | Откатить изменение stream map и проверить все прежние SNI-маршруты |
-
-## Legacy systemd installer
-
-Файлы `install_mtproxy.sh` и `uninstall_mtproxy.sh` сохранены из исходного проекта только для истории. Они устанавливают старый официальный движок и **не являются рекомендуемым путём**. Для этого форка используйте `install.sh` и `uninstall.sh`.
-
-## Ограничения
-
-- MTProto proxy предназначен для трафика Telegram; голосовые и видеозвонки могут обходить его или не поддерживаться клиентом.
-- Fake-TLS повышает маскировку, но не гарантирует неразличимость для любого DPI.
-- Cover-сайт не заменяет корректную сетевую маршрутизацию.
-- Docker healthcheck проверяет готовность listener, а не полный Telegram протокол.
-
-## Лицензии и происхождение
-
-- Код исходного проекта и добавленные deployment-файлы распространяются по [MIT](LICENSE).
-- Runtime Telemt имеет собственную [Telemt Public License](https://github.com/telemt/telemt/blob/main/LICENSE); образ используется без модификации и закреплён по digest.
-- Форк основан на [lingeniare/MTProxy](https://github.com/lingeniare/MTProxy).
-
-Сведения об уязвимостях и обращении с секретами приведены в [SECURITY.md](SECURITY.md).
+См. [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) и [SECURITY.md](SECURITY.md). Не добавляйте в issues/PR credentials, access URLs, QR codes, certificates, production hostnames или unsanitized logs.

@@ -12,7 +12,7 @@ from .store import Store
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MTProxy panel administration")
+    parser = argparse.ArgumentParser(description="Proxy Control administration")
     parser.add_argument("--database", type=Path, default=None, help="override PANEL_DATABASE")
     sub = parser.add_subparsers(dest="command", required=True)
     create = sub.add_parser("create-admin", help="create the initial administrator")

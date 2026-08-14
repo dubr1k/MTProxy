@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security reporting
+    url: https://github.com/dubr1k
+    about: Follow SECURITY.md and contact the maintainer privately.

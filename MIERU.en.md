@@ -1,5 +1,7 @@
 # Mieru / mita v3.35 management
 
+See also the product [architecture](docs/ARCHITECTURE.md), [accounting contract](docs/ACCOUNTING.md), and [upgrade procedure](docs/UPGRADING.md).
+
 Proxy Control supports exactly **mita 3.35.x** through a local, authenticated Unix-socket manager. Mita remains a separate GPLv3+ process; this adapter is MIT and contains no copied upstream source or generated stubs.
 
 ## Pinned upstream artifacts

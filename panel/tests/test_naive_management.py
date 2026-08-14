@@ -102,6 +102,18 @@ async def test_naive_adapter_accepts_empty_204_delete_response():
     assert await adapter.delete("phone") is None
 
 
+def test_enabled_naive_requires_explicit_public_host(tmp_path):
+    settings = Settings(
+        database_path=tmp_path / "panel.sqlite3",
+        session_cookie_secure=False,
+        allowed_hosts=("testserver",),
+        naive_public_host="",
+        naive_enabled=True,
+    )
+    with pytest.raises(ValueError, match="NAIVE_PUBLIC_HOST is required"):
+        create_app(settings, telemt=MemoryTelemt(), naive=MemoryNaive())
+
+
 async def test_naive_feature_is_hidden_and_routes_fail_closed_when_disabled(tmp_path):
     class MustNotCallNaive(MemoryNaive):
         async def health(self):

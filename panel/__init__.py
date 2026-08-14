@@ -1,1 +1,1 @@
-"""MTProxy control panel."""
+"""Proxy Control multi-protocol control plane."""

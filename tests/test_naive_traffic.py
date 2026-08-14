@@ -297,11 +297,11 @@ def test_production_retention_budget_reverifies_near_full_rotation_and_active_lo
     state = tmp_path / "users.json"
     state.write_text(json.dumps({
         "version": 1,
-        "host": "chrbased.dubr1k-solutions.com",
+        "host": "naive.example.com",
         "users": [{"username": "alice", "password": "secret", "enabled": True}],
         "tombstones": [],
     }))
-    monkeypatch.setenv("NAIVE_PUBLIC_HOST", "chrbased.dubr1k-solutions.com")
+    monkeypatch.setenv("NAIVE_PUBLIC_HOST", "naive.example.com")
     monkeypatch.setenv("NAIVE_TRAFFIC_LOG", str(log))
     monkeypatch.setenv("NAIVE_TRAFFIC_DATABASE", str(tmp_path / "traffic.sqlite3"))
     monkeypatch.setenv("NAIVE_CADDYFILE", str(tmp_path / "Caddyfile"))
@@ -320,6 +320,12 @@ def test_production_retention_budget_reverifies_near_full_rotation_and_active_lo
         assert traffic.health()["ready"] is True
     finally:
         traffic.close()
+
+
+def test_build_manager_requires_explicit_public_host(monkeypatch):
+    monkeypatch.delenv("NAIVE_PUBLIC_HOST", raising=False)
+    with pytest.raises(SystemExit, match="NAIVE_PUBLIC_HOST is required"):
+        build_manager()
 
 
 def test_declared_retention_larger_than_verify_budget_is_rejected_at_startup(tmp_path):

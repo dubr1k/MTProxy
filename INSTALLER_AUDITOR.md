@@ -1,6 +1,6 @@
-# Complete MTProxy + panel installer (`proxyctl`)
+# Complete Proxy Control installer and auditor (`proxyctl`)
 
-`install.sh` is a root-only wrapper around `scripts/proxyctl.py install`. The same tool provides the five production modes: `audit`, `plan`, `install`, `repair`, and `uninstall`. It is intended for Ubuntu 24.04 hosts where Nginx already owns public TCP/443 through one unambiguous `ssl_preread` map (including hosts that also run Xray/3x-ui).
+`install.sh` is a root-only wrapper around `scripts/proxyctl.py install`. The same tool provides the five lifecycle modes: `audit`, `plan`, `install`, `repair`, and `uninstall`. In this stage the complete installer deploys the Telemt/MTProto data plane and panel; NaiveProxy, Mieru, and fleet remain separately configured integrations. It is intended for Ubuntu 24.04 hosts where Nginx already owns public TCP/443 through one unambiguous `ssl_preread` map (including hosts that also run Xray/3x-ui).
 
 ## Production command
 
@@ -8,8 +8,8 @@ Both DNS records must already point directly to the host (Cloudflare DNS-only), 
 
 ```bash
 sudo ./install.sh \
-  --proxy-domain tga.dubr1kkk.uk \
-  --panel-domain tga-panel.dubr1kkk.uk \
+  --proxy-domain proxy.example.com \
+  --panel-domain panel.example.com \
   --email ops@example.com \
   --route-file /etc/nginx/stream.d/routes.conf \
   --users owner,phone \
@@ -20,8 +20,8 @@ Use the same arguments with `python3 scripts/proxyctl.py plan ...` for a read-on
 
 ```bash
 sudo python3 scripts/proxyctl.py audit \
-  --proxy-domain tga.dubr1kkk.uk \
-  --panel-domain tga-panel.dubr1kkk.uk --json
+  --proxy-domain proxy.example.com \
+  --panel-domain panel.example.com --json
 ```
 
 After installation:

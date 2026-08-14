@@ -1,5 +1,5 @@
 [Unit]
-Description=MTProxy central mTLS fleet ingress
+Description=Proxy Control central mTLS fleet ingress
 After=network-online.target
 Wants=network-online.target
 
