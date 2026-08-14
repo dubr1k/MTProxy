@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import ipaddress
 import os
 import re
 import secrets
@@ -139,23 +140,33 @@ def create_app(settings: Settings | None = None, *, telemt=None):
         """Accept only canonical Telegram MTProxy links from the upstream API."""
         if not isinstance(value, str) or len(value) > 2048:
             raise HTTPException(409, "connection link unavailable")
-        parts = urlsplit(value)
-        telegram_target = (
-            (parts.scheme == "tg" and parts.netloc == "proxy" and parts.path in {"", "/"})
-            or (parts.scheme == "https" and parts.netloc in {"t.me", "telegram.me"} and parts.path == "/proxy")
-        )
-        query = parse_qs(parts.query, keep_blank_values=True)
-        server = query.get("server", [])
-        port = query.get("port", [])
-        secret = query.get("secret", [])
-        valid = (
-            telegram_target and not parts.fragment and not parts.username and not parts.password
-            and set(query) == {"server", "port", "secret"}
-            and len(server) == len(port) == len(secret) == 1
-            and re.fullmatch(r"[A-Za-z0-9.-]{1,253}", server[0]) is not None
-            and port[0].isdigit() and 1 <= int(port[0]) <= 65535
-            and re.fullmatch(r"[0-9A-Fa-f]{32,512}", secret[0]) is not None
-        )
+        try:
+            parts = urlsplit(value)
+            telegram_target = (
+                (parts.scheme == "tg" and parts.netloc == "proxy" and parts.path in {"", "/"})
+                or (parts.scheme == "https" and parts.netloc in {"t.me", "telegram.me"} and parts.path == "/proxy")
+            )
+            query = parse_qs(parts.query, keep_blank_values=True)
+            server = query.get("server", [])
+            port = query.get("port", [])
+            secret = query.get("secret", [])
+            server_valid = False
+            if len(server) == 1:
+                try:
+                    ipaddress.ip_address(server[0])
+                    server_valid = True
+                except ValueError:
+                    server_valid = re.fullmatch(r"[A-Za-z0-9.-]{1,253}", server[0]) is not None
+            valid = (
+                telegram_target and not parts.fragment and not parts.username and not parts.password
+                and set(query) == {"server", "port", "secret"}
+                and len(server) == len(port) == len(secret) == 1 and server_valid
+                and re.fullmatch(r"[0-9]{1,5}", port[0]) is not None
+                and 1 <= int(port[0]) <= 65535
+                and re.fullmatch(r"[0-9A-Fa-f]{32,512}", secret[0]) is not None
+            )
+        except (TypeError, ValueError, OverflowError):
+            valid = False
         if not valid:
             raise HTTPException(409, "connection link unavailable")
         return value

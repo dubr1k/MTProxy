@@ -137,6 +137,33 @@ async def test_access_rejects_non_telegram_upstream_link(client, login_user, tel
     assert "javascript:" not in response.text
 
 
+@pytest.mark.parametrize("link", [
+    "tg://proxy?server=proxy.example.com&port=%C2%B2&secret=ee0123456789abcdef0123456789abcdef",
+    "https://[invalid/proxy?server=x&port=443&secret=ee0123456789abcdef0123456789abcdef",
+])
+async def test_access_returns_sanitized_conflict_for_malformed_upstream_url(client, login_user, telemt, link):
+    await login_user(client)
+    telemt.users["alice"] = {"username": "alice", "enabled": True, "links": {"tls": [link]}}
+    response = await client.post(
+        "/api/users/alice/access",
+        headers={"X-CSRF-Token": client.cookies["panel_csrf"]},
+    )
+    assert response.status_code == 409
+    assert response.json() == {"detail": "connection link unavailable"}
+
+
+async def test_access_accepts_ipv6_mtproxy_server(client, login_user, telemt):
+    await login_user(client)
+    link = "tg://proxy?server=2001:db8::1&port=443&secret=ee0123456789abcdef0123456789abcdef"
+    telemt.users["alice"] = {"username": "alice", "enabled": True, "links": {"tls": [link]}}
+    response = await client.post(
+        "/api/users/alice/access",
+        headers={"X-CSRF-Token": client.cookies["panel_csrf"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["link"] == link
+
+
 async def test_reveal_is_bound_to_creating_admin_session(client, login_user):
     await login_user(client)
     csrf = client.cookies["panel_csrf"]
