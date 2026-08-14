@@ -61,6 +61,7 @@ Mieru требует отдельно полученный и проверенн
 
 ```sh
 sudo ./scripts/prepare-mieru-state.sh prepare "${MIERU_MANAGER_STATE_DIR:-/var/lib/mieru-manager}"
+sudo ./scripts/prepare-mieru-token.sh prepare "$PWD/secrets/mieru-manager-token"
 docker compose -f compose.yaml -f compose.mieru.yaml config
 docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
 ```
