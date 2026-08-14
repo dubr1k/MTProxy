@@ -5,14 +5,16 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile.agent
-    network_mode: host
     restart: unless-stopped
+    depends_on:
+      mtproxy:
+        condition: service_healthy
     environment:
       FLEET_NODE_ID: ${FLEET_NODE_ID:?required}
       FLEET_CENTRAL_URL: ${FLEET_CENTRAL_URL:?required}
       FLEET_CLIENT_CERT: /run/fleet/client.crt
       FLEET_CLIENT_KEY: /run/fleet/client.key
-      TELEMT_API_URL: http://127.0.0.1:9091
+      TELEMT_API_URL: http://mtproxy:9091
       TELEMT_API_TOKEN_FILE: /run/secrets/telemt-api-token
       FLEET_JOURNAL: /data/journal.sqlite3
     secrets:
@@ -27,8 +29,5 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
 
-secrets:
-  telemt-api-token:
-    file: ${TELEMT_API_TOKEN_FILE:?required}
 volumes:
   fleet-agent-data:

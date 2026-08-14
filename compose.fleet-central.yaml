@@ -24,8 +24,3 @@ services:
     tmpfs: [/tmp:size=8m,mode=0700]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-
-volumes:
-  panel-data:
-    external: true
-    name: mtproxy_panel-data

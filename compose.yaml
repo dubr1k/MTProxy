@@ -92,11 +92,19 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD", "python", "-c", "import os, urllib.request; request = urllib.request.Request('http://127.0.0.1:8787/healthz', headers={'Host': os.environ['PANEL_HEALTHCHECK_HOST']}); urllib.request.urlopen(request, timeout=2)"]
+      test:
+        - CMD
+        - /bin/bash
+        - -ec
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8787;
+          printf 'GET /healthz HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n' "$${PANEL_HEALTHCHECK_HOST}" >&3;
+          IFS= read -r -t 5 status <&3;
+          [[ "$$status" == *' 200 '* ]]
       interval: 20s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
 
 secrets:
   mtproxy-secrets:

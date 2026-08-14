@@ -33,6 +33,12 @@ class FakeClock:
 
 
 class QemuLabTests(unittest.TestCase):
+    def test_full_install_probes_panel_through_final_tls_sni_route(self):
+        runner = (MODULE.parent / "guest-runner.sh").read_text()
+        self.assertIn("--resolve \"$PANEL:443:127.0.0.1\"", runner)
+        self.assertIn("\"https://$PANEL/healthz\"", runner)
+        self.assertIn("jq -e '.status == \"ok\"'", runner)
+
     def test_fake_certbot_avoids_self_copy_and_populates_each_san_with_source_permissions(self):
         runner = MODULE.parent / "guest-runner.sh"
         with tempfile.TemporaryDirectory() as temporary:

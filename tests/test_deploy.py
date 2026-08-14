@@ -154,10 +154,14 @@ class DeployCliTests(unittest.TestCase):
         panel = json.loads(rendered.stdout)["services"]["panel"]
         self.assertEqual(panel["environment"]["PANEL_HEALTHCHECK_HOST"], "panel.lab.test")
         command = panel["healthcheck"]["test"]
-        self.assertEqual(command[:3], ["CMD", "python", "-c"])
-        self.assertIn("Request", command[3])
+        self.assertEqual(command[:3], ["CMD", "/bin/bash", "-ec"])
+        self.assertIn("/dev/tcp/127.0.0.1/8787", command[3])
         self.assertIn("PANEL_HEALTHCHECK_HOST", command[3])
-        self.assertIn("headers={'Host':", command[3])
+        self.assertIn("GET /healthz HTTP/1.0", command[3])
+        self.assertIn(" 200 ", command[3])
+        self.assertNotIn("python", command[3])
+        self.assertEqual(panel["healthcheck"]["timeout"], "10s")
+        self.assertEqual(panel["healthcheck"]["start_period"], "2m0s")
 
     def test_panel_healthcheck_default_host_is_allowed(self):
         env = {
@@ -330,12 +334,19 @@ class DeployCliTests(unittest.TestCase):
     def test_fleet_ingress_compose_uses_tls_key_owner_identity(self):
         env = {
             **os.environ,
+            "MTPROXY_DOMAIN": "proxy.example.com",
+            "MTPROXY_BACKEND_PORT": "18445",
+            "MTPROXY_COVER_ROOT": "/tmp/cover",
+            "MTPROXY_LETSENCRYPT_ROOT": "/tmp/letsencrypt",
             "FLEET_SERVER_CERT": "/tmp/server.crt",
             "FLEET_SERVER_KEY": "/tmp/server.key",
             "FLEET_CLIENT_CA": "/tmp/client-ca.crt",
         }
         proc = subprocess.run(
-            ["docker", "compose", "-f", "compose.fleet-central.yaml", "config", "--format", "json"],
+            [
+                "docker", "compose", "-f", "compose.yaml", "-f", "compose.fleet-central.yaml",
+                "config", "--format", "json",
+            ],
             cwd=ROOT,
             env=env,
             text=True,
@@ -405,6 +416,11 @@ class DeployCliTests(unittest.TestCase):
                 set(model["services"]),
                 {"mask", "mtproxy", "panel", "naive-manager", "mieru-manager", "fleet-agent", "fleet-ingress"},
             )
+            agent = model["services"]["fleet-agent"]
+            self.assertEqual(agent["environment"]["TELEMT_API_URL"], "http://mtproxy:9091")
+            self.assertNotIn("network_mode", agent)
+            self.assertIn("mtproxy", agent["depends_on"])
+            self.assertFalse(model["volumes"]["panel-data"].get("external", False))
 
     def test_host_fleet_ingress_root_stages_certbot_key_for_panel(self):
         env_file = ROOT / "deploy/fleet-ingress.env.example"

@@ -268,6 +268,8 @@ full_install() {
   test ! -e /opt/mtproxy-shared443
   run_captured /tmp/install.out runtime_cmd install
   systemctl is-active docker nginx >/dev/null
+  curl --insecure --fail --silent --show-error \
+    --resolve "$PANEL:443:127.0.0.1" "https://$PANEL/healthz" | jq -e '.status == "ok"' >/dev/null
   test "$(stat -c %a /var/lib/proxy-control/runtime.json)" = 600
   jq -e '.status == "active" and (.owned_packages == [])' /var/lib/proxy-control/runtime.json >/dev/null
   test "$(stat -c %a /var/lib/proxy-control/ownership.json)" = 600

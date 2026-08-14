@@ -27,7 +27,7 @@ Run the panel and ingress against the **same** `PANEL_DATABASE`. Back it up befo
    ```
 
 3. Install `deploy/mtproxy-fleet-ingress.service` and `deploy/fleet-ingress.env.example`, adjusting the root-only Certbot source paths and the WebPKI hostname. The unit's root-only `ExecStartPre=+` steps copy the certificate as `0444` and private key as `0400`, owned by `panel:panel`, into its `0700` `/run/mtproxy-fleet-ingress` runtime directory; the long-running process remains `panel:panel`. Do not make the Certbot private key or its parent directories group/world-readable. Restart the unit after certificate renewal so the staged copies are refreshed (for example, from a root-owned Certbot deploy hook: `systemctl restart mtproxy-fleet-ingress.service`). Expose only the selected TCP ingress port. The listener terminates mTLS directly, so no reverse-proxy client-certificate headers are involved.
-4. Start it and verify the listener and journal. For containers, `compose.fleet-central.yaml` is an equivalent hardened sidecar sharing the external `mtproxy_panel-data` volume. Bind-mounted ingress private keys must be readable only by container UID/GID 10001. (The separate node-agent image runs as UID 10002.)
+4. Start it and verify the listener and journal. For containers, `compose.fleet-central.yaml` is a hardened overlay of the same `mtproxy` stack and shares its `panel-data` volume. It must be invoked together with `compose.yaml`, never as a separate project. Bind-mounted ingress private keys must be readable only by container UID/GID 10001. (The node-agent image runs as UID 10002.)
 
 ## Enroll `vpn-nl2` without exporting its private key
 
@@ -73,7 +73,7 @@ journalctl -u mtproxy-agent --since -5m
 
 The panel node `auth_state` changes `unenrolled` → `enrolled` after certificate binding → `connected` after successful mTLS authorization. Queue a short-lived inventory command first, then inspect command status before mutations.
 
-The optional `compose.agent.yaml` uses host networking solely so `127.0.0.1:9091` remains the node-local Telemt boundary; it mounts no Docker socket and publishes no port. Its key bind must be mode 0400/0600 and owned by UID 10002.
+The optional `compose.agent.yaml` joins the same private Compose network and reaches Telemt only as `http://mtproxy:9091`; it is therefore valid only as an overlay of `compose.yaml`. It mounts no Docker socket and publishes no port. Its key bind must be mode 0400/0600 and owned by UID 10002.
 
 ## Rotation and revocation
 

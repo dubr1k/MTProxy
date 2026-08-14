@@ -80,8 +80,8 @@ jobs:
           NAIVE_PUBLIC_HOST=naive.example.com docker compose -f compose.yaml -f compose.naive.yaml config -q
           MIERU_PUBLIC_HOST=mieru.example.com MIERU_MITA_GID=321 MIERU_MITA_BIN=/bin/true MIERU_MITA_SHA256=4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31 docker compose -f compose.yaml -f compose.mieru.yaml config -q
           NAIVE_PUBLIC_HOST=naive.example.com MIERU_PUBLIC_HOST=mieru.example.com MIERU_MITA_GID=321 MIERU_MITA_BIN=/bin/true MIERU_MITA_SHA256=4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31 docker compose -f compose.yaml -f compose.naive.yaml -f compose.mieru.yaml config -q
-          FLEET_NODE_ID=node-ci FLEET_CENTRAL_URL=https://fleet.example.com:8790 FLEET_CLIENT_CERT=/tmp/client.crt FLEET_CLIENT_KEY=/tmp/client.key TELEMT_API_TOKEN_FILE="$PWD/secrets/telemt-api-token" docker compose -f compose.agent.yaml config -q
-          FLEET_SERVER_CERT=/tmp/server.crt FLEET_SERVER_KEY=/tmp/server.key FLEET_CLIENT_CA=/tmp/client-ca.crt docker compose -f compose.fleet-central.yaml config -q
+          FLEET_NODE_ID=node-ci FLEET_CENTRAL_URL=https://fleet.example.com:8790 FLEET_CLIENT_CERT=/tmp/client.crt FLEET_CLIENT_KEY=/tmp/client.key docker compose -f compose.yaml -f compose.agent.yaml config -q
+          FLEET_SERVER_CERT=/tmp/server.crt FLEET_SERVER_KEY=/tmp/server.key FLEET_CLIENT_CA=/tmp/client-ca.crt docker compose -f compose.yaml -f compose.fleet-central.yaml config -q
       - name: Render documented Mieru quickstart without secret contents
         run: |
           mkdir -p "$RUNNER_TEMP/mieru-render/state"
