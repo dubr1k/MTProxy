@@ -49,12 +49,15 @@ docker compose config
 docker compose up -d
 ```
 
+Все контейнеры Proxy Control на одном узле — **один Compose stack** с сохранённым compatibility name `mtproxy`. Каждый Compose-файл объявляет `name: mtproxy`; overlays расширяют этот stack, а не создают новые. Перед первым `up` зафиксируйте полный набор активных файлов в `COMPOSE_FILE` (лучше в root-only `.env`) и используйте тот же набор для `config`, `build`, `up`, `ps`, backup и rollback. Не запускайте части проекта с другим `-p`/`COMPOSE_PROJECT_NAME` и не применяйте `--remove-orphans` с неполным набором overlays.
+
 Naive override требует явный hostname:
 
 ```sh
 export NAIVE_PUBLIC_HOST=naive.example.com
-docker compose -f compose.yaml -f compose.naive.yaml config
-docker compose -f compose.yaml -f compose.naive.yaml up -d --build
+export COMPOSE_FILE=compose.yaml:compose.naive.yaml
+docker compose config
+docker compose up -d --build
 ```
 
 Для Mieru нужен отдельно поставляемый GPLv3+ executable `mita` v3.35.0. Пример amd64 ниже получает и распаковывает точный pinned upstream package из [MIERU.en.md](MIERU.en.md#pinned-upstream-artifacts); на arm64 используйте указанные там arm64 URL и оба digest. До назначения фиксированных ID и публичных портов прочитайте обязательные проверки [коллизий identity/state](MIERU.en.md#mandatory-compose-state-provisioning) и [совместного использования listeners](MIERU.en.md#listener-coexistence); при коллизии постороннего UID/GID или порта остановитесь.
@@ -83,11 +86,12 @@ getent passwd 10005 || true
 getent group 10005 || true
 sudo ./scripts/prepare-mieru-token.sh prepare "$MIERU_MANAGER_TOKEN_FILE"
 sudo ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
-docker compose -f compose.yaml -f compose.mieru.yaml config
-docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
+export COMPOSE_FILE="${COMPOSE_FILE:-compose.yaml}:compose.mieru.yaml"
+docker compose config
+docker compose up -d --build
 ```
 
-Fleet preview: рендерьте `compose.agent.yaml` и `compose.fleet-central.yaml` с тестовыми путями только после чтения [FLEET.en.md](FLEET.en.md). Успешный рендер не означает enrollment или production validation.
+Fleet preview: добавляйте `compose.agent.yaml` и/или `compose.fleet-central.yaml` в тот же `COMPOSE_FILE` только после чтения [FLEET.en.md](FLEET.en.md). Отдельный Compose project запрещён; успешный рендер не означает enrollment или production validation.
 
 ## Архитектура
 

@@ -1,3 +1,5 @@
+name: mtproxy
+
 services:
   naive-manager:
     build:

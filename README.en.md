@@ -51,12 +51,15 @@ docker compose config
 docker compose up -d
 ```
 
+All Proxy Control containers on one node belong to **one Compose stack** with the compatibility name `mtproxy`. Every Compose file declares `name: mtproxy`; overlays extend that stack instead of creating another one. Before the first `up`, persist the complete active file set in `COMPOSE_FILE` (preferably in the root-only `.env`) and use that exact set for `config`, `build`, `up`, `ps`, backup, and rollback. Never run project components under another `-p`/`COMPOSE_PROJECT_NAME`, and never use `--remove-orphans` with an incomplete overlay set.
+
 Naive override requires an explicit public hostname:
 
 ```sh
 export NAIVE_PUBLIC_HOST=naive.example.com
-docker compose -f compose.yaml -f compose.naive.yaml config
-docker compose -f compose.yaml -f compose.naive.yaml up -d --build
+export COMPOSE_FILE=compose.yaml:compose.naive.yaml
+docker compose config
+docker compose up -d --build
 ```
 
 Mieru requires the separately supplied GPLv3+ v3.35.0 `mita` executable. The amd64 example below obtains and extracts the exact pinned upstream package documented in [MIERU.en.md](MIERU.en.md#pinned-upstream-artifacts); use that guide's arm64 URL and both arm64 digests on arm64. Before assigning fixed IDs or public ports, read the mandatory [identity/state collision preflight](MIERU.en.md#mandatory-compose-state-provisioning) and [listener coexistence checks](MIERU.en.md#listener-coexistence), and stop on any unrelated UID/GID or port collision.
@@ -85,11 +88,12 @@ getent passwd 10005 || true
 getent group 10005 || true
 sudo ./scripts/prepare-mieru-token.sh prepare "$MIERU_MANAGER_TOKEN_FILE"
 sudo ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
-docker compose -f compose.yaml -f compose.mieru.yaml config
-docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
+export COMPOSE_FILE="${COMPOSE_FILE:-compose.yaml}:compose.mieru.yaml"
+docker compose config
+docker compose up -d --build
 ```
 
-Fleet preview only: render `compose.agent.yaml` and `compose.fleet-central.yaml` with test paths after reading [FLEET.en.md](FLEET.en.md). Do not treat a render as enrollment or production validation.
+Fleet preview only: append `compose.agent.yaml` and/or `compose.fleet-central.yaml` to the same `COMPOSE_FILE` after reading [FLEET.en.md](FLEET.en.md). A separate Compose project is forbidden; do not treat a render as enrollment or production validation.
 
 ## Architecture
 

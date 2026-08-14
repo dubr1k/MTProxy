@@ -346,6 +346,66 @@ class DeployCliTests(unittest.TestCase):
         service = json.loads(proc.stdout)["services"]["fleet-ingress"]
         self.assertEqual(service["user"], "10001:10001")
 
+    def test_all_container_models_share_one_mtproxy_stack(self):
+        compose_files = (
+            "compose.yaml",
+            "compose.naive.yaml",
+            "compose.mieru.yaml",
+            "compose.agent.yaml",
+            "compose.fleet-central.yaml",
+        )
+        for compose_file in compose_files:
+            self.assertEqual(
+                (ROOT / compose_file).read_text().splitlines()[0],
+                "name: mtproxy",
+                f"{compose_file} could create a separate Docker stack",
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            temp = Path(td)
+            for name in ("mita", "token", "client.crt", "client.key", "server.crt", "server.key", "ca.crt"):
+                (temp / name).touch()
+            (temp / "mita").chmod(0o755)
+            for name in ("state", "cover", "letsencrypt"):
+                (temp / name).mkdir()
+            env = {
+                **os.environ,
+                "MTPROXY_DOMAIN": "proxy.example.com",
+                "MTPROXY_BACKEND_PORT": "18445",
+                "MTPROXY_COVER_ROOT": str(temp / "cover"),
+                "MTPROXY_LETSENCRYPT_ROOT": str(temp / "letsencrypt"),
+                "NAIVE_PUBLIC_HOST": "naive.example.com",
+                "MIERU_PUBLIC_HOST": "mieru.example.com",
+                "MIERU_MITA_GID": "321",
+                "MIERU_MITA_BIN": str(temp / "mita"),
+                "MIERU_MITA_SHA256": "4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31",
+                "MIERU_MANAGER_TOKEN_FILE": str(temp / "token"),
+                "MIERU_MANAGER_STATE_DIR": str(temp / "state"),
+                "FLEET_NODE_ID": "node-ci",
+                "FLEET_CENTRAL_URL": "https://fleet.example.com:8790",
+                "FLEET_CLIENT_CERT": str(temp / "client.crt"),
+                "FLEET_CLIENT_KEY": str(temp / "client.key"),
+                "TELEMT_API_TOKEN_FILE": str(ROOT / "secrets/telemt-api-token"),
+                "FLEET_SERVER_CERT": str(temp / "server.crt"),
+                "FLEET_SERVER_KEY": str(temp / "server.key"),
+                "FLEET_CLIENT_CA": str(temp / "ca.crt"),
+            }
+            command = ["docker", "compose"]
+            for compose_file in compose_files:
+                command.extend(("-f", compose_file))
+            command.extend(("config", "--format", "json"))
+            proc = subprocess.run(
+                command, cwd=ROOT, env=env, text=True, capture_output=True,
+            )
+            if proc.returncode:
+                self.fail(f"unified stack render failed ({proc.returncode}): {proc.stderr}")
+            model = json.loads(proc.stdout)
+            self.assertEqual(model["name"], "mtproxy")
+            self.assertEqual(
+                set(model["services"]),
+                {"mask", "mtproxy", "panel", "naive-manager", "mieru-manager", "fleet-agent", "fleet-ingress"},
+            )
+
     def test_host_fleet_ingress_root_stages_certbot_key_for_panel(self):
         env_file = ROOT / "deploy/fleet-ingress.env.example"
         values = dict(
