@@ -56,6 +56,8 @@ NAIVE_DATA_DIR=/var/lib/naive-manager
 
 `naive-manager` работает отдельным непривилегированным контейнером, использует host network только для loopback Caddy Admin API/TLS-probe и не получает Docker socket. Запись разрешена только в `NAIVE_DATA_DIR` и private runtime socket volume. `/var/log/naive-proxy` подключён read-only как `/logs`; SQLite и WAL учёта лежат под `/data` с mode `0600`. Учитываются только завершённые успешные CONNECT-записи управляемых пользователей: `bytes_read` — client→proxy, `size` — proxy→client. Это payload-байты закрытых туннелей, а не TLS/IP traffic и не enforceable quota.
 
+Production-контракт учёта хранит десять ротаций Caddy по 10 MiB и активный файл (заявленный footprint 110 MiB), а на точную проверку уже обработанных префиксов одного запроса выделяет не более 128 MiB. Проверка выполняется синхронно и использует общий request-wide budget для всех сохранённых файлов; дополнительные 18 MiB — ограниченный запас для активного файла, пересёкшего границу ротации. При старте budget меньше заявленного footprint отклоняется. Изменение префикса или превышение ограниченного budget переводит учёт в fail-closed unhealthy state вместо выдачи счётчиков с возможным повтором или пропуском.
+
 - `Caddyfile` — источник истины Caddy с управляемым блоком `NAIVE-MANAGER USERS`;
 - `users.json` — root/manager-only состояние, включая отключённые ключи;
 - `backups/` — парные снимки Caddyfile и `users.json` перед каждой мутацией (хранятся последние 20 транзакций);

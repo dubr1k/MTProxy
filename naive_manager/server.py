@@ -13,7 +13,12 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from .service import ManagerConflict, ManagerNotFound, NaiveCredentialManager
-from .traffic import TrafficCollector
+from .traffic import (
+    ACCOUNTING_MAX_VERIFY_BYTES,
+    ACCOUNTING_ROLL_KEEP,
+    ACCOUNTING_RETAINED_BYTES,
+    TrafficCollector,
+)
 
 
 class ManagerHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -181,6 +186,9 @@ def build_manager() -> NaiveCredentialManager:
         Path(os.getenv("NAIVE_TRAFFIC_LOG", "/logs/access.json")),
         Path(os.getenv("NAIVE_TRAFFIC_DATABASE", "/data/traffic.sqlite3")),
         manager.managed_usernames,
+        max_verify_bytes=ACCOUNTING_MAX_VERIFY_BYTES,
+        expected_retained_bytes=ACCOUNTING_RETAINED_BYTES,
+        max_rotations=ACCOUNTING_ROLL_KEEP,
     )
     return manager
 

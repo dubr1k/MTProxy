@@ -58,6 +58,8 @@ NAIVE_DATA_DIR=/var/lib/naive-manager
 
 `naive-manager` is a dedicated unprivileged container. It uses host networking only for the loopback Caddy Admin API and TLS probe, has no Docker socket, and can write only `NAIVE_DATA_DIR` and its private runtime socket volume. `/var/log/naive-proxy` is mounted read-only at `/logs`; accounting state is the mode-`0600` SQLite/WAL set under `/data`. The panel sees only the token-authenticated Unix socket. The manager accepts only complete, successful CONNECT records for managed usernames and exposes explicit secret-free response allowlists. Counters are payload bytes (`bytes_read` client→proxy and `size` proxy→client), appear when a tunnel closes, and are not TLS/IP usage or an enforceable quota.
 
+The production accounting contract keeps ten 10 MiB Caddy rotations plus the active file (110 MiB declared footprint) and allows at most 128 MiB of exact consumed-prefix verification per collection request. Prefix verification is synchronous and request-wide across all retained files; the extra 18 MiB is bounded headroom for an active file crossing its rotation boundary. Startup rejects a verification budget below the declared footprint. A changed prefix or a footprint that exceeds the bounded budget fails closed and makes accounting unhealthy instead of returning counters that may have been replayed or omitted.
+
 Before first start, copy the active Caddyfile to `${NAIVE_DATA_DIR}/Caddyfile`, create `secrets/naive-manager-token` with mode `0600`, provide the same token as `${NAIVE_DATA_DIR}/manager-token`, and run the initial import:
 
 ```sh

@@ -112,6 +112,8 @@ def test_bootstrap_imports_existing_credentials_without_changing_them(tmp_path):
     assert "# BEGIN NAIVE-MANAGER ACCOUNTING" in rendered
     assert "output file /var/log/naive-proxy/access.json" in rendered
     assert "mode 0640" in rendered and "roll_uncompressed" in rendered
+    assert "roll_size 10MiB" in rendered
+    assert "roll_keep 10" in rendered
     assert "request>headers>Proxy-Authorization delete" in rendered
     assert "wrap json" in rendered
     assert "sampling" not in rendered

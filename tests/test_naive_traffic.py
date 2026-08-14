@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from naive_manager.server import build_manager
 from naive_manager.traffic import TrafficCollector
 
 
@@ -278,6 +279,61 @@ def test_same_inode_middle_rewrite_with_identical_sampled_ends_fails_closed(tmp_
     with pytest.raises(RuntimeError, match="rename-only"):
         traffic.collect()
     assert traffic.list_traffic()["aggregate"]["total_bytes"] == 3
+
+
+def test_production_retention_budget_reverifies_near_full_rotation_and_active_log(
+    tmp_path, monkeypatch,
+):
+    """The production verifier must cover every consumed prefix Caddy retains."""
+    log = tmp_path / "logs" / "access.json"
+    log.parent.mkdir()
+    one_mib = record(padding="")
+    one_mib = record(padding="x" * (1024 * 1024 - len(one_mib.encode())))
+    assert len(one_mib.encode()) == 1024 * 1024
+    near_full = one_mib * 9
+    rotated = log.with_name("access-2026-08-14T15-00-00.000-size.json")
+    rotated.write_text(near_full)
+    log.write_text(near_full)
+    state = tmp_path / "users.json"
+    state.write_text(json.dumps({
+        "version": 1,
+        "host": "chrbased.dubr1k-solutions.com",
+        "users": [{"username": "alice", "password": "secret", "enabled": True}],
+        "tombstones": [],
+    }))
+    monkeypatch.setenv("NAIVE_PUBLIC_HOST", "chrbased.dubr1k-solutions.com")
+    monkeypatch.setenv("NAIVE_TRAFFIC_LOG", str(log))
+    monkeypatch.setenv("NAIVE_TRAFFIC_DATABASE", str(tmp_path / "traffic.sqlite3"))
+    monkeypatch.setenv("NAIVE_CADDYFILE", str(tmp_path / "Caddyfile"))
+    monkeypatch.setenv("NAIVE_STATE_FILE", str(state))
+    monkeypatch.setenv("NAIVE_BACKUP_DIR", str(tmp_path / "backups"))
+
+    manager = build_manager()
+    traffic = manager.traffic
+    assert traffic is not None
+    assert traffic.max_rotations == 10
+    assert traffic.max_verify_bytes == 128 * 1024 * 1024
+    assert traffic.expected_retained_bytes == 110 * 1024 * 1024
+    try:
+        assert traffic.collect() == 18
+        assert traffic.collect() == 0
+        assert traffic.health()["ready"] is True
+    finally:
+        traffic.close()
+
+
+def test_declared_retention_larger_than_verify_budget_is_rejected_at_startup(tmp_path):
+    log = tmp_path / "access.json"
+    log.touch()
+
+    with pytest.raises(ValueError, match="retained accounting footprint"):
+        TrafficCollector(
+            log,
+            tmp_path / "traffic.sqlite3",
+            lambda: set(),
+            max_verify_bytes=109,
+            expected_retained_bytes=110,
+        )
 
 
 def test_consumed_prefix_larger_than_request_budget_fails_closed(tmp_path):

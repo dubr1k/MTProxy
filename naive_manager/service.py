@@ -15,7 +15,12 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
 
-from .traffic import REDACTION_SENTINEL, TrafficCollector
+from .traffic import (
+    ACCOUNTING_ROLL_KEEP,
+    ACCOUNTING_ROLL_SIZE_BYTES,
+    REDACTION_SENTINEL,
+    TrafficCollector,
+)
 
 
 BEGIN = "# BEGIN NAIVE-MANAGER USERS"
@@ -790,8 +795,8 @@ class NaiveCredentialManager:
             f"{indent}log naive_accounting {{",
             f"{inner}output file /var/log/naive-proxy/access.json {{",
             f"{deep}mode 0640",
-            f"{deep}roll_size 10MiB",
-            f"{deep}roll_keep 10",
+            f"{deep}roll_size {ACCOUNTING_ROLL_SIZE_BYTES // (1024 * 1024)}MiB",
+            f"{deep}roll_keep {ACCOUNTING_ROLL_KEEP}",
             f"{deep}roll_keep_for 168h",
             f"{deep}roll_uncompressed",
             f"{inner}}}",

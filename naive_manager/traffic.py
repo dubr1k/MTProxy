@@ -17,6 +17,11 @@ from typing import Callable
 
 MAX_COUNTER = 2**63 - 1
 REDACTION_SENTINEL = "invalid"
+MIB = 1024 * 1024
+ACCOUNTING_ROLL_SIZE_BYTES = 10 * MIB
+ACCOUNTING_ROLL_KEEP = 10
+ACCOUNTING_RETAINED_BYTES = ACCOUNTING_ROLL_SIZE_BYTES * (ACCOUNTING_ROLL_KEEP + 1)
+ACCOUNTING_MAX_VERIFY_BYTES = 128 * MIB
 
 
 @dataclass(frozen=True)
@@ -58,11 +63,12 @@ class TrafficCollector:
         database_path: Path,
         managed_users: Callable[[], set[str]],
         *,
-        max_line_bytes: int = 1024 * 1024,
-        max_read_bytes: int = 32 * 1024 * 1024,
-        max_verify_bytes: int = 16 * 1024 * 1024,
+        max_line_bytes: int = MIB,
+        max_read_bytes: int = 32 * MIB,
+        max_verify_bytes: int = 16 * MIB,
+        expected_retained_bytes: int | None = None,
         max_drain_rounds: int = 16,
-        max_rotations: int = 10,
+        max_rotations: int = ACCOUNTING_ROLL_KEEP,
         max_directory_entries: int = 4096,
     ) -> None:
         self.log_path = Path(log_path)
@@ -71,15 +77,19 @@ class TrafficCollector:
         self.max_line_bytes = max_line_bytes
         self.max_read_bytes = max_read_bytes
         self.max_verify_bytes = max_verify_bytes
+        self.expected_retained_bytes = expected_retained_bytes
         self.max_drain_rounds = max_drain_rounds
         self.max_rotations = max_rotations
         self.max_directory_entries = max_directory_entries
-        if (
-            self.max_line_bytes <= 0
-            or self.max_read_bytes <= self.max_line_bytes
-            or self.max_verify_bytes <= 0
-        ):
+        if self.max_line_bytes <= 0 or self.max_read_bytes <= self.max_line_bytes:
             raise ValueError("max_read_bytes must be greater than max_line_bytes")
+        if self.max_verify_bytes <= 0:
+            raise ValueError("max_verify_bytes must be positive")
+        if self.expected_retained_bytes is not None and (
+            self.expected_retained_bytes <= 0
+            or self.max_verify_bytes < self.expected_retained_bytes
+        ):
+            raise ValueError("max_verify_bytes must cover the retained accounting footprint")
         if self.max_drain_rounds <= 0:
             raise ValueError("max_drain_rounds must be positive")
         if self.max_rotations < 0 or self.max_directory_entries <= self.max_rotations:
