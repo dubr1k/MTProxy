@@ -1,0 +1,28 @@
+services:
+  fleet-ingress:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.ingress
+    entrypoint: ["python", "-m", "panel.agent_ingress"]
+    restart: unless-stopped
+    environment:
+      PANEL_DATABASE: /data/panel.sqlite3
+      FLEET_SERVER_CERT: /run/fleet/server.crt
+      FLEET_SERVER_KEY: /run/fleet/server.key
+      FLEET_CLIENT_CA: /run/fleet/client-ca.crt
+    ports:
+      - "${FLEET_LISTEN_IP:-0.0.0.0}:${FLEET_LISTEN_PORT:-8790}:8790/tcp"
+    volumes:
+      - panel-data:/data
+      - ${FLEET_SERVER_CERT:?required}:/run/fleet/server.crt:ro
+      - ${FLEET_SERVER_KEY:?required}:/run/fleet/server.key:ro
+      - ${FLEET_CLIENT_CA:?required}:/run/fleet/client-ca.crt:ro
+    read_only: true
+    tmpfs: [/tmp:size=8m,mode=0700]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+volumes:
+  panel-data:
+    external: true
+    name: mtproxy_panel-data

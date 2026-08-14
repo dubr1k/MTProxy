@@ -1,0 +1,22 @@
+[Unit]
+Description=MTProxy central mTLS fleet ingress
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=panel
+Group=panel
+EnvironmentFile=/etc/mtproxy-panel/fleet-ingress.env
+ExecStart=/opt/mtproxy-panel/venv/bin/python -m panel.agent_ingress
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/mtproxy-panel
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

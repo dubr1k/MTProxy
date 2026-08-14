@@ -38,5 +38,14 @@ jobs:
           printf 'ci-naive-manager-token-0123456789abcdef0123456789abcdef\n' > secrets/naive-manager-token
           docker compose -f compose.yaml -f compose.naive.yaml config -q
           docker compose -f compose.yaml -f compose.naive.yaml build panel naive-manager
+          FLEET_NODE_ID=vpn-nl2 FLEET_CENTRAL_URL=https://fleet.example.com:8790 \
+            FLEET_CLIENT_CERT=/tmp/client.crt FLEET_CLIENT_KEY=/tmp/client.key \
+            TELEMT_API_TOKEN_FILE="$PWD/secrets/telemt-api-token" \
+            docker compose -f compose.agent.yaml config -q
+          FLEET_SERVER_CERT=/tmp/server.crt FLEET_SERVER_KEY=/tmp/server.key \
+            FLEET_CLIENT_CA=/tmp/client-ca.crt \
+            docker compose -f compose.fleet-central.yaml config -q
+          docker build -f deploy/Dockerfile.agent -t mtproxy-agent:test .
+          docker build -f deploy/Dockerfile.ingress -t mtproxy-fleet-ingress:test .
       - name: Diff hygiene
         run: git diff --check

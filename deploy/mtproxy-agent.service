@@ -1,0 +1,27 @@
+[Unit]
+Description=MTProxy outbound mTLS fleet node agent
+After=network-online.target telemt.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mtproxy-agent
+Group=mtproxy-agent
+EnvironmentFile=/etc/mtproxy-agent/agent.env
+ExecStart=/opt/mtproxy-agent/venv/bin/python -m panel.agent_service
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/mtproxy-agent
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

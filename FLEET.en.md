@@ -1,71 +1,109 @@
-# Secure multi-node foundation
+# Secure outbound mTLS fleet transport (v1)
 
-This release adds the **offline control-plane foundation**, not a remotely usable agent transport. The distinction is intentional: a bearer token over ordinary server-authenticated HTTPS is not accepted as a substitute for per-node identity.
+Fleet nodes now make **outbound-only HTTPS connections** to a dedicated central ingress. The ingress performs TLS itself and derives node identity from the verified peer certificate; it does not trust HTTP identity headers and has no bearer-token fallback. The panel never receives SSH, a Docker socket, arbitrary commands, arbitrary URLs, or direct public Telemt access.
 
-## Shipped components
+## Security and protocol contract
 
-### Central registry and queue
+- Server identity: a normal WebPKI certificate for the exact `FLEET_CENTRAL_URL` hostname. The agent uses the operating-system trust store and hostname verification by default. `FLEET_SERVER_CA` exists only for private test PKI.
+- Client identity: a private CA issues one certificate per node with the sole URI SAN `urn:mtproxy-panel:node:<node-id>`. Central authorization additionally requires an active database record matching node ID, certificate serial, SHA-256 fingerprint, and validity interval.
+- TLS: direct TLS 1.2+, mandatory client certificate, no compression. Unknown client CAs fail during the handshake. A certificate for another node, an unregistered serial/fingerprint, or an application-revoked certificate gets HTTP 403.
+- Bounds: 4 KiB request line, 8 KiB headers, configurable body limit capped at 64 KiB (default 16 KiB), no chunked request bodies, maximum 30-second long poll, handshake/request timeout, and per-certificate in-process request rate limit (default 120/minute).
+- Commands carry protocol version, UUID, node ID, monotonic sequence, idempotency key, allowlisted operation, expected Telemt revision, actor, expiry, canonical payload SHA-256, and typed payload. Central states are `queued`, `dispatched`, `succeeded`, `failed`, or `indeterminate`.
+- The agent journals receipt with SQLite WAL + `synchronous=FULL` before invoking Telemt. Completed results form a durable outbox. A lost upload acknowledgment resends the stored result; it does not repeat the Telemt mutation. Crash residue is marked `indeterminate` at exclusive startup and never re-executed.
+- The only local authority is a fixed loopback Telemt URL and a node-local bearer credential. Every HTTP method/path/body is constructed from the typed allowlist and mutations include `If-Match`.
 
-`panel.fleet.FleetStore` uses the panel SQLite database in WAL mode and provides:
+## Central deployment
 
-- stable, validated node IDs and secret-free inventory;
-- per-node monotonically increasing command sequences;
-- caller-supplied idempotency keys, unique per node;
-- canonical typed envelopes at protocol version `1`;
-- an allowlist of Telemt operations with operation-specific payload validation;
-- mandatory `expected_telemt_revision` optimistic-concurrency preconditions;
-- ordered, durable result recording;
-- recursive rejection of passwords, tokens, credentials, proxy links, and secrets in inventory and results.
+Run the panel and ingress against the **same** `PANEL_DATABASE`. Back it up before first start; startup performs additive schema migration and upgrades the old command status constraint.
 
-The allowlist deliberately excludes user creation, deletion, secret rotation, generic HTTP forwarding, arbitrary URLs, shell commands, SSH, Docker operations, and host-service control:
+1. Obtain a WebPKI server certificate whose SAN matches `fleet.example.com`. Do not use the fleet client CA as the public server identity in production.
+2. Initialize the offline client CA on a protected operator system (not in the panel container):
 
-- `telemt.inventory.refresh`
-- `telemt.user.enable`
-- `telemt.user.disable`
-- `telemt.user.update_limits`
-- `telemt.user.reset_quota`
+   ```sh
+   python -m panel.cli --database /var/lib/mtproxy-panel/panel.sqlite3 \
+     fleet-ca-init --ca-dir /root/mtproxy-fleet-ca
+   install -m 0644 /root/mtproxy-fleet-ca/ca.crt /etc/mtproxy-panel/fleet-client-ca.crt
+   # Keep ca.key offline/root-only; the ingress needs only ca.crt.
+   ```
 
-Panel APIs use the existing opaque sessions, CSRF protection, RBAC, body limit, audit log, and loopback-only panel deployment:
+3. Install `deploy/mtproxy-fleet-ingress.service` and `deploy/fleet-ingress.env.example`, adjusting paths and the WebPKI hostname. Expose only the selected TCP ingress port. The listener terminates mTLS directly, so no reverse-proxy client-certificate headers are involved.
+4. Start it and verify the listener and journal. For containers, `compose.fleet-central.yaml` is an equivalent hardened sidecar sharing the external `mtproxy_panel-data` volume. Bind-mounted private keys must be readable only by container UID 10002.
 
-- `GET /api/fleet/nodes` — any authenticated panel role;
-- `POST /api/fleet/nodes` — owner only;
-- `GET /api/fleet/nodes/{node_id}/commands` — any authenticated panel role;
-- `POST /api/fleet/nodes/{node_id}/commands` — owner or admin.
+## Enroll `vpn-nl2` without exporting its private key
 
-The Fleet UI is read-only and visibly reports that agent transport is disabled.
+On central, register the node:
 
-### Node executor
+```sh
+python -m panel.cli --database /var/lib/mtproxy-panel/panel.sqlite3 \
+  fleet-register-node vpn-nl2 --display-name 'Netherlands 2'
+```
 
-`panel.node_agent` validates a complete typed envelope before touching Telemt. Its SQLite journal uses WAL plus `synchronous=FULL`, persists command intent before side effects, and binds each sequence to both command ID and a SHA-256 digest of the canonical envelope.
+On `vpn-nl2`, generate the key and CSR locally:
 
-Replay behavior:
+```sh
+install -d -m 0700 /etc/mtproxy-agent
+openssl req -new -newkey rsa:3072 -nodes -sha256 \
+  -subj '/CN=vpn-nl2' \
+  -keyout /etc/mtproxy-agent/vpn-nl2.key \
+  -out /etc/mtproxy-agent/vpn-nl2.csr
+chmod 0600 /etc/mtproxy-agent/vpn-nl2.key
+```
 
-1. a completed command returns the stored result without executing again;
-2. a different envelope at an already-used sequence is rejected;
-3. a sequence gap is rejected;
-4. a concurrent duplicate is rejected without changing the in-flight record; `recover_interrupted()` must be called once under exclusive process-startup ownership to convert crash residue to `indeterminate`, which is never retried automatically;
-5. transport failures with an uncertain commit outcome are durably recorded as `indeterminate`, while stored errors use fixed, secret-free codes;
-6. Telemt's expected revision is sent as its documented `If-Match` header on every mutation, so stale or duplicate attempts fail closed at the local service boundary.
+Move only the CSR to the protected CA system using the operator's approved file-transfer channel. Sign it there (the signer ignores requested identity extensions and writes the canonical node URI SAN):
 
-`LocalTelemtExecutor` accepts only an explicit `http://127.0.0.1:PORT` or `http://[::1]:PORT` endpoint without credentials, query, or path. It disables environment proxy inheritance and constructs every method, path, and body itself. It cannot forward a caller-supplied URL, HTTP method, path, header, or arbitrary JSON document. The Telemt bearer credential remains local and is never part of a fleet envelope, inventory, result, audit detail, or journal.
+```sh
+python -m panel.cli fleet-sign-csr vpn-nl2 --ca-dir /root/mtproxy-fleet-ca \
+  --csr /secure-inbox/vpn-nl2.csr --out /secure-outbox/vpn-nl2.crt --days 90
+```
 
-## Deliberately disabled boundary
+Transfer the issued public certificate to central and bind its exact serial/fingerprint/validity record:
 
-There are **no `/api/agent/*` routes**, enrollment endpoint, long-poll endpoint, node credential generator, or result-upload endpoint. `auth_state=network_disabled` is set on every node. Consequently, queued commands cannot reach nodes in this release.
+```sh
+python -m panel.cli --database /var/lib/mtproxy-panel/panel.sqlite3 \
+  fleet-bind-cert vpn-nl2 --cert /secure-inbox/vpn-nl2.crt
+```
 
-Before enabling networking, a later release must provide and test all of the following:
+Return only `vpn-nl2.crt` and `ca.crt` as needed; never move `vpn-nl2.key` or `ca.key`. On the node, install the Python package/venv, `deploy/mtproxy-agent.service`, and `deploy/agent.env.example`; store the local Telemt bearer as `/etc/mtproxy-agent/telemt-api-token`, owner/group restricted to the service. The service requires the certificate key to have no group/world mode bits and writes only `/var/lib/mtproxy-agent`.
 
-1. WebPKI TLS validation with hostname checking and no insecure override;
-2. a private CA and per-node mTLS certificates with node ID binding;
-3. short-lived enrollment credentials, one-time use, explicit approval, and revocation;
-4. certificate rotation and expiry behavior;
-5. central authorization that derives node identity from the verified client certificate, never request JSON;
-6. long-poll bounds, rate limits, replay protection, response size limits, and cancellation;
-7. safe result upload with sequence/digest binding;
-8. end-to-end tests through a real TLS listener, including unknown CA, wrong node certificate, expired certificate, downgrade, and proxy-header spoofing failures.
+```sh
+systemctl daemon-reload
+systemctl enable --now mtproxy-agent
+journalctl -u mtproxy-agent --since -5m
+```
 
-Do not expose a custom bridge around these omissions. In particular, do not publish Telemt's API, add SSH execution, mount a Docker socket, accept arbitrary callback URLs, or turn the offline executor into a stdin/network daemon without an authenticated transport.
+The panel node `auth_state` changes `unenrolled` → `enrolled` after certificate binding → `connected` after successful mTLS authorization. Queue a short-lived inventory command first, then inspect command status before mutations.
 
-## Backup and inspection
+The optional `compose.agent.yaml` uses host networking solely so `127.0.0.1:9091` remains the node-local Telemt boundary; it mounts no Docker socket and publishes no port. Its key bind must be mode 0400/0600 and owned by UID 10002.
 
-Fleet tables live in `PANEL_DATABASE`; include the existing panel database in backups. The node journal is a separate SQLite file selected by the eventual agent service and must live on durable local storage with restrictive ownership. Inventory and results are designed to be safe to display, but the database should still be treated as administrative data.
+## Rotation and revocation
+
+Rotation is overlap-first:
+
+1. Generate a new key and CSR on the node.
+2. Sign with `fleet-sign-csr`, then authorize it centrally with `fleet-bind-cert`; both serials are temporarily accepted.
+3. Atomically replace the node certificate/key, restart the agent, and verify `auth_state=connected` plus a completed inventory command.
+4. Revoke the old serial:
+
+   ```sh
+   python -m panel.cli --database /var/lib/mtproxy-panel/panel.sqlite3 \
+     fleet-revoke-cert vpn-nl2 --serial OLD_HEX_SERIAL
+   ```
+
+Application revocation is immediate for new HTTP requests even though the TLS chain remains valid. For compromise, revoke first, stop the agent, then issue a fresh key/certificate. The v1 CA tooling does not publish OCSP or a CRL; do not rely on TLS handshake revocation alone.
+
+## Operational checks
+
+- `openssl s_client` without a client certificate must fail the TLS handshake.
+- A certificate from another CA must fail the handshake.
+- A valid certificate routed to another node path must return 403.
+- A revoked serial must return 403.
+- Confirm `auth_state`, `last_seen_at`, `dispatched_at`, completion status, and that no completed journal row remains unuploaded.
+- Confirm Telemt still listens only on loopback and neither compose file mounts `/var/run/docker.sock`.
+
+## v1 limitations
+
+- Enrollment approval and CSR transfer are manual; there is deliberately no bearer enrollment endpoint.
+- Revocation is enforced by the central database after successful TLS, not OCSP/CRL at handshake time.
+- The rate limiter is per ingress process and resets on restart; deploy one ingress process for v1 or place a connection limiter in front without terminating/replacing mTLS identity.
+- Only inventory, enable, disable, limit updates, and quota reset are allowlisted. Create/delete/rotate/reveal remain excluded because their secret-bearing/reconciliation contracts require a separate design.
+- No production host was changed and `vpn-nl2` was not actually enrolled by this repository change; the artifacts and exact workflow are ready, but deployment still requires its DNS/WebPKI certificate, approved port, CSR transfer, and node-local Telemt API compatibility.

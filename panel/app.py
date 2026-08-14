@@ -545,7 +545,7 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
 
     @app.get("/api/fleet/nodes")
     async def fleet_nodes(_user=Depends(current)):
-        return {"items": app.state.fleet.nodes(), "agent_transport": "disabled"}
+        return {"items": app.state.fleet.nodes(), "agent_transport": "mtls-pull-v1"}
 
     @app.post("/api/fleet/nodes", status_code=201)
     async def fleet_add_node(body: FleetNodeCreate, request: Request, user=Depends(roles("owner"))):
@@ -575,7 +575,7 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
         try:
             item = app.state.fleet.enqueue(
                 node_id, body.idempotency_key, body.operation, body.payload,
-                body.expected_telemt_revision,
+                body.expected_telemt_revision, actor=user["username"],
             )
         except KeyError as exc:
             raise HTTPException(404, "node not found") from exc

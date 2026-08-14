@@ -1,0 +1,9 @@
+FROM python:3.13.5-slim@sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7b0ceaccb55e9dd7e30987419
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+WORKDIR /app
+COPY panel/requirements.txt /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt \
+ && addgroup --system panel && adduser --system --ingroup panel --uid 10001 panel
+COPY --chown=panel:panel panel /app/panel
+USER panel:panel
+ENTRYPOINT ["python", "-m", "panel.agent_ingress"]

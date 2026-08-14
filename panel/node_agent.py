@@ -1,13 +1,10 @@
-"""Durable replay-safe node executor for an explicitly local Telemt API.
-
-Network enrollment/polling is deliberately not implemented. Commands must arrive through
-an authenticated transport supplied by a future release (mTLS); this module only validates
-and executes already-authenticated typed envelopes.
-"""
+"""Durable replay-safe node executor and outbound mTLS polling client."""
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
+import ssl
 import threading
 import time
 from pathlib import Path
@@ -38,9 +35,12 @@ class AgentJournal:
             CREATE TABLE IF NOT EXISTS agent_commands (
               sequence INTEGER PRIMARY KEY, command_id TEXT NOT NULL UNIQUE, digest TEXT NOT NULL,
               status TEXT NOT NULL CHECK(status IN ('executing','succeeded','failed','indeterminate')),
-              result_json TEXT, started_at INTEGER NOT NULL, completed_at INTEGER
+              result_json TEXT, started_at INTEGER NOT NULL, completed_at INTEGER, uploaded_at INTEGER
             );
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(agent_commands)")}
+            if "uploaded_at" not in columns:
+                db.execute("ALTER TABLE agent_commands ADD COLUMN uploaded_at INTEGER")
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -91,6 +91,21 @@ class AgentJournal:
             if changed != 1:
                 raise ProtocolError("journal command is not executing")
         return {"status": status, "sequence": item.sequence, "command_id": item.command_id, "result": result}
+
+    def pending_outbox(self) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute("""SELECT sequence,command_id,status,result_json FROM agent_commands
+                WHERE status IN ('succeeded','failed','indeterminate') AND uploaded_at IS NULL ORDER BY sequence""")
+            return [{"sequence": row["sequence"], "command_id": row["command_id"], "status": row["status"],
+                     "result": json.loads(row["result_json"])} for row in rows]
+
+    def mark_uploaded(self, command_id: str) -> None:
+        with self.connect() as db:
+            changed = db.execute("""UPDATE agent_commands SET uploaded_at=?
+                WHERE command_id=? AND status IN ('succeeded','failed','indeterminate')""",
+                (int(time.time()), command_id)).rowcount
+            if changed != 1:
+                raise ProtocolError("outbox command is not complete")
 
 
 class LocalTelemtExecutor:
@@ -171,6 +186,8 @@ class NodeAgent:
         if previous is not None:
             status, result = previous
             return {"status": status, "sequence": item.sequence, "command_id": item.command_id, "result": result}
+        if item.expires_at <= int(time.time()):
+            return self.journal.finish(item, "failed", {"message": "command rejected (ProtocolError)"})
         try:
             result = await self.executor.execute(item)
         except ExecutionIndeterminate:
@@ -180,3 +197,69 @@ class NodeAgent:
             code = type(exc).__name__ if isinstance(exc, (ProtocolError, ValueError)) else "ExecutorError"
             return self.journal.finish(item, "failed", {"message": f"command rejected ({code})"})
         return self.journal.finish(item, "succeeded", result)
+
+
+class AgentTransportClient:
+    """Outbound-only WebPKI TLS client with a unique node certificate and durable upload retries."""
+
+    def __init__(self, *, node_id: str, central_url: str, cert: Path, key: Path, agent: NodeAgent,
+                 server_ca: Path | bool = True, request_timeout: float = 35):
+        parts = urlsplit(central_url)
+        if parts.scheme != "https" or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
+            raise ProtocolError("central_url must be an HTTPS origin")
+        if node_id != agent.node_id:
+            raise ProtocolError("transport node_id does not match agent")
+        for path in (Path(cert), Path(key)):
+            if not path.is_file():
+                raise ProtocolError("agent certificate files are required")
+        self.node_id, self.agent = node_id, agent
+        verify_context = ssl.create_default_context(cafile=str(server_ca) if isinstance(server_ca, Path) else None)
+        verify_context.minimum_version = ssl.TLSVersion.TLSv1_2
+        verify_context.load_cert_chain(str(cert), str(key))
+        self.client = httpx.AsyncClient(
+            base_url=central_url.rstrip("/"), verify=verify_context,
+            timeout=httpx.Timeout(request_timeout, connect=min(request_timeout, 10)), trust_env=False,
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+        )
+
+    async def close(self):
+        await self.client.aclose()
+
+    async def upload_result(self, result: dict) -> None:
+        command_id = result["command_id"]
+        response = await self.client.put(
+            f"/agent/v1/nodes/{self.node_id}/commands/{command_id}/result",
+            json={key: result[key] for key in ("sequence", "status", "result")},
+        )
+        if len(response.content) > 65_536:
+            raise ProtocolError("central response is too large")
+        if response.status_code != 200:
+            raise httpx.HTTPStatusError("central rejected result", request=response.request, response=response)
+        self.agent.journal.mark_uploaded(command_id)
+
+    async def run_once(self) -> bool:
+        try:
+            pending = self.agent.journal.pending_outbox()
+            if pending:
+                await self.upload_result(pending[0])
+                return True
+            response = await self.client.get(f"/agent/v1/nodes/{self.node_id}/commands/next")
+            response.raise_for_status()
+            if len(response.content) > 65_536:
+                raise ProtocolError("central response is too large")
+            command = response.json().get("command")
+            if command is None:
+                return True
+            await self.upload_result(await self.agent.apply(command))
+            return True
+        except (httpx.HTTPError, ValueError, ProtocolError):
+            return False
+
+    async def run_forever(self, retry_min: float = 1, retry_max: float = 30):
+        delay = retry_min
+        while True:
+            if await self.run_once():
+                delay = retry_min
+            else:
+                await asyncio.sleep(delay)
+                delay = min(retry_max, delay * 2)

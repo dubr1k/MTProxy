@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import asyncio
+import hashlib
+import time
 
 import httpx
 import pytest
@@ -14,6 +16,8 @@ pytestmark = pytest.mark.anyio
 
 
 def command(sequence=1, *, operation="telemt.user.disable", payload=None, revision="rev-7"):
+    payload = payload if payload is not None else {"username": "alice"}
+    payload_sha256 = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return TypedCommand.parse({
         "protocol_version": 1,
         "command_id": f"018f47ac-1234-7abc-8def-{sequence:012d}",
@@ -22,7 +26,8 @@ def command(sequence=1, *, operation="telemt.user.disable", payload=None, revisi
         "idempotency_key": f"disable-alice-{sequence}",
         "operation": operation,
         "expected_telemt_revision": revision,
-        "payload": payload if payload is not None else {"username": "alice"},
+        "actor": "owner", "expires_at": int(time.time()) + 60, "payload_sha256": payload_sha256,
+        "payload": payload,
     })
 
 
@@ -38,7 +43,7 @@ def test_typed_protocol_rejects_generic_commands_and_unknown_payload_fields():
 def test_fleet_store_assigns_monotonic_sequences_and_enforces_idempotency(tmp_path):
     store = FleetStore(tmp_path / "fleet.sqlite3")
     node = store.register_node("edge-01", "Frankfurt edge", {"telemt_version": "3.4.25", "region": "eu-central"})
-    assert node["auth_state"] == "network_disabled"
+    assert node["auth_state"] == "unenrolled"
     first = store.enqueue("edge-01", "same-key", "telemt.user.disable", {"username": "alice"}, "rev-1")
     replay = store.enqueue("edge-01", "same-key", "telemt.user.disable", {"username": "alice"}, "rev-1")
     second = store.enqueue("edge-01", "next-key", "telemt.user.enable", {"username": "alice"}, "rev-2")
@@ -159,7 +164,7 @@ async def test_local_executor_is_loopback_only_and_sends_revision_precondition()
             LocalTelemtExecutor(unsafe, "Bearer x")
 
 
-async def test_owner_fleet_api_queues_typed_command_but_agent_transport_is_absent(client, login_user):
+async def test_owner_fleet_api_queues_typed_command(client, login_user):
     await login_user(client)
     csrf = client.cookies["panel_csrf"]
     created = await client.post(
@@ -183,7 +188,7 @@ async def test_owner_fleet_api_queues_typed_command_but_agent_transport_is_absen
     assert body["sequence"] == 1 and body["status"] == "queued"
     listing = (await client.get("/api/fleet/nodes/edge-01/commands")).json()["items"]
     assert listing[0]["idempotency_key"] == "disable-alice-2026-08-14"
-    assert (await client.get("/api/agent/v1/commands")).status_code == 404
+
 
 
 async def test_viewer_can_read_fleet_but_cannot_register_or_queue(client, login_user):

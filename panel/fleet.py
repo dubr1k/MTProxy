@@ -1,10 +1,4 @@
-"""Typed, secret-free fleet protocol and durable central command registry.
-
-This module intentionally contains no agent HTTP transport.  The panel can prepare and
-inspect commands, but nodes cannot poll it until an authenticated mTLS transport is
-implemented.  This keeps the protocol useful and testable without silently accepting a
-weaker bearer-token boundary.
-"""
+"""Typed, secret-free fleet protocol and durable central command registry."""
 from __future__ import annotations
 
 import hashlib
@@ -153,13 +147,16 @@ class TypedCommand:
     idempotency_key: str
     operation: str
     expected_telemt_revision: str
+    actor: str
+    expires_at: int
+    payload_sha256: str
     payload: dict
 
     @classmethod
     def parse(cls, raw: Any) -> "TypedCommand":
         if not isinstance(raw, dict) or set(raw) != {
             "protocol_version", "command_id", "node_id", "sequence", "idempotency_key",
-            "operation", "expected_telemt_revision", "payload",
+            "operation", "expected_telemt_revision", "actor", "expires_at", "payload_sha256", "payload",
         }:
             raise ProtocolError("command envelope fields are invalid")
         if raw["protocol_version"] != PROTOCOL_VERSION:
@@ -178,7 +175,14 @@ class TypedCommand:
             raise ProtocolError("operation is not allowlisted")
         if not isinstance(raw["expected_telemt_revision"], str) or not REVISION_RE.fullmatch(raw["expected_telemt_revision"]):
             raise ProtocolError("expected_telemt_revision is invalid")
+        if not isinstance(raw["actor"], str) or not USER_RE.fullmatch(raw["actor"]):
+            raise ProtocolError("actor is invalid")
+        if isinstance(raw["expires_at"], bool) or not isinstance(raw["expires_at"], int) or raw["expires_at"] < 1:
+            raise ProtocolError("expires_at is invalid")
         payload = validate_payload(raw["operation"], raw["payload"])
+        expected_hash = hashlib.sha256(_canonical(payload).encode()).hexdigest()
+        if raw["payload_sha256"] != expected_hash:
+            raise ProtocolError("payload_sha256 does not match payload")
         return cls(**{**raw, "payload": payload})
 
     def as_dict(self) -> dict:
@@ -186,7 +190,8 @@ class TypedCommand:
             "protocol_version": self.protocol_version, "command_id": self.command_id,
             "node_id": self.node_id, "sequence": self.sequence,
             "idempotency_key": self.idempotency_key, "operation": self.operation,
-            "expected_telemt_revision": self.expected_telemt_revision, "payload": self.payload,
+            "expected_telemt_revision": self.expected_telemt_revision, "actor": self.actor,
+            "expires_at": self.expires_at, "payload_sha256": self.payload_sha256, "payload": self.payload,
         }
 
     @property
@@ -219,12 +224,54 @@ class FleetStore:
               command_id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES fleet_nodes(node_id) ON DELETE RESTRICT,
               sequence INTEGER NOT NULL, idempotency_key TEXT NOT NULL, protocol_version INTEGER NOT NULL,
               operation TEXT NOT NULL, expected_revision TEXT NOT NULL, payload_json TEXT NOT NULL,
-              status TEXT NOT NULL CHECK(status IN ('queued','succeeded','failed','indeterminate')),
+              status TEXT NOT NULL CHECK(status IN ('queued','dispatched','succeeded','failed','indeterminate')),
               result_json TEXT, created_at INTEGER NOT NULL, completed_at INTEGER,
               UNIQUE(node_id,sequence), UNIQUE(node_id,idempotency_key)
             );
             CREATE INDEX IF NOT EXISTS fleet_commands_node_sequence ON fleet_commands(node_id,sequence);
+            CREATE TABLE IF NOT EXISTS fleet_certificates (
+              serial TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES fleet_nodes(node_id) ON DELETE RESTRICT,
+              fingerprint_sha256 TEXT NOT NULL UNIQUE, not_before INTEGER NOT NULL, not_after INTEGER NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('active','revoked')), issued_at INTEGER NOT NULL, revoked_at INTEGER
+            );
             """)
+            self._add_column(db, "fleet_nodes", "last_seen_at", "INTEGER")
+            self._add_column(db, "fleet_commands", "actor", "TEXT NOT NULL DEFAULT 'system'")
+            self._add_column(db, "fleet_commands", "expires_at", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column(db, "fleet_commands", "payload_sha256", "TEXT NOT NULL DEFAULT ''")
+            self._add_column(db, "fleet_commands", "dispatched_at", "INTEGER")
+            for row in db.execute("SELECT command_id,payload_json,created_at FROM fleet_commands WHERE payload_sha256='' OR expires_at=0"):
+                db.execute("UPDATE fleet_commands SET payload_sha256=?,expires_at=? WHERE command_id=?",
+                           (hashlib.sha256(row["payload_json"].encode()).hexdigest(), row["created_at"] + 300, row["command_id"]))
+            self._migrate_command_status_constraint(db)
+
+    @staticmethod
+    def _add_column(db, table: str, column: str, definition: str):
+        columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    @staticmethod
+    def _migrate_command_status_constraint(db):
+        sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='fleet_commands'").fetchone()[0]
+        if "'dispatched'" in sql:
+            return
+        db.execute("DROP INDEX IF EXISTS fleet_commands_node_sequence")
+        db.execute("ALTER TABLE fleet_commands RENAME TO fleet_commands_old")
+        db.execute("""CREATE TABLE fleet_commands (
+          command_id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES fleet_nodes(node_id) ON DELETE RESTRICT,
+          sequence INTEGER NOT NULL, idempotency_key TEXT NOT NULL, protocol_version INTEGER NOT NULL,
+          operation TEXT NOT NULL, expected_revision TEXT NOT NULL, payload_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('queued','dispatched','succeeded','failed','indeterminate')),
+          result_json TEXT, created_at INTEGER NOT NULL, completed_at INTEGER, actor TEXT NOT NULL,
+          expires_at INTEGER NOT NULL, payload_sha256 TEXT NOT NULL, dispatched_at INTEGER,
+          UNIQUE(node_id,sequence), UNIQUE(node_id,idempotency_key)
+        )""")
+        db.execute("""INSERT INTO fleet_commands SELECT command_id,node_id,sequence,idempotency_key,protocol_version,
+            operation,expected_revision,payload_json,status,result_json,created_at,completed_at,actor,expires_at,
+            payload_sha256,dispatched_at FROM fleet_commands_old""")
+        db.execute("DROP TABLE fleet_commands_old")
+        db.execute("CREATE INDEX fleet_commands_node_sequence ON fleet_commands(node_id,sequence)")
 
     def register_node(self, node_id: str, display_name: str, inventory: dict) -> dict:
         if not NODE_RE.fullmatch(node_id):
@@ -235,7 +282,7 @@ class FleetStore:
         now = int(time.time())
         with self.connect() as db:
             db.execute("""INSERT INTO fleet_nodes(node_id,display_name,auth_state,inventory_json,created_at,updated_at)
-                VALUES(?,?,'network_disabled',?,?,?)""", (node_id, display_name.strip(), _canonical(inventory), now, now))
+                VALUES(?,?,'unenrolled',?,?,?)""", (node_id, display_name.strip(), _canonical(inventory), now, now))
         return self.node(node_id)
 
     def node(self, node_id: str) -> dict:
@@ -255,7 +302,8 @@ class FleetStore:
         value["inventory"] = json.loads(value.pop("inventory_json"))
         return value
 
-    def enqueue(self, node_id: str, idempotency_key: str, operation: str, payload: dict, expected_revision: str) -> dict:
+    def enqueue(self, node_id: str, idempotency_key: str, operation: str, payload: dict, expected_revision: str,
+                *, actor: str = "system", expires_at: int | None = None) -> dict:
         if not KEY_RE.fullmatch(idempotency_key or ""):
             raise ProtocolError("idempotency_key is invalid")
         if operation not in OPERATIONS:
@@ -264,6 +312,8 @@ class FleetStore:
         if not REVISION_RE.fullmatch(expected_revision or ""):
             raise ProtocolError("expected_telemt_revision is invalid")
         canonical_payload = _canonical(payload)
+        payload_sha256 = hashlib.sha256(canonical_payload.encode()).hexdigest()
+        expires_at = int(time.time()) + 300 if expires_at is None else expires_at
         with self._lock, self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute("SELECT * FROM fleet_commands WHERE node_id=? AND idempotency_key=?", (node_id, idempotency_key)).fetchone()
@@ -279,12 +329,15 @@ class FleetStore:
                 "protocol_version": PROTOCOL_VERSION, "command_id": str(uuid.uuid4()), "node_id": node_id,
                 "sequence": sequence, "idempotency_key": idempotency_key, "operation": operation,
                 "expected_telemt_revision": expected_revision, "payload": payload,
+                "actor": actor, "expires_at": expires_at, "payload_sha256": payload_sha256,
             }
             item = TypedCommand.parse(raw)
             now = int(time.time())
             db.execute("""INSERT INTO fleet_commands(command_id,node_id,sequence,idempotency_key,protocol_version,operation,
-                expected_revision,payload_json,status,created_at) VALUES(?,?,?,?,?,?,?,?, 'queued',?)""",
-                (item.command_id, node_id, sequence, idempotency_key, PROTOCOL_VERSION, operation, expected_revision, canonical_payload, now))
+                expected_revision,payload_json,status,created_at,actor,expires_at,payload_sha256)
+                VALUES(?,?,?,?,?,?,?,?, 'queued',?,?,?,?)""",
+                (item.command_id, node_id, sequence, idempotency_key, PROTOCOL_VERSION, operation, expected_revision,
+                 canonical_payload, now, actor, expires_at, payload_sha256))
             db.execute("UPDATE fleet_nodes SET next_sequence=next_sequence+1,updated_at=? WHERE node_id=?", (now, node_id))
             row = db.execute("SELECT * FROM fleet_commands WHERE command_id=?", (item.command_id,)).fetchone()
             return self._command(row)
@@ -303,7 +356,7 @@ class FleetStore:
                 raise KeyError(command_id)
             result = validate_result(result, row["operation"], status)
             canonical_result = _canonical(result)
-            if row["status"] != "queued":
+            if row["status"] not in {"queued", "dispatched"}:
                 if row["status"] == status and row["result_json"] == canonical_result:
                     return self._command(row)
                 raise CommandConflict("result replay does not match stored outcome")
@@ -313,6 +366,67 @@ class FleetStore:
             db.execute("UPDATE fleet_commands SET status=?,result_json=?,completed_at=? WHERE command_id=?", (status, canonical_result, int(time.time()), command_id))
             db.execute("UPDATE fleet_nodes SET last_result_sequence=?,updated_at=? WHERE node_id=?", (sequence, int(time.time()), node_id))
             return self._command(db.execute("SELECT * FROM fleet_commands WHERE command_id=?", (command_id,)).fetchone())
+
+    def bind_certificate(self, node_id: str, metadata: dict) -> dict:
+        required = {"serial", "fingerprint_sha256", "not_before", "not_after"}
+        if set(metadata) != required:
+            raise ProtocolError("certificate metadata is invalid")
+        now = int(time.time())
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM fleet_nodes WHERE node_id=?", (node_id,)).fetchone():
+                raise KeyError(node_id)
+            db.execute("""INSERT INTO fleet_certificates(serial,node_id,fingerprint_sha256,not_before,not_after,state,issued_at)
+                VALUES(?,?,?,?,?,'active',?)""", (metadata["serial"].upper(), node_id,
+                metadata["fingerprint_sha256"].lower(), metadata["not_before"], metadata["not_after"], now))
+            db.execute("UPDATE fleet_nodes SET auth_state='enrolled',updated_at=? WHERE node_id=?", (now, node_id))
+        return self.node(node_id)
+
+    def revoke_certificate(self, node_id: str, serial: str) -> None:
+        now = int(time.time())
+        with self.connect() as db:
+            changed = db.execute("""UPDATE fleet_certificates SET state='revoked',revoked_at=?
+                WHERE node_id=? AND serial=? AND state='active'""", (now, node_id, serial.upper())).rowcount
+            if changed != 1:
+                raise KeyError(serial)
+            remaining = db.execute("SELECT 1 FROM fleet_certificates WHERE node_id=? AND state='active'", (node_id,)).fetchone()
+            db.execute("UPDATE fleet_nodes SET auth_state=?,updated_at=? WHERE node_id=?",
+                       ("enrolled" if remaining else "revoked", now, node_id))
+
+    def authenticate_certificate(self, node_id: str, serial: str, fingerprint: str, cert_node_id: str) -> bool:
+        now = int(time.time())
+        if cert_node_id != node_id:
+            return False
+        with self.connect() as db:
+            row = db.execute("""SELECT 1 FROM fleet_certificates WHERE node_id=? AND serial=?
+                AND fingerprint_sha256=? AND state='active' AND not_before<=? AND not_after>?""",
+                (node_id, serial.upper(), fingerprint.lower(), now, now)).fetchone()
+            if not row:
+                return False
+            db.execute("UPDATE fleet_nodes SET auth_state='connected',last_seen_at=?,updated_at=? WHERE node_id=?",
+                       (now, now, node_id))
+            return True
+
+    def poll_next(self, node_id: str) -> dict | None:
+        now = int(time.time())
+        with self._lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            node = db.execute("SELECT last_result_sequence FROM fleet_nodes WHERE node_id=?", (node_id,)).fetchone()
+            if not node:
+                raise KeyError(node_id)
+            row = db.execute("""SELECT * FROM fleet_commands WHERE node_id=? AND sequence=?
+                AND status IN ('queued','dispatched')""", (node_id, node["last_result_sequence"] + 1)).fetchone()
+            if not row:
+                return None
+            if row["expires_at"] <= now:
+                result = _canonical({"message": "command rejected (ProtocolError)"})
+                db.execute("UPDATE fleet_commands SET status='failed',result_json=?,completed_at=? WHERE command_id=?",
+                           (result, now, row["command_id"]))
+                db.execute("UPDATE fleet_nodes SET last_result_sequence=?,updated_at=? WHERE node_id=?",
+                           (row["sequence"], now, node_id))
+                return None
+            db.execute("UPDATE fleet_commands SET status='dispatched',dispatched_at=COALESCE(dispatched_at,?) WHERE command_id=?",
+                       (now, row["command_id"]))
+            return self._command(db.execute("SELECT * FROM fleet_commands WHERE command_id=?", (row["command_id"],)).fetchone())
 
     @staticmethod
     def _command(row) -> dict:
