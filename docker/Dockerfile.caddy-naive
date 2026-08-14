@@ -2,7 +2,7 @@ FROM caddy:2.11.4-builder AS builder
 
 # Keep the Naive forward-proxy module immutable; never build from a moving branch.
 RUN xcaddy build v2.11.4 \
-    --with github.com/caddyserver/forwardproxy@d62c80d3dd2c706b6b87579844d2397bddd18317
+    --with github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@d62c80d3dd2c706b6b87579844d2397bddd18317
 
 FROM scratch
 COPY --from=builder /usr/bin/caddy /caddy
