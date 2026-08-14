@@ -73,6 +73,7 @@ Regular browser or active probe
 | `docker/links.py` | Generates Fake-TLS links locally without logging secrets |
 | `install.sh` / `uninstall.sh` | Idempotent VPS deployment and precise removal |
 | `scripts/mtproxy-deploy` | Tested file renderer and safe SNI-route editor |
+| `scripts/proxyctl.py` | Read-only audit, deterministic plan, and transactional owned-route manager ([guide](INSTALLER_AUDITOR.md)) |
 | `DOCKER_DEPLOYMENT.md` | Short operational notes |
 
 ## Requirements

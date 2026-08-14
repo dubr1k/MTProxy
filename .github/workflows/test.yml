@@ -21,7 +21,7 @@ jobs:
           python3 -m venv .venv
           .venv/bin/pip install -r panel/requirements-dev.txt
           .venv/bin/ruff check .
-          .venv/bin/python -m pytest -q panel/tests tests/test_naive_manager.py
+          .venv/bin/python -m pytest -q panel/tests tests/test_naive_manager.py tests/test_proxyctl.py tests/test_proxyctl_transactions.py
           python3 -m unittest -v tests/test_deploy.py
       - name: Compose render
         run: |
