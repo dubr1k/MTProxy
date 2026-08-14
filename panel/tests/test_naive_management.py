@@ -4,7 +4,7 @@ import pytest
 import httpx
 
 from panel.app import Settings, create_app
-from panel.naive import MemoryNaive, NaiveClient
+from panel.naive import MemoryNaive, NaiveClient, NaiveError
 from panel.telemt import MemoryTelemt
 
 pytestmark = pytest.mark.anyio
@@ -93,13 +93,20 @@ async def test_naive_adapter_accepts_empty_204_delete_response():
 
 
 async def test_naive_feature_is_hidden_and_routes_fail_closed_when_disabled(tmp_path):
+    class MustNotCallNaive(MemoryNaive):
+        async def health(self):
+            raise AssertionError("disabled dashboard called Naive health")
+
+        async def list_users(self):
+            raise AssertionError("disabled dashboard called Naive users")
+
     settings = Settings(
         database_path=tmp_path / "panel.sqlite3",
         session_cookie_secure=False,
         allowed_hosts=("testserver",),
         naive_enabled=False,
     )
-    app = create_app(settings, telemt=MemoryTelemt(), naive=MemoryNaive())
+    app = create_app(settings, telemt=MemoryTelemt(), naive=MustNotCallNaive())
     app.state.store.create_admin("owner", "correct horse battery staple", "owner")
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -115,6 +122,12 @@ async def test_naive_feature_is_hidden_and_routes_fail_closed_when_disabled(tmp_
         assert login.status_code == 204
         identity = await client.get("/api/auth/me")
         assert identity.json()["features"]["naive"] is False
+        dashboard = await client.get("/api/dashboard")
+        assert dashboard.status_code == 200
+        assert dashboard.json()["protocols"]["naive"] == {
+            "available": False,
+            "status": "disabled",
+        }
         assert (await client.get("/api/naive/users")).status_code == 404
         assert (
             await client.post(
@@ -123,6 +136,34 @@ async def test_naive_feature_is_hidden_and_routes_fail_closed_when_disabled(tmp_
                 headers={"X-CSRF-Token": client.cookies["panel_csrf"]},
             )
         ).status_code == 404
+
+
+async def test_dashboard_stays_available_when_enabled_naive_manager_is_degraded(
+    client, login_user,
+):
+    class BrokenNaive(MemoryNaive):
+        async def health(self):
+            raise NaiveError("manager contains internal details")
+
+        async def list_users(self):
+            raise NaiveError("manager contains internal details")
+
+    client._transport.app.state.naive = BrokenNaive()
+    await login_user(client)
+
+    response = await client.get("/api/dashboard")
+
+    assert response.status_code == 200
+    assert response.json()["protocols"]["mtproxy"]["status"] == "ready"
+    assert response.json()["protocols"]["naive"] == {
+        "available": True,
+        "status": "degraded",
+        "ready": False,
+        "host": "naive.example.com",
+        "credentials": {"available": False},
+        "traffic": {"available": False, "reason": "not_collected"},
+    }
+    assert "internal details" not in response.text
 
 
 async def test_creating_reveal_purges_expired_password_bearing_entries(client, login_user, monkeypatch):

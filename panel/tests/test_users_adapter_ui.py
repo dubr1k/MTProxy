@@ -40,6 +40,40 @@ async def test_dashboard_labels_process_runtime_traffic_separately_from_quota(cl
     assert response.json()["traffic"] == {"runtime_total_octets": 350}
 
 
+async def test_dashboard_summarizes_both_protocols_without_naive_traffic_invention(
+    client, login_user, telemt, naive,
+):
+    telemt.users.update({
+        "mt-on": {"username": "mt-on", "enabled": True, "total_octets": 1024},
+        "mt-off": {"username": "mt-off", "enabled": False, "total_octets": 2048},
+    })
+    naive.seed("web-on", "not-returned", enabled=True)
+    naive.seed("web-off", "also-not-returned", enabled=False)
+    await login_user(client)
+
+    body = (await client.get("/api/dashboard")).json()
+
+    assert body["protocols"]["mtproxy"] == {
+        "status": "ready",
+        "ready": True,
+        "credentials": {"active": 1, "disabled": 1, "total": 2},
+        "runtime": {
+            "traffic_octets": 3072,
+            "current_connections": 0,
+            "active_ips": 0,
+        },
+    }
+    assert body["protocols"]["naive"] == {
+        "available": True,
+        "status": "ready",
+        "ready": True,
+        "host": "naive.example.com",
+        "credentials": {"active": 1, "disabled": 1, "total": 2},
+        "traffic": {"available": False, "reason": "not_collected"},
+    }
+    assert "not-returned" not in str(body)
+
+
 async def test_user_list_merges_resettable_quota_usage_without_confusing_runtime_traffic(client, login_user, telemt):
     telemt.users["alice"] = {
         "username": "alice", "enabled": True, "data_quota_bytes": 10_000, "total_octets": 750,
@@ -157,12 +191,17 @@ async def test_telemt_adapter_reads_3425_quota_stats_route():
 
 
 async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(client, login_user):
+    login_page = await client.get("/login")
+    assert "Proxy Control" in login_page.text
+    assert "mtproxy" not in login_page.text.lower()
     await login_user(client)
     page = await client.get("/")
     assert page.status_code == 200
     text = page.text
     assert 'lang="ru"' in text
     assert 'class="sidebar"' in text and 'class="mobile-nav"' in text
+    assert "Proxy Control" in text
+    assert ">MTProxy<" in text and ">Подключения<" not in text
     assert "cdn" not in text.lower()
     assert 'id="access-modal"' in text
     assert 'id="qr-image"' in text
@@ -177,9 +216,13 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'data-view="naive"' in text and 'id="naive-modal"' in text
     assert 'id="naive-access-modal"' in text and 'id="copy-naive-url"' in text
     assert "renderNaive" in js and "naiveAction" in js and "showNaiveAccess" in js
+    assert 'class="protocol-overview"' in js
+    assert "Трафик не собирается" in js
+    assert "NaiveProxy недоступен" in js
+    assert 'data-quick="naive-users"' in js
     assert "admin-form');if(!form.reportValidity()" in js
     assert 'id="limits-modal"' in text and 'id="save-limits"' in text
-    assert "data.traffic?.runtime_total_octets" in js
+    assert "mt.runtime?.traffic_octets" in js
     assert "user.quota_used_bytes" in js and "data-action=\"limits\"" in js
     assert "/limits`" in js and "/reset-quota`" in js
     assert "текущего runtime-поколения" in js

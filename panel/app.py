@@ -382,9 +382,70 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
             for value in [item.get("total_octets")]
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0
         )
+        mt_active = sum(
+            1 for item in items
+            if isinstance(item, dict) and item.get("enabled") is not False
+        )
+        mt_disabled = sum(
+            1 for item in items
+            if isinstance(item, dict) and item.get("enabled") is False
+        )
+        protocols = {
+            "mtproxy": {
+                "status": "ready" if health.get("ready") is True else "degraded",
+                "ready": health.get("ready") is True,
+                "credentials": {
+                    "active": mt_active, "disabled": mt_disabled,
+                    "total": mt_active + mt_disabled,
+                },
+                "runtime": {
+                    "traffic_octets": total_octets,
+                    "current_connections": connections.get("active", 0),
+                    "active_ips": len(active_ips),
+                },
+            }
+        }
+        if settings.naive_enabled:
+            try:
+                naive_health, naive_items = await asyncio.gather(
+                    app.state.naive.health(), app.state.naive.list_users(),
+                )
+            except NaiveError:
+                protocols["naive"] = {
+                    "available": True,
+                    "status": "degraded",
+                    "ready": False,
+                    "host": settings.naive_public_host,
+                    "credentials": {"available": False},
+                    "traffic": {"available": False, "reason": "not_collected"},
+                }
+            else:
+                naive_active = sum(
+                    1 for item in naive_items
+                    if isinstance(item, dict) and item.get("enabled") is True
+                )
+                naive_disabled = sum(
+                    1 for item in naive_items
+                    if isinstance(item, dict) and item.get("enabled") is not True
+                )
+                naive_ready = naive_health.get("ready") is True
+                protocols["naive"] = {
+                    "available": True,
+                    "status": "ready" if naive_ready else "degraded",
+                    "ready": naive_ready,
+                    "host": settings.naive_public_host,
+                    "credentials": {
+                        "active": naive_active, "disabled": naive_disabled,
+                        "total": naive_active + naive_disabled,
+                    },
+                    "traffic": {"available": False, "reason": "not_collected"},
+                }
+        else:
+            protocols["naive"] = {"available": False, "status": "disabled"}
         return {
             "health": health, "stats": stats, "connections": connections,
             "active_ips": active_ips, "traffic": {"runtime_total_octets": total_octets},
+            "protocols": protocols,
         }
 
     @app.get("/api/users")
