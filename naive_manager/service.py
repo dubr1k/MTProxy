@@ -107,7 +107,7 @@ class NaiveCredentialManager:
     state_file: Path
     backup_dir: Path
     public_host: str
-    validate: Callable[[Path], None]
+    validate: Callable[[Path], dict]
     reload: Callable[[], None]
     probe: Callable[[], None]
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
@@ -264,7 +264,7 @@ class NaiveCredentialManager:
                 self._write_transaction(transaction)
                 _atomic_write(self.caddyfile, config_before)
                 _atomic_write(self.state_file, state_before)
-                self.validate(self.caddyfile)
+                self._validate_config(self.caddyfile)
                 self.reload()
                 self.probe()
             except Exception as rollback_error:
@@ -285,7 +285,7 @@ class NaiveCredentialManager:
                 stream.write(rendered)
                 stream.flush()
                 os.fsync(stream.fileno())
-            self.validate(path)
+            self._validate_config(path)
             os.replace(path, self.caddyfile)
             os.chmod(self.caddyfile, 0o600)
             _fsync_directory(self.caddyfile.parent)
@@ -388,7 +388,6 @@ class NaiveCredentialManager:
         def activate_current() -> None:
             state = self._read_state()
             self._assert_consistent(state)
-            self.validate(self.caddyfile)
             self.reload()
             self.probe()
 
@@ -419,6 +418,41 @@ class NaiveCredentialManager:
         expected = [(row["username"], row["password"]) for row in state["users"] if row["enabled"]]
         if actual != expected:
             raise ManagerConflict("managed Caddy credentials changed outside manager")
+        self._validate_config(self.caddyfile)
+
+    def _validate_config(self, path: Path) -> None:
+        expected_count = len(self._managed_credentials(path.read_text()))
+        config = self.validate(path)
+        self._assert_adapted_semantics(config, expected_count)
+
+    @staticmethod
+    def _assert_adapted_semantics(config: dict, expected_credentials: int) -> None:
+        if not isinstance(config, dict):
+            raise ManagerConflict("invalid adapted Caddy configuration")
+        handlers = []
+
+        def walk(value) -> None:
+            if isinstance(value, dict):
+                if isinstance(value.get("handler"), str):
+                    handlers.append(value)
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        walk(config)
+        forward = [node for node in handlers if node["handler"] == "forward_proxy"]
+        authentication = [node for node in handlers if node["handler"] == "authentication"]
+        if len(forward) != 1 or authentication:
+            raise ManagerConflict("unexpected proxy or authentication handler")
+        credentials = forward[0].get("auth_credentials")
+        if (
+            not isinstance(credentials, list)
+            or len(credentials) != expected_credentials
+            or any(not isinstance(value, str) or not value for value in credentials)
+        ):
+            raise ManagerConflict("adapted proxy credentials do not match managed state")
 
     @staticmethod
     def _find(state: dict, username: str) -> dict:
@@ -438,10 +472,12 @@ class NaiveCredentialManager:
 
     @staticmethod
     def _forward_bounds(lines: list[str]) -> tuple[int, int]:
-        starts = [index for index, line in enumerate(lines) if re.match(r"^\s*forward_proxy\s*\{", line)]
-        if len(starts) != 1:
+        directives = [index for index, line in enumerate(lines) if re.match(r"^\s*forward_proxy(?:\s|$)", line)]
+        if len(directives) != 1:
             raise ManagerConflict("exactly one forward_proxy block is required")
-        start = starts[0]
+        start = directives[0]
+        if re.fullmatch(r"\s*forward_proxy\s*\{\s*(?:#.*)?", lines[start]) is None:
+            raise ManagerConflict("forward_proxy must use managed block form")
         depth = 0
         for index in range(start, len(lines)):
             depth += lines[index].count("{") - lines[index].count("}")
@@ -470,7 +506,7 @@ class NaiveCredentialManager:
         forward_start, forward_end = cls._forward_bounds(lines)
         if not forward_start < start < end < forward_end:
             raise ManagerConflict("managed credential block is outside forward_proxy")
-        for index in range(forward_start + 1, forward_end):
+        for index in range(len(lines)):
             if re.match(r"^\s*basic_auth\s+", lines[index]) and not start < index < end:
                 raise ManagerConflict("basic_auth directive outside managed credential block")
         return start, end

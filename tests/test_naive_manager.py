@@ -41,9 +41,15 @@ class Hooks:
         self.fail_probe_times = 0
         self.caddyfile: Path | None = None
         self.reload_snapshots = []
+        self.adapted_config = None
 
     def validate(self, path: Path):
-        self.validated.append(path.read_text())
+        text = path.read_text()
+        self.validated.append(text)
+        if self.adapted_config is not None:
+            return self.adapted_config
+        count = len(NaiveCredentialManager._managed_credentials(text))
+        return {"apps": {"http": {"handler": "forward_proxy", "auth_credentials": ["opaque"] * count}}}
 
     def reload(self):
         self.reloads += 1
@@ -542,6 +548,58 @@ def test_multiple_forward_proxy_blocks_make_health_unready(tmp_path):
         service.caddyfile.read_text()
         + "\n:4555 {\n    forward_proxy {\n        hide_ip\n    }\n}\n"
     )
+
+    assert service.health()["ready"] is False
+
+
+def test_blockless_forward_proxy_directive_makes_health_unready(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    service.caddyfile.write_text(
+        service.caddyfile.read_text()
+        + "\n:4555 {\n    forward_proxy\n}\n"
+    )
+
+    assert service.health()["ready"] is False
+
+
+def test_global_basic_auth_outside_managed_block_makes_health_unready(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    service.caddyfile.write_text(
+        service.caddyfile.read_text()
+        + "\n:4666 {\n    basic_auth {\n        rogue JDJhJDE0JHJvZ3Vl\n    }\n    respond 200\n}\n"
+    )
+
+    assert service.health()["ready"] is False
+
+
+@pytest.mark.parametrize(
+    "adapted",
+    [
+        {
+            "routes": [
+                {"handler": "forward_proxy", "auth_credentials": ["one", "two"]},
+                {"handler": "forward_proxy", "auth_credentials": []},
+            ]
+        },
+        {
+            "routes": [
+                {"handler": "forward_proxy", "auth_credentials": ["one", "two"]},
+                {"handler": "authentication", "providers": {"http_basic": {}}},
+            ]
+        },
+        {"routes": [{"handler": "forward_proxy", "auth_credentials": ["extra"]}]},
+    ],
+    ids=["extra-forward-proxy", "external-authentication", "credential-count-mismatch"],
+)
+def test_adapted_semantic_drift_makes_health_unready(tmp_path, adapted):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    hooks.adapted_config = adapted
 
     assert service.health()["ready"] is False
 
