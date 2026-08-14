@@ -7,6 +7,7 @@ import ipaddress
 import os
 import re
 import secrets
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,6 +24,7 @@ import qrcode
 import qrcode.image.svg
 
 from .store import ConflictError, Store
+from .fleet import CommandConflict, FleetStore, ProtocolError
 from .naive import NaiveClient, NaiveError
 from .telemt import TelemtClient, TelemtError
 
@@ -104,11 +106,28 @@ class AdminUpdate(BaseModel):
     active: bool | None = None
 
 
+class FleetNodeCreate(BaseModel):
+    node_id: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$")
+    display_name: str = Field(min_length=1, max_length=128)
+    inventory: dict = Field(default_factory=dict)
+
+
+class FleetCommandCreate(BaseModel):
+    idempotency_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$")
+    operation: Literal[
+        "telemt.inventory.refresh", "telemt.user.enable", "telemt.user.disable",
+        "telemt.user.update_limits", "telemt.user.reset_quota",
+    ]
+    expected_telemt_revision: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    payload: dict
+
+
 def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
     settings = settings or Settings()
     app = FastAPI(title="MTProxy Panel", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts))
     app.state.store = Store(settings.database_path)
+    app.state.fleet = FleetStore(settings.database_path)
     app.state.telemt = telemt or TelemtClient(settings.telemt_url, settings.telemt_token)
     app.state.naive = naive or NaiveClient(settings.naive_socket, settings.naive_token)
     app.state.settings = settings
@@ -523,5 +542,51 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
     @app.get("/api/audit")
     async def audit_log(_user=Depends(current)):
         return {"items": app.state.store.audits()}
+
+    @app.get("/api/fleet/nodes")
+    async def fleet_nodes(_user=Depends(current)):
+        return {"items": app.state.fleet.nodes(), "agent_transport": "disabled"}
+
+    @app.post("/api/fleet/nodes", status_code=201)
+    async def fleet_add_node(body: FleetNodeCreate, request: Request, user=Depends(roles("owner"))):
+        try:
+            node = app.state.fleet.register_node(body.node_id, body.display_name, body.inventory)
+        except sqlite3.IntegrityError as exc:
+            raise HTTPException(409, "node already exists") from exc
+        except ProtocolError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        audit(user, "fleet.node.create", body.node_id, request, {"display_name": body.display_name, "inventory": body.inventory})
+        return node
+
+    @app.get("/api/fleet/nodes/{node_id}/commands")
+    async def fleet_commands(node_id: str, user=Depends(current)):
+        try:
+            app.state.fleet.node(node_id)
+        except KeyError as exc:
+            raise HTTPException(404, "node not found") from exc
+        items = app.state.fleet.commands(node_id)
+        if user["role"] == "viewer":
+            visible = {"command_id", "sequence", "operation", "status", "created_at", "completed_at"}
+            items = [{key: value for key, value in item.items() if key in visible} for item in items]
+        return {"items": items}
+
+    @app.post("/api/fleet/nodes/{node_id}/commands", status_code=201)
+    async def fleet_queue_command(node_id: str, body: FleetCommandCreate, request: Request, user=Depends(roles("owner", "admin"))):
+        try:
+            item = app.state.fleet.enqueue(
+                node_id, body.idempotency_key, body.operation, body.payload,
+                body.expected_telemt_revision,
+            )
+        except KeyError as exc:
+            raise HTTPException(404, "node not found") from exc
+        except CommandConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ProtocolError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        audit(user, "fleet.command.queue", node_id, request, {
+            "command_id": item["command_id"], "sequence": item["sequence"],
+            "operation": item["operation"], "expected_telemt_revision": item["expected_telemt_revision"],
+        })
+        return item
 
     return app

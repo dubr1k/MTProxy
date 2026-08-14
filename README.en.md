@@ -6,6 +6,8 @@
 
 Compose includes a FastAPI panel for Telemt users, administrator roles, and audit. It binds only to `127.0.0.1:8787`, while the Telemt REST API is reachable only inside the Compose network. See [PANEL.en.md](PANEL.en.md) for secure first-start instructions.
 
+The panel includes a secure multi-node registry, typed command queue, and replay-safe local node executor foundation. Network enrollment/polling remains disabled fail-closed pending per-node mTLS; see [FLEET.en.md](FLEET.en.md).
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Runtime: Telemt 3.4.25](https://img.shields.io/badge/Runtime-Telemt%203.4.25-6f42c1.svg)](https://github.com/telemt/telemt)
 [![Container: digest pinned](https://img.shields.io/badge/Container-digest--pinned-success.svg)](compose.yaml)

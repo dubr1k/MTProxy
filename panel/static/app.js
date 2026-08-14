@@ -1,7 +1,7 @@
 const cookie=name=>document.cookie.split('; ').find(x=>x.startsWith(name+'='))?.split('=').slice(1).join('=');
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const icon=name=>{const shapes={status:'<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/>',key:'<path d="M14 7a5 5 0 1 0 3 9l4-4-3-3-2 2-2-2"/>',activity:'<path d="M4 13h4l2-5 4 9 2-5h4"/>',transfer:'<path d="m8 7 4-4 4 4M12 3v14m4 0-4 4-4-4"/>',check:'<path d="m6 12 4 4 8-9"/>',plus:'<path d="M12 5v14M5 12h14"/>',manage:'<path d="M5 7h14M8 12h8M10 17h4"/>',refresh:'<path d="M20 7v5h-5M19 12a7 7 0 1 0-2 5"/>'};return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">${shapes[name]||''}</svg>`};
-const state={view:'dashboard',me:null,users:[],naiveUsers:[],naiveService:{ready:false,host:''},admins:[],audit:[],filter:'all',query:'',naiveFilter:'all',naiveQuery:''};
+const state={view:'dashboard',me:null,users:[],naiveUsers:[],naiveService:{ready:false,host:''},fleet:[],admins:[],audit:[],filter:'all',query:'',naiveFilter:'all',naiveQuery:''};
 let navigationGeneration=0;
 let naiveConfigText='',naiveConfigUrl='';
 
@@ -37,7 +37,7 @@ if(loginForm) loginForm.addEventListener('submit',async event=>{
 });
 
 const view=document.querySelector('#view');
-const titles={dashboard:['Обзор','Состояние прокси и активные подключения'],users:['Подключения','Пользователи, ссылки и ключи доступа'],naive:['NaiveProxy','HTTPS-прокси, конфигурации и доступы'],admins:['Администраторы','Роли и доступ к панели'],audit:['Журнал действий','Изменения, входы и операции с ключами']};
+const titles={dashboard:['Обзор','Состояние прокси и активные подключения'],users:['Подключения','Пользователи, ссылки и ключи доступа'],naive:['NaiveProxy','HTTPS-прокси, конфигурации и доступы'],fleet:['Узлы','Реестр флота и подготовленные команды'],admins:['Администраторы','Роли и доступ к панели'],audit:['Журнал действий','Изменения, входы и операции с ключами']};
 const roleNames={owner:'Владелец',admin:'Администратор',viewer:'Наблюдатель'};
 const actionNames={'auth.login':'Вход в панель','auth.logout':'Выход','user.create':'Создан доступ','user.access':'Открыта ссылка','user.enable':'Доступ включён','user.disable':'Доступ заблокирован','user.rotate':'Ключ обновлён','user.delete':'Доступ удалён','naive.create':'Создан Naive-доступ','naive.access':'Открыта Naive-конфигурация','naive.enable':'Naive-доступ включён','naive.disable':'Naive-доступ отключён','naive.rotate':'Naive-пароль обновлён','naive.delete':'Naive-доступ удалён','admin.create':'Создан администратор','admin.update':'Изменён администратор','admin.delete':'Удалён администратор'};
 
@@ -58,7 +58,7 @@ async function navigate(name){
   document.querySelectorAll('[data-view]').forEach(button=>button.classList.toggle('active',button.dataset.view===name));
   const canCreate=state.me?.role!=='viewer'&&(name==='users'||name==='naive'||(name==='admins'&&state.me?.role==='owner'));
   const add=document.querySelector('#add');add.hidden=!canCreate;document.querySelector('#add-label').textContent=name==='admins'?'Администратора':name==='naive'?'Naive доступ':'Подключение';
-  skeleton();try{if(name==='dashboard')await renderDashboard(generation);if(name==='users')await renderUsers(generation);if(name==='naive')await renderNaive(generation);if(name==='admins')await renderAdmins(generation);if(name==='audit')await renderAudit(generation)}catch(error){if(generation===navigationGeneration&&state.view===name)errorState(error)}
+  skeleton();try{if(name==='dashboard')await renderDashboard(generation);if(name==='users')await renderUsers(generation);if(name==='naive')await renderNaive(generation);if(name==='fleet')await renderFleet(generation);if(name==='admins')await renderAdmins(generation);if(name==='audit')await renderAudit(generation)}catch(error){if(generation===navigationGeneration&&state.view===name)errorState(error)}
 }
 
 async function refreshUsers(generation=null){const data=await api('/api/users');if(generation!==null&&generation!==navigationGeneration)return null;state.users=data.items||[];document.querySelector('#users-count').textContent=state.users.length;return state.users}
@@ -93,6 +93,11 @@ function paintNaive(){const container=document.querySelector('#naive-list');if(!
 async function renderNaive(generation=navigationGeneration){
   const users=await refreshNaive(generation);if(generation!==navigationGeneration||state.view!=='naive'||users===null)return;const active=users.filter(x=>x.enabled).length,blocked=users.length-active,ready=state.naiveService.ready===true;
   view.innerHTML=`<div class="naive-overview"><article><span class="naive-mark">${icon('status')}</span><div><small>Сервис</small><b>${ready?'Caddy работает':'Manager недоступен'}</b><em>${esc(state.naiveService.host||'—')}</em></div><span class="status-pill ${ready?'active':'blocked'}"><i></i>${ready?'Ready':'Ошибка'}</span></article><article><small>Доступы</small><strong>${number(active)}</strong><span>${blocked?`${blocked} отключено`:'Все активны'}</span></article><article><small>Транспорт</small><strong>HTTPS</strong><span>HTTP/2 CONNECT · padding</span></article></div><div class="toolbar"><div class="search"><input id="naive-search" type="search" value="${esc(state.naiveQuery)}" placeholder="Поиск Naive-доступа" aria-label="Поиск NaiveProxy пользователей"></div><div class="filter-pills"><button class="filter-pill ${state.naiveFilter==='all'?'active':''}" data-naive-filter="all">Все · ${users.length}</button><button class="filter-pill ${state.naiveFilter==='active'?'active':''}" data-naive-filter="active">Активные</button><button class="filter-pill ${state.naiveFilter==='blocked'?'active':''}" data-naive-filter="blocked">Отключённые</button></div></div><section class="data-panel"><div class="data-head naive-grid"><span>Доступ</span><span>Статус</span><span>Протокол</span><span class="align-right">Действия</span></div><div id="naive-list"></div></section>`;paintNaive();
+}
+
+async function renderFleet(generation=navigationGeneration){
+  const data=await api('/api/fleet/nodes');if(generation!==navigationGeneration||state.view!=='fleet')return;state.fleet=data.items||[];document.querySelector('#fleet-count').textContent=state.fleet.length;
+  view.innerHTML=`<div class="security-note">Сетевой транспорт агента отключён до внедрения взаимной TLS-аутентификации. Команды можно безопасно подготовить через API, но узлы не могут получить их по сети.</div><section class="data-panel"><div class="data-head admin-grid"><span>Узел</span><span>Telemt</span><span>Очередь</span><span class="align-right">Транспорт</span></div>${state.fleet.length?state.fleet.map(node=>`<div class="data-row admin-grid"><div class="identity"><span class="user-glyph">${esc(initials(node.node_id))}</span><span><b>${esc(node.display_name)}</b><small>${esc(node.node_id)} · ${esc(node.inventory?.region||'регион не задан')}</small></span></div><div class="cell"><b>${esc(node.inventory?.telemt_version||'—')}</b><small>${esc(node.inventory?.agent_version||'агент не подключён')}</small></div><div class="cell"><b>${number(Math.max(0,(node.next_sequence||1)-1-(node.last_result_sequence||0)))}</b><small>подготовлено</small></div><div class="row-actions"><span class="status-pill blocked"><i></i>${esc(node.auth_state==='network_disabled'?'mTLS не настроен':node.auth_state)}</span></div></div>`).join(''):'<div class="empty-state"><span>◇</span><h3>Узлы не зарегистрированы</h3><p>Владелец может добавить обезличенный inventory через Fleet API.</p></div>'}</section>`;
 }
 
 async function renderAdmins(generation=navigationGeneration){
