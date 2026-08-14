@@ -58,8 +58,8 @@ Regular browser or active probe
 - Caddy is reachable only inside the Docker network.
 - Unauthenticated TLS traffic is relayed to a real HTTPS cover backend.
 - Secrets are not embedded in the image, Compose model, or Git.
-- Telemt runtime configuration is generated inside a private `tmpfs`.
-- The Telemt API is disabled and user links are not printed to production logs.
+- Telemt runtime configuration and quota state are stored in a private named volume so API mutations survive container recreation; that volume is credential-bearing.
+- The authenticated Telemt API is available only on the private Compose network, is not published on the host, and user links are not printed to production logs.
 - Both containers use read-only root filesystems.
 - Telemt runs with all Linux capabilities dropped (`cap_drop: ALL`).
 

@@ -30,8 +30,9 @@ The Telemt container uses:
 - a read-only root filesystem;
 - `cap_drop: ALL`;
 - `no-new-privileges:true`;
-- a private runtime `tmpfs`;
-- no published management or metrics API.
+- a named volume for its private configuration and quota state;
+- a Control API reachable only on the private Compose network, authenticated by a Docker secret;
+- no host-published management or metrics port.
 
 The Caddy cover container also uses a read-only root filesystem. Certificate and static-site mounts are read-only.
 
@@ -39,7 +40,7 @@ The Caddy cover container also uses a read-only root filesystem. Certificate and
 
 Per-user 16-byte hexadecimal secrets are stored in `secrets/users.conf`, which must have mode `0600`. The path is excluded from both Git and the Docker build context.
 
-At startup, `docker/telemt-entrypoint.sh` validates names and secret lengths, then renders Telemt configuration into `/run/telemt`, a private tmpfs. Production link output is disabled to prevent credentials from appearing in container logs.
+At first startup, `docker/telemt-entrypoint.sh` validates names and secret lengths, then renders Telemt configuration into the private `telemt-config` volume. Later API mutations are intentionally preserved there and the entrypoint never regenerates an existing configuration. The volume contains credentials and the API bearer token and must be backed up and protected as secret-bearing state. Production link output is disabled to prevent credentials from appearing in container logs.
 
 Treat the following as credentials:
 
