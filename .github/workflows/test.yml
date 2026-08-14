@@ -42,6 +42,7 @@ jobs:
           test -s THIRD_PARTY_NOTICES.md
           grep -q 'Mieru/mita' THIRD_PARTY_NOTICES.md
           grep -q 'not bundled' THIRD_PARTY_NOTICES.md
+          grep -Fq 'github.com/caddyserver/forwardproxy@d62c80d3dd2c706b6b87579844d2397bddd18317' docker/Dockerfile.caddy-naive
           sudo install -d /usr/local/libexec /opt/proxy-control/venv/bin /opt/mtproxy-agent/venv/bin /opt/mtproxy-panel/venv/bin
           sudo install -m 0755 /bin/true /usr/local/libexec/check-naive-caddy-build
           sudo install -m 0755 /bin/true /usr/local/bin/caddy

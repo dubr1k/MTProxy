@@ -6,7 +6,7 @@ Proxy Control repository code is distributed under the repository [MIT license](
 - **TelegramMessenger/MTProxy:** legacy official MTProxy runtime referenced by historical/systemd paths; separately licensed upstream.
 - **Telemt:** external MTProto runtime/container with its own public license and release artifacts. The repository pins the selected image and does not relicense it.
 - **Mieru/mita:** GPLv3+ external runtime. The `mita` binary is downloaded or mounted separately and is not bundled into this MIT repository or its images. The adapter communicates across a process/Unix-socket boundary and does not include copied upstream source or generated GPL stubs.
-- **Caddy and external modules/images:** separately licensed upstream components. Review the exact build checker, module provenance, image manifests, and upstream notices before redistribution.
+- **Caddy and external modules/images:** separately licensed upstream components. The CI validation build uses Caddy v2.11.4 and `github.com/caddyserver/forwardproxy` at immutable commit `d62c80d3dd2c706b6b87579844d2397bddd18317`; review the exact build checker, image manifests, and upstream notices before redistribution.
 - **Python dependencies:** FastAPI, Starlette, Pydantic, HTTPX, Uvicorn, Argon2, cryptography, qrcode, pytest, Ruff and their transitive dependencies remain under their respective upstream licenses. Exact direct pins are listed in `panel/requirements*.txt`.
 
 Dependency pins and URLs in tracked configuration are not an assertion that all transitive license obligations are reproduced here. Release engineering must inspect the actual resolved artifacts and include notices required by those versions.
