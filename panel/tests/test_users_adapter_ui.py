@@ -27,11 +27,71 @@ async def test_user_crud_rotate_and_one_time_reveal(client, login_user, telemt):
     assert (await client.delete("/api/users/alice", headers={"X-CSRF-Token": csrf})).status_code == 204
 
 
-async def test_dashboard_collects_health_stats_connections_and_active_ips(client, login_user):
+async def test_dashboard_collects_real_per_user_traffic(client, login_user, telemt):
+    telemt.users.update({
+        "alice": {"username": "alice", "enabled": True, "total_octets": 100},
+        "bob": {"username": "bob", "enabled": True, "total_octets": 250},
+    })
     await login_user(client)
     response = await client.get("/api/dashboard")
     assert response.status_code == 200
-    assert set(response.json()) >= {"health", "stats", "connections", "active_ips"}
+    assert set(response.json()) >= {"health", "stats", "connections", "active_ips", "traffic"}
+    assert response.json()["traffic"] == {"total_octets": 350}
+
+
+async def test_admin_can_set_and_reset_per_user_limits(client, login_user, telemt):
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+    telemt.users["alice"] = {"username": "alice", "enabled": True, "total_octets": 500}
+    payload = {
+        "data_quota_bytes": 10_000,
+        "rate_limit_up_bps": 1_000_000,
+        "rate_limit_down_bps": 2_000_000,
+        "max_tcp_conns": 4,
+        "max_unique_ips": 2,
+        "expiration_rfc3339": "2027-01-01T00:00:00Z",
+    }
+
+    changed = await client.post(
+        "/api/users/alice/limits", json=payload, headers={"X-CSRF-Token": csrf},
+    )
+    assert changed.status_code == 200
+    assert {key: telemt.users["alice"][key] for key in payload} == payload
+    reset = await client.post("/api/users/alice/reset-quota", headers={"X-CSRF-Token": csrf})
+    assert reset.status_code == 200
+    assert telemt.users["alice"]["total_octets"] == 0
+    audit = (await client.get("/api/audit")).json()["items"]
+    assert {row["action"] for row in audit} >= {"user.limits", "user.reset_quota"}
+
+
+async def test_viewer_cannot_change_or_reset_limits(client, login_user, telemt):
+    store = client._transport.app.state.store
+    store.create_admin("viewer-limits", "viewer password long enough", "viewer")
+    telemt.users["alice"] = {"username": "alice", "enabled": True}
+    await login_user(client, "viewer-limits", "viewer password long enough")
+    csrf = client.cookies["panel_csrf"]
+    assert (await client.post(
+        "/api/users/alice/limits", json={"data_quota_bytes": 1000}, headers={"X-CSRF-Token": csrf},
+    )).status_code == 403
+    assert (await client.post(
+        "/api/users/alice/reset-quota", headers={"X-CSRF-Token": csrf},
+    )).status_code == 403
+
+
+async def test_telemt_adapter_patches_limits_and_resets_quota():
+    seen = []
+    import httpx
+
+    async def handler(request):
+        seen.append((request.method, request.url.path, request.content))
+        return httpx.Response(200, json={"ok": True, "data": {"username": "alice"}, "revision": "r"})
+
+    telemt = TelemtClient("http://telemt:9091", "Bearer internal-token", transport=httpx.MockTransport(handler))
+    await telemt.update_user("alice", {"data_quota_bytes": 2048})
+    await telemt.reset_quota("alice")
+    assert seen[0][:2] == ("PATCH", "/v1/users/alice")
+    assert seen[0][2] == b'{"data_quota_bytes":2048}'
+    assert seen[1][:2] == ("POST", "/v1/users/alice/reset-quota")
 
 
 async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(client, login_user):
@@ -56,6 +116,10 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'id="naive-access-modal"' in text and 'id="copy-naive-url"' in text
     assert "renderNaive" in js and "naiveAction" in js and "showNaiveAccess" in js
     assert "admin-form');if(!form.reportValidity()" in js
+    assert 'id="limits-modal"' in text and 'id="save-limits"' in text
+    assert "data.traffic?.total_octets" in js
+    assert "user.total_octets" in js and "data-action=\"limits\"" in js
+    assert "/limits`" in js and "/reset-quota`" in js
 
 
 async def test_telemt_adapter_sends_auth_and_maps_envelope():

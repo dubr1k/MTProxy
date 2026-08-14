@@ -51,6 +51,24 @@
     </form>
   </dialog>
 
+  <dialog id="limits-modal" class="sheet">
+    <form method="dialog" id="limits-form">
+      <div class="modal-head"><div><span class="eyebrow">ЛИМИТЫ MTProxy</span><h2 id="limits-title">Ограничения доступа</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
+      <input id="limits-user" type="hidden">
+      <p class="modal-copy">Пустое поле снимает соответствующее ограничение. Трафик учитывается в обоих направлениях.</p>
+      <div class="limit-form-grid">
+        <label>Квота, ГиБ<input id="limit-quota" type="number" min="0.001" step="0.001" inputmode="decimal" placeholder="без лимита"></label>
+        <label>Отдача, Мбит/с<input id="limit-up" type="number" min="0.001" step="0.001" inputmode="decimal" placeholder="без лимита"></label>
+        <label>Загрузка, Мбит/с<input id="limit-down" type="number" min="0.001" step="0.001" inputmode="decimal" placeholder="без лимита"></label>
+        <label>TCP-соединения<input id="limit-connections" type="number" min="1" max="100000" step="1" inputmode="numeric" placeholder="без лимита"></label>
+        <label>Уникальные IP<input id="limit-ips" type="number" min="1" max="100000" step="1" inputmode="numeric" placeholder="без лимита"></label>
+        <label>Действует до<input id="limit-expiration" type="datetime-local"></label>
+      </div>
+      <div class="form-error" id="limits-error" role="alert"></div>
+      <footer><button class="secondary" id="reset-quota" type="button">Сбросить счётчик</button><span class="spacer"></span><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="save-limits" type="button">Сохранить</button></footer>
+    </form>
+  </dialog>
+
   <dialog id="naive-modal" class="sheet">
     <form method="dialog" id="naive-form">
       <div class="modal-head"><div><span class="eyebrow">NAIVEPROXY</span><h2>Новый HTTPS-прокси</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>

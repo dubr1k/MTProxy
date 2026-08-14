@@ -9,6 +9,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -62,6 +63,28 @@ class UserCreate(BaseModel):
     def valid(cls, value):
         if not re.fullmatch(r"[A-Za-z0-9.-]+", value):
             raise ValueError("invalid username")
+        return value
+
+
+class UserLimits(BaseModel):
+    data_quota_bytes: int | None = Field(default=None, strict=True, ge=1, le=2**63 - 1)
+    rate_limit_up_bps: int | None = Field(default=None, strict=True, ge=1, le=10**12)
+    rate_limit_down_bps: int | None = Field(default=None, strict=True, ge=1, le=10**12)
+    max_tcp_conns: int | None = Field(default=None, strict=True, ge=1, le=100_000)
+    max_unique_ips: int | None = Field(default=None, strict=True, ge=1, le=100_000)
+    expiration_rfc3339: str | None = Field(default=None, max_length=64)
+
+    @field_validator("expiration_rfc3339")
+    @classmethod
+    def valid_expiration(cls, value):
+        if value is None:
+            return value
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("invalid RFC3339 timestamp") from exc
+        if parsed.tzinfo is None:
+            raise ValueError("timezone is required")
         return value
 
 
@@ -280,8 +303,21 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
 
     @app.get("/api/dashboard")
     async def dashboard(_user=Depends(current)):
-        results = await asyncio.gather(app.state.telemt.health(), app.state.telemt.stats(), app.state.telemt.connections(), app.state.telemt.active_ips())
-        return dict(zip(("health", "stats", "connections", "active_ips"), results))
+        results = await asyncio.gather(
+            app.state.telemt.health(), app.state.telemt.stats(), app.state.telemt.connections(),
+            app.state.telemt.active_ips(), app.state.telemt.list_users(),
+        )
+        health, stats, connections, active_ips, items = results
+        total_octets = sum(
+            value for item in items
+            if isinstance(item, dict)
+            for value in [item.get("total_octets")]
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        )
+        return {
+            "health": health, "stats": stats, "connections": connections,
+            "active_ips": active_ips, "traffic": {"total_octets": total_octets},
+        }
 
     @app.get("/api/users")
     async def users(_user=Depends(current)):
@@ -310,6 +346,21 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
     async def delete_user(username: str, request: Request, user=Depends(roles("owner", "admin"))):
         await app.state.telemt.delete_user(username)
         audit(user, "user.delete", username, request)
+
+    @app.post("/api/users/{username}/limits")
+    async def user_limits(username: str, body: UserLimits, request: Request, user=Depends(roles("owner", "admin"))):
+        fields = body.model_dump(exclude_unset=True)
+        if not fields:
+            raise HTTPException(422, "at least one limit is required")
+        data = await app.state.telemt.update_user(username, fields)
+        audit(user, "user.limits", username, request, fields)
+        return safe_user(data)
+
+    @app.post("/api/users/{username}/reset-quota")
+    async def user_reset_quota(username: str, request: Request, user=Depends(roles("owner", "admin"))):
+        data = await app.state.telemt.reset_quota(username)
+        audit(user, "user.reset_quota", username, request)
+        return data
 
     @app.post("/api/users/{username}/{operation}")
     async def user_operation(username: str, operation: Literal["enable", "disable", "rotate"], request: Request, user=Depends(roles("owner", "admin"))):

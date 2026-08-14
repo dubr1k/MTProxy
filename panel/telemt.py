@@ -39,6 +39,8 @@ class TelemtClient:
     async def delete_user(self, username): return (await self._request("DELETE", f"/v1/users/{quote(username)}"))[0]
     async def set_enabled(self, username, enabled): return (await self._request("POST", f"/v1/users/{quote(username)}/{'enable' if enabled else 'disable'}"))[0]
     async def rotate(self, username): return (await self._request("POST", f"/v1/users/{quote(username)}/rotate-secret", {}))[0]
+    async def update_user(self, username, fields): return (await self._request("PATCH", f"/v1/users/{quote(username)}", fields))[0]
+    async def reset_quota(self, username): return (await self._request("POST", f"/v1/users/{quote(username)}/reset-quota", {}))[0]
     async def health(self): return (await self._request("GET", "/v1/health/ready"))[0]
     async def stats(self): return (await self._request("GET", "/v1/stats/summary"))[0]
     async def connections(self): return (await self._request("GET", "/v1/runtime/connections/summary"))[0]
@@ -68,6 +70,12 @@ class MemoryTelemt:
         link = f"tg://proxy?server={self.public_host}&port={self.public_port}&secret=ee{secret}"
         self.users[username]["links"] = {"tls": [link]}
         return {"user": self.users[username], "secret": secret}
+    async def update_user(self, username, fields):
+        self.users[username].update(fields)
+        return self.users[username]
+    async def reset_quota(self, username):
+        self.users[username]["total_octets"] = 0
+        return {"username": username, "used_bytes": 0}
     async def health(self): return {"ready": True}
     async def stats(self): return {"connections": 0, "bytes": 0}
     async def connections(self): return {"active": 0, "top_users": []}
