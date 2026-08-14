@@ -45,8 +45,12 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'id="access-modal"' in text
     assert 'id="qr-image"' in text
     assert 'id="copy-link"' in text
+    assert 'class="nav-item owner-only" data-view="admins" hidden' in text
     css = await client.get("/static/style.css")
     assert "@media(max-width:760px)" in css.text
+    js = (await client.get("/static/app.js")).text
+    assert "function proxyLink" in js and "navigationGeneration" in js
+    assert "admin-form');if(!form.reportValidity()" in js
 
 
 async def test_telemt_adapter_sends_auth_and_maps_envelope():
@@ -117,6 +121,20 @@ async def test_viewer_cannot_reveal_existing_proxy_access(client, login_user, te
     await login_user(client, "viewer", "viewer password long enough")
     response = await client.post("/api/users/alice/access", headers={"X-CSRF-Token": client.cookies["panel_csrf"]})
     assert response.status_code == 403
+
+
+async def test_access_rejects_non_telegram_upstream_link(client, login_user, telemt):
+    await login_user(client)
+    telemt.users["alice"] = {
+        "username": "alice", "enabled": True,
+        "links": {"tls": ["javascript:alert(document.domain)"]},
+    }
+    response = await client.post(
+        "/api/users/alice/access",
+        headers={"X-CSRF-Token": client.cookies["panel_csrf"]},
+    )
+    assert response.status_code == 409
+    assert "javascript:" not in response.text
 
 
 async def test_reveal_is_bound_to_creating_admin_session(client, login_user):

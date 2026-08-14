@@ -13,11 +13,11 @@
     <nav aria-label="Основная навигация">
       <button class="nav-item active" data-view="dashboard"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20h-6v-6h-4v6H4z"/></svg><span>Обзор</span></button>
       <button class="nav-item" data-view="users"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="3"/><circle cx="16" cy="12" r="3"/><path d="M11 12h2M3 12H1m22 0h-2"/></svg><span>Подключения</span><span class="nav-count" id="users-count">—</span></button>
-      <button class="nav-item owner-only" data-view="admins"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.6-4 2.8-6 7-6s6.4 2 7 6"/></svg><span>Администраторы</span></button>
-      <button class="nav-item audit-nav" data-view="audit"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6h13M7 12h13M7 18h13"/><circle cx="3" cy="6" r="1"/><circle cx="3" cy="12" r="1"/><circle cx="3" cy="18" r="1"/></svg><span>Журнал</span></button>
+      <button class="nav-item owner-only" data-view="admins" hidden><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.6-4 2.8-6 7-6s6.4 2 7 6"/></svg><span>Администраторы</span></button>
+      <button class="nav-item audit-nav" data-view="audit" hidden><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6h13M7 12h13M7 18h13"/><circle cx="3" cy="6" r="1"/><circle cx="3" cy="12" r="1"/><circle cx="3" cy="18" r="1"/></svg><span>Журнал</span></button>
     </nav>
     <div class="sidebar-foot">
-      <div class="system-mini"><i></i><span><b>Telemt работает</b><small>Приватный control API</small></span></div>
+      <div class="system-mini"><i></i><span><b>Статус загружается</b><small>Ожидание Telemt</small></span></div>
       <button class="profile-button" id="profile-button"><span class="avatar" id="avatar">A</span><span><b id="profile-name">—</b><small id="profile-role">—</small></span><svg class="chevron button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5 5 5-5"/></svg></button>
       <button class="logout-button" id="logout">Выйти</button>
     </div>
@@ -34,8 +34,8 @@
   <nav class="mobile-nav" aria-label="Мобильная навигация">
     <button class="active" data-view="dashboard"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20h-6v-6h-4v6H4z"/></svg><small>Обзор</small></button>
     <button data-view="users"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="3"/><circle cx="16" cy="12" r="3"/><path d="M11 12h2"/></svg><small>Доступы</small></button>
-    <button class="owner-only" data-view="admins"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.6-4 2.8-6 7-6s6.4 2 7 6"/></svg><small>Админы</small></button>
-    <button class="audit-nav" data-view="audit"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h14M6 12h14M6 18h14"/></svg><small>Журнал</small></button>
+    <button class="owner-only" data-view="admins" hidden><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.6-4 2.8-6 7-6s6.4 2 7 6"/></svg><small>Админы</small></button>
+    <button class="audit-nav" data-view="audit" hidden><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h14M6 12h14M6 18h14"/></svg><small>Журнал</small></button>
     <button id="mobile-logout"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H4v14h6M14 8l4 4-4 4m4-4H9"/></svg><small>Выйти</small></button>
   </nav>
 
