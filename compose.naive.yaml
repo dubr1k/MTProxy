@@ -6,6 +6,8 @@ services:
     restart: unless-stopped
     network_mode: host
     user: "10002:101"
+    group_add:
+      - "10004"
     environment:
       NAIVE_PUBLIC_HOST: ${NAIVE_PUBLIC_HOST:-chrbased.dubr1k-solutions.com}
       NAIVE_MANAGER_TOKEN_FILE: /data/manager-token

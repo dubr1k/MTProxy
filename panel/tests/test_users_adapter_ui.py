@@ -78,16 +78,24 @@ async def test_dashboard_summarizes_both_protocols_without_naive_traffic_inventi
                 "download_bytes": "proxy_to_client",
             },
             "pending": False,
-            "aggregate": {"upload_bytes": 0, "download_bytes": 0, "total_bytes": 0},
+            "aggregate": {
+                "upload_bytes": 0, "download_bytes": 0, "total_bytes": 0,
+                "upload_bytes_decimal": "0", "download_bytes_decimal": "0",
+                "total_bytes_decimal": "0",
+            },
             "users": [
                 {
                     "username": "web-on", "upload_bytes": 0, "download_bytes": 0,
                     "total_bytes": 0, "period_start": naive.period_start,
+                    "upload_bytes_decimal": "0", "download_bytes_decimal": "0",
+                    "total_bytes_decimal": "0",
                     "updated_at": naive.period_start,
                 },
                 {
                     "username": "web-off", "upload_bytes": 0, "download_bytes": 0,
                     "total_bytes": 0, "period_start": naive.period_start,
+                    "upload_bytes_decimal": "0", "download_bytes_decimal": "0",
+                    "total_bytes_decimal": "0",
                     "updated_at": naive.period_start,
                 },
             ],
@@ -102,6 +110,21 @@ async def test_dashboard_summarizes_both_protocols_without_naive_traffic_inventi
         },
     }
     assert "not-returned" not in str(body)
+
+
+async def test_naive_traffic_exposes_exact_decimal_strings_above_javascript_safe_integer(
+    client, login_user, naive,
+):
+    naive.seed("large", "not-returned")
+    naive.set_traffic("large", upload=2**53 + 1, download=2)
+    await login_user(client)
+
+    body = (await client.get("/api/naive/users")).json()
+
+    row = body["items"][0]
+    assert row["upload_bytes_decimal"] == "9007199254740993"
+    assert row["download_bytes_decimal"] == "2"
+    assert row["total_bytes_decimal"] == "9007199254740995"
 
 
 async def test_user_list_merges_resettable_quota_usage_without_confusing_runtime_traffic(client, login_user, telemt):
@@ -247,7 +270,11 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'id="naive-access-modal"' in text and 'id="copy-naive-url"' in text
     assert "renderNaive" in js and "naiveAction" in js and "showNaiveAccess" in js
     assert 'class="protocol-overview"' in js
-    assert "↑ ${bytes(user.upload_bytes)} · ↓ ${bytes(user.download_bytes)} · Σ ${bytes(user.total_bytes)}" in js
+    assert (
+        "↑ ${bytes(user.upload_bytes_decimal)} · ↓ ${bytes(user.download_bytes_decimal)} · "
+        "Σ ${bytes(user.total_bytes_decimal)}" in js
+    )
+    assert "BigInt(String(value??0))" in js
     assert "Только закрытые CONNECT-туннели" in js
     assert 'data-naive-action="reset-traffic"' in js
     assert "Сбросить локальный счётчик?" in js

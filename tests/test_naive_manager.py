@@ -11,7 +11,13 @@ import httpx
 import pytest
 
 from naive_manager.server import ManagerHTTPServer, caddy_adapt
-from naive_manager.service import ManagerConflict, ManagerRecoveryError, NaiveCredentialManager
+from naive_manager.service import (
+    ACCOUNTING_BEGIN,
+    ACCOUNTING_END,
+    ManagerConflict,
+    ManagerRecoveryError,
+    NaiveCredentialManager,
+)
 from naive_manager.traffic import TrafficCollector
 
 
@@ -104,7 +110,7 @@ def test_bootstrap_imports_existing_credentials_without_changing_them(tmp_path):
     assert state["version"] == 1
     assert "# BEGIN NAIVE-MANAGER ACCOUNTING" in rendered
     assert "output file /var/log/naive-proxy/access.json" in rendered
-    assert "mode 0600" in rendered and "roll_uncompressed" in rendered
+    assert "mode 0640" in rendered and "roll_uncompressed" in rendered
     assert "request>headers>Proxy-Authorization delete" in rendered
     assert "wrap json" in rendered
     assert "sampling" not in rendered
@@ -130,6 +136,93 @@ def test_bootstrap_rejects_preexisting_managed_markers(tmp_path):
         service.bootstrap()
 
     assert not service.state_file.exists()
+
+
+def test_bootstrap_rejects_caddyfile_reached_through_symlinked_parent(tmp_path):
+    hooks = Hooks()
+    real = tmp_path / "real-config"
+    real.mkdir()
+    (real / "Caddyfile").write_text(CADDY)
+    linked = tmp_path / "linked-config"
+    linked.symlink_to(real, target_is_directory=True)
+    hooks.caddyfile = linked / "Caddyfile"
+    service = NaiveCredentialManager(
+        caddyfile=linked / "Caddyfile",
+        state_file=tmp_path / "state" / "users.json",
+        backup_dir=tmp_path / "backups",
+        public_host="naive.example.com",
+        validate=hooks.validate,
+        reload=hooks.reload,
+        probe=hooks.probe,
+    )
+
+    with pytest.raises(ManagerConflict, match="unsafe"):
+        service.bootstrap()
+
+
+def test_bootstrap_transactionally_migrates_existing_managed_state_to_accounting(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    lines = service.caddyfile.read_text().splitlines()
+    begin = next(i for i, line in enumerate(lines) if line.strip() == "# BEGIN NAIVE-MANAGER ACCOUNTING")
+    end = next(i for i, line in enumerate(lines) if line.strip() == "# END NAIVE-MANAGER ACCOUNTING")
+    service.caddyfile.write_text("\n".join(lines[:begin] + lines[end + 1:]) + "\n")
+    hooks.reloads = hooks.probes = 0
+
+    service.bootstrap()
+
+    assert service.caddyfile.read_text().count("# BEGIN NAIVE-MANAGER ACCOUNTING") == 1
+    assert hooks.reloads == 1
+    assert hooks.probes == 1
+    assert not (service.state_file.parent / "transaction.json").exists()
+    backups = len(list(service.backup_dir.glob("*.Caddyfile")))
+    service.bootstrap()
+    assert len(list(service.backup_dir.glob("*.Caddyfile"))) == backups
+    assert hooks.reloads == 1
+
+
+@pytest.mark.parametrize("fault_phase", ["prepared", "files_replaced", "rollback_pending"])
+def test_accounting_migration_fault_at_each_phase_restores_then_retries_idempotently(
+    tmp_path, monkeypatch, fault_phase,
+):
+    """Every durable phase must recover the old generation before a clean retry."""
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    lines = service.caddyfile.read_text().splitlines()
+    begin = next(i for i, line in enumerate(lines) if line.strip() == ACCOUNTING_BEGIN)
+    end = next(i for i, line in enumerate(lines) if line.strip() == ACCOUNTING_END)
+    old_config = "\n".join(lines[:begin] + lines[end + 1:]) + "\n"
+    service.caddyfile.write_text(old_config)
+    old_state = service.state_file.read_bytes()
+    real_write_transaction = NaiveCredentialManager._write_transaction
+    injected = False
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def crash_after_phase(self, transaction):
+        nonlocal injected
+        real_write_transaction(self, transaction)
+        if transaction["phase"] == fault_phase and not injected:
+            injected = True
+            raise SimulatedCrash(fault_phase)
+
+    monkeypatch.setattr(NaiveCredentialManager, "_write_transaction", crash_after_phase)
+    with pytest.raises(SimulatedCrash):
+        service.bootstrap()
+
+    monkeypatch.setattr(NaiveCredentialManager, "_write_transaction", real_write_transaction)
+    recovered = manager(tmp_path, hooks)
+    recovered.bootstrap()
+
+    assert injected is True
+    assert recovered.state_file.read_bytes() == old_state
+    assert recovered.caddyfile.read_text().count(ACCOUNTING_BEGIN) == 1
+    assert not (recovered.state_file.parent / "transaction.json").exists()
+    recovered.bootstrap()
+    assert recovered.caddyfile.read_text().count(ACCOUNTING_BEGIN) == 1
 
 
 def test_bootstrap_recovers_after_crash_between_initial_config_and_state_writes(tmp_path, monkeypatch):
@@ -226,6 +319,9 @@ def test_create_disable_enable_rotate_and_delete_are_transactional(tmp_path):
     service.rotate("phone")
     assert service.reveal("phone")["proxy_url"] != before
 
+    log = tmp_path / "access.json"
+    log.write_text("")
+    service.traffic = TrafficCollector(log, tmp_path / "traffic.sqlite3", service.managed_usernames)
     service.delete("phone")
     assert all(row["username"] != "phone" for row in service.list_users())
     assert hooks.reloads == 5
@@ -863,6 +959,116 @@ def test_authenticated_traffic_api_lists_and_resets_without_changing_credentials
         server.server_close()
         thread.join(timeout=2)
     assert service.reveal("old-user")["proxy_url"] == before
+
+
+def test_health_and_traffic_report_do_not_deadlock_on_opposite_lock_timing(tmp_path):
+    """Traffic collection must never call back into manager state under its lock."""
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    log = tmp_path / "access.json"
+    log.write_text("")
+    callback_entered = threading.Event()
+    release_callback = threading.Event()
+
+    def blocked_users():
+        callback_entered.set()
+        assert release_callback.wait(1)
+        return service.managed_usernames()
+
+    service.traffic = TrafficCollector(log, tmp_path / "traffic.sqlite3", blocked_users)
+    results = {}
+    report = threading.Thread(target=lambda: results.setdefault("report", service.traffic_report()))
+    report.start()
+    assert callback_entered.wait(1)
+    health = threading.Thread(target=lambda: results.setdefault("health", service.health()))
+    health.start()
+    release_callback.set()
+    report.join(2)
+    health.join(2)
+
+    assert not report.is_alive()
+    assert not health.is_alive()
+    assert set(results) == {"report", "health"}
+
+
+def test_reset_refuses_when_bounded_drain_cannot_finish_pre_reset_backlog(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    log = tmp_path / "access.json"
+    line = json.dumps({
+        "request": {"method": "CONNECT"}, "status": 200, "user_id": "old-user",
+        "bytes_read": 1, "size": 2,
+    }) + "\n"
+    log.write_text(line * 8)
+    service.traffic = TrafficCollector(
+        log, tmp_path / "traffic.sqlite3", service.managed_usernames,
+        max_line_bytes=128, max_read_bytes=160, max_drain_rounds=2,
+    )
+
+    with pytest.raises(ManagerConflict, match="backlog"):
+        service.reset_traffic("old-user")
+
+    while service.traffic.list_traffic()["pending"]:
+        service.traffic.collect()
+    reset = service.reset_traffic("old-user")
+    assert reset["total_bytes"] == 0
+    assert service.traffic.list_traffic()["users"][0]["total_bytes"] == 0
+
+
+def test_delete_refuses_pending_backlog_then_archives_and_tombstones_username(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    log = tmp_path / "access.json"
+    line = json.dumps({
+        "request": {"method": "CONNECT"}, "status": 200, "user_id": "old-user",
+        "bytes_read": 1, "size": 2,
+    }) + "\n"
+    log.write_text(line * 8)
+    service.traffic = TrafficCollector(
+        log, tmp_path / "traffic.sqlite3", service.managed_usernames,
+        max_line_bytes=128, max_read_bytes=160, max_drain_rounds=1,
+    )
+
+    with pytest.raises(ManagerConflict, match="backlog"):
+        service.delete("old-user")
+    assert any(row["username"] == "old-user" for row in service.list_users())
+
+    while service.traffic.list_traffic()["pending"]:
+        service.traffic.collect()
+    service.delete("old-user")
+
+    assert all(row["username"] != "old-user" for row in service.list_users())
+    assert service.traffic.list_traffic()["users"] == []
+    state = json.loads(service.state_file.read_text())
+    assert state["tombstones"] == [{"username": "old-user", "deleted_at": state["tombstones"][0]["deleted_at"]}]
+    with pytest.raises(ManagerConflict, match="retired"):
+        service.create("old-user")
+
+
+def test_password_rotation_preserves_accounting_history(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    log = tmp_path / "access.json"
+    log.write_text(json.dumps({
+        "request": {"method": "CONNECT"}, "status": 200, "user_id": "old-user",
+        "bytes_read": 5, "size": 7,
+    }) + "\n")
+    service.traffic = TrafficCollector(log, tmp_path / "traffic.sqlite3", service.managed_usernames)
+    service.traffic.collect()
+    created_at = next(
+        row["created_at"] for row in json.loads(service.state_file.read_text())["users"]
+        if row["username"] == "old-user"
+    )
+
+    service.rotate("old-user")
+
+    assert service.traffic.list_traffic()["users"][0]["total_bytes"] == 12
+    state = json.loads(service.state_file.read_text())
+    assert next(row["created_at"] for row in state["users"] if row["username"] == "old-user") == created_at
 
 
 @pytest.mark.skipif(not Path("/usr/local/bin/caddy").is_file(), reason="exact local Caddy is absent")

@@ -50,7 +50,7 @@ def _now() -> str:
 
 
 def _fsync_directory(path: Path) -> None:
-    directory = os.open(path, os.O_DIRECTORY)
+    directory = os.open(path, os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
     try:
         os.fsync(directory)
     finally:
@@ -70,8 +70,23 @@ def _durable_mkdir(path: Path, mode: int = 0o700) -> None:
         _fsync_directory(directory.parent)
 
 
+def _assert_safe_parent_chain(path: Path) -> None:
+    parent = path.absolute().parent
+    for directory in (*reversed(parent.parents), parent):
+        if directory == directory.parent:
+            continue
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ManagerConflict(f"refusing unsafe directory: {directory}")
+
+
 def _atomic_write(path: Path, data: bytes, mode: int = 0o600) -> None:
+    _assert_safe_parent_chain(path)
     _durable_mkdir(path.parent)
+    _assert_safe_parent_chain(path)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         os.fchmod(fd, mode)
@@ -98,6 +113,7 @@ def _durable_unlink(path: Path) -> None:
 
 
 def _assert_regular(path: Path) -> None:
+    _assert_safe_parent_chain(path)
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or path.is_symlink():
         raise ManagerConflict(f"refusing unsafe file: {path}")
@@ -126,7 +142,13 @@ class NaiveCredentialManager:
             self._recover_transaction()
         if self.state_file.exists():
             _assert_regular(self.state_file)
-            self._assert_consistent(self._read_state())
+            state = self._read_state()
+            text = self.caddyfile.read_text()
+            if ACCOUNTING_BEGIN not in text and ACCOUNTING_END not in text:
+                self._migrate_accounting(state, text)
+            else:
+                self._assert_consistent(state)
+            self._archive_tombstones(state)
             return
         text = self.caddyfile.read_text()
         users = [
@@ -141,7 +163,7 @@ class NaiveCredentialManager:
         ]
         if not users:
             raise ManagerConflict("no NaiveProxy credentials found for initial import")
-        state = {"version": 1, "host": self.public_host, "users": users}
+        state = {"version": 1, "host": self.public_host, "users": users, "tombstones": []}
         rendered = self._render_initial(text, state)
         _durable_mkdir(self.backup_dir)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
@@ -194,7 +216,8 @@ class NaiveCredentialManager:
             self._find(self._read_state(), username)
         if self.traffic is None:
             raise ManagerConflict("traffic accounting is unavailable")
-        self.traffic.collect()
+        if not self.traffic.drain():
+            raise ManagerConflict("traffic backlog remains pending")
         return self.traffic.reset(username)
 
     @synchronized
@@ -219,6 +242,8 @@ class NaiveCredentialManager:
         state = self._read_state()
         if any(row["username"] == username for row in state["users"]):
             raise ManagerConflict("user already exists")
+        if any(row["username"] == username for row in state["tombstones"]):
+            raise ManagerConflict("username is permanently retired")
         timestamp = _now()
         state["users"].append({
             "username": username,
@@ -252,8 +277,20 @@ class NaiveCredentialManager:
     def delete(self, username: str) -> None:
         state = self._read_state()
         self._find(state, username)
+        if self.traffic is None:
+            raise ManagerConflict("traffic accounting is unavailable")
+        if not self.traffic.drain():
+            raise ManagerConflict("traffic backlog remains pending")
         state["users"] = [row for row in state["users"] if row["username"] != username]
+        state["tombstones"].append({"username": username, "deleted_at": _now()})
         self._apply(state)
+        self.traffic.archive_user(username)
+
+    def _archive_tombstones(self, state: dict) -> None:
+        if self.traffic is None:
+            return
+        for row in state["tombstones"]:
+            self.traffic.archive_user(row["username"])
 
     def _apply(self, desired: dict) -> None:
         if self._recovery_failed or self._transaction_file.exists():
@@ -303,6 +340,58 @@ class NaiveCredentialManager:
         self._clear_transaction()
         self._prune_backups()
 
+    def _migrate_accounting(self, state: dict, text: str) -> None:
+        actual = self._managed_credentials(text)
+        expected = [(row["username"], row["password"]) for row in state["users"] if row["enabled"]]
+        if actual != expected:
+            raise ManagerConflict("managed Caddy credentials changed outside manager")
+        self._validate_config(self.caddyfile)
+        rendered = self._render_accounting_migration(text)
+        config_before = self.caddyfile.read_bytes()
+        state_before = self.state_file.read_bytes()
+        _durable_mkdir(self.backup_dir)
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+        config_backup = self.backup_dir / f"{stamp}.Caddyfile"
+        state_backup = self.backup_dir / f"{stamp}.users.json"
+        _atomic_write(config_backup, config_before)
+        _atomic_write(state_backup, state_before)
+        transaction = {
+            "version": 1,
+            "phase": "prepared",
+            "config_backup": config_backup.name,
+            "state_backup": state_backup.name,
+            "operation": "accounting_migration",
+        }
+        self._write_transaction(transaction)
+        try:
+            self._write_validated_config(rendered)
+            _atomic_write(self.state_file, state_before)
+            transaction["phase"] = "files_replaced"
+            self._write_transaction(transaction)
+            transaction["phase"] = "rollback_pending"
+            self._write_transaction(transaction)
+            self.reload()
+            self.probe()
+        except BaseException as operation_error:
+            self._recovery_failed = True
+            recovery_from = transaction["phase"]
+            transaction["phase"] = "recovery_failed"
+            transaction["recovery_from"] = recovery_from
+            try:
+                self._write_transaction(transaction)
+                _atomic_write(self.caddyfile, config_before, self.caddyfile_mode)
+                _atomic_write(self.state_file, state_before)
+                self._validate_config(self.caddyfile)
+                self.reload()
+                self.probe()
+            except Exception as rollback_error:
+                raise ManagerRecoveryError("rollback failed; manager requires recovery") from rollback_error
+            self._clear_transaction()
+            self._recovery_failed = False
+            raise operation_error
+        self._clear_transaction()
+        self._prune_backups()
+
     def _write_validated_config(self, rendered: str) -> None:
         _durable_mkdir(self.caddyfile.parent)
         fd, temporary = tempfile.mkstemp(prefix=".Caddyfile.naive.", dir=self.caddyfile.parent)
@@ -328,6 +417,11 @@ class NaiveCredentialManager:
             raise ManagerConflict("invalid manager state") from exc
         if state.get("version") != 1 or state.get("host") != self.public_host or not isinstance(state.get("users"), list):
             raise ManagerConflict("unsupported manager state")
+        if set(state) - {"version", "host", "users", "tombstones"}:
+            raise ManagerConflict("unsupported manager state")
+        state.setdefault("tombstones", [])
+        if not isinstance(state["tombstones"], list):
+            raise ManagerConflict("invalid tombstone state")
         seen = set()
         for row in state["users"]:
             if not isinstance(row, dict):
@@ -336,6 +430,18 @@ class NaiveCredentialManager:
             if row["username"] in seen or not isinstance(row.get("password"), str) or not row["password"]:
                 raise ManagerConflict("invalid user state")
             seen.add(row["username"])
+        retired = set()
+        for row in state["tombstones"]:
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"username", "deleted_at"}
+                or not isinstance(row.get("deleted_at"), str)
+            ):
+                raise ManagerConflict("invalid tombstone state")
+            self._valid_username(row.get("username", ""))
+            if row["username"] in seen or row["username"] in retired:
+                raise ManagerConflict("invalid tombstone state")
+            retired.add(row["username"])
         return copy.deepcopy(state)
 
     @property
@@ -357,6 +463,11 @@ class NaiveCredentialManager:
         ):
             raise ManagerRecoveryError("invalid transaction journal")
         base_keys = {"version", "phase", "config_backup", "state_backup"}
+        operation = transaction.get("operation")
+        if operation is not None:
+            if operation != "accounting_migration":
+                raise ManagerRecoveryError("invalid transaction journal")
+            base_keys.add("operation")
         phase = transaction["phase"]
         if phase == "bootstrap_prepared":
             allowed_keys = base_keys | {"state_existed"}
@@ -419,13 +530,30 @@ class NaiveCredentialManager:
             self.reload()
             self.probe()
 
+        def activate_pre_accounting() -> None:
+            state = self._read_state()
+            text = self.caddyfile.read_text()
+            actual = self._managed_credentials(text)
+            expected = [
+                (row["username"], row["password"])
+                for row in state["users"] if row["enabled"]
+            ]
+            if actual != expected:
+                raise ManagerConflict("managed Caddy credentials changed outside manager")
+            self._validate_config(self.caddyfile)
+            self.reload()
+            self.probe()
+
         try:
             if original_phase == "bootstrap_prepared":
                 restore_backups()
                 self._clear_transaction()
                 self._recovery_failed = False
                 return
-            if original_phase in {"prepared", "rollback_pending", "recovery_failed"}:
+            if transaction.get("operation") == "accounting_migration":
+                restore_backups()
+                activate_pre_accounting()
+            elif original_phase in {"prepared", "rollback_pending", "recovery_failed"}:
                 restore_backups()
                 activate_current()
             else:
@@ -582,6 +710,20 @@ class NaiveCredentialManager:
         lines[start:end + 1] = cls._credential_lines(state, indent)
         return "\n".join(lines) + "\n"
 
+    @classmethod
+    def _render_accounting_migration(cls, text: str) -> str:
+        lines = text.splitlines()
+        if any(line.strip() in {ACCOUNTING_BEGIN, ACCOUNTING_END} for line in lines):
+            raise ManagerConflict("partial accounting markers are not migratable")
+        cls._managed_bounds(lines)
+        route_indexes = [i for i, line in enumerate(lines) if re.match(r"^\s*route\s*\{", line)]
+        if len(route_indexes) != 1:
+            raise ManagerConflict("exactly one route block is required")
+        route_index = route_indexes[0]
+        indent = re.match(r"^(\s*)", lines[route_index]).group(1)
+        lines[route_index:route_index] = cls._accounting_lines(indent)
+        return "\n".join(lines) + "\n"
+
     @staticmethod
     def _credential_lines(state: dict, indent: str) -> list[str]:
         rows = [f"{indent}basic_auth {row['username']} {row['password']}" for row in state["users"] if row["enabled"]]
@@ -595,7 +737,7 @@ class NaiveCredentialManager:
             f"{indent}{ACCOUNTING_BEGIN}",
             f"{indent}log naive_accounting {{",
             f"{inner}output file /var/log/naive-proxy/access.json {{",
-            f"{deep}mode 0600",
+            f"{deep}mode 0640",
             f"{deep}roll_size 10MiB",
             f"{deep}roll_keep 10",
             f"{deep}roll_keep_for 168h",

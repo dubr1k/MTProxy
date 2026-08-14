@@ -6,16 +6,37 @@ import os
 import sqlite3
 import stat
 import threading
+from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
 
 MAX_COUNTER = 2**63 - 1
+FINGERPRINT_SAMPLE_BYTES = 4096
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _assert_safe_parent_chain(path: Path) -> None:
+    parent = path.absolute().parent
+    for directory in reversed(parent.parents):
+        if directory == directory.parent:
+            continue
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError("accounting path parent is unsafe")
+    try:
+        info = parent.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError("accounting path parent is unsafe")
 
 
 class TrafficCollector:
@@ -29,17 +50,30 @@ class TrafficCollector:
         *,
         max_line_bytes: int = 1024 * 1024,
         max_read_bytes: int = 8 * 1024 * 1024,
+        max_drain_rounds: int = 16,
+        max_rotations: int = 10,
+        max_directory_entries: int = 4096,
     ) -> None:
         self.log_path = Path(log_path)
         self.database_path = Path(database_path)
         self.managed_users = managed_users
         self.max_line_bytes = max_line_bytes
         self.max_read_bytes = max_read_bytes
+        self.max_drain_rounds = max_drain_rounds
+        self.max_rotations = max_rotations
+        self.max_directory_entries = max_directory_entries
         if self.max_line_bytes <= 0 or self.max_read_bytes <= self.max_line_bytes:
             raise ValueError("max_read_bytes must be greater than max_line_bytes")
+        if self.max_drain_rounds <= 0:
+            raise ValueError("max_drain_rounds must be positive")
+        if self.max_rotations < 0 or self.max_directory_entries <= self.max_rotations:
+            raise ValueError("invalid accounting directory bounds")
         self._lock = threading.RLock()
         self._last_error: str | None = None
+        _assert_safe_parent_chain(self.log_path)
+        _assert_safe_parent_chain(self.database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        _assert_safe_parent_chain(self.database_path)
         if self.database_path.is_symlink():
             raise RuntimeError("accounting database is unsafe")
         if self.database_path.exists():
@@ -63,6 +97,11 @@ class TrafficCollector:
                 path TEXT NOT NULL,
                 tail_digest BLOB,
                 discarding INTEGER NOT NULL DEFAULT 0 CHECK(discarding IN (0, 1)),
+                observed_mtime_ns INTEGER,
+                observed_ctime_ns INTEGER,
+                file_size INTEGER,
+                observed_head_digest BLOB,
+                observed_tail_digest BLOB,
                 PRIMARY KEY(device, inode)
             );
             CREATE TABLE IF NOT EXISTS traffic_counters (
@@ -72,6 +111,14 @@ class TrafficCollector:
                 period_start TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS traffic_archives (
+                username TEXT PRIMARY KEY,
+                upload_bytes INTEGER NOT NULL CHECK(upload_bytes >= 0),
+                download_bytes INTEGER NOT NULL CHECK(download_bytes >= 0),
+                period_start TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                archived_at TEXT NOT NULL
+            );
             """
         )
         columns = {row[1] for row in self._db.execute("PRAGMA table_info(traffic_files)")}
@@ -80,6 +127,16 @@ class TrafficCollector:
                 "ALTER TABLE traffic_files ADD COLUMN discarding INTEGER NOT NULL DEFAULT 0 "
                 "CHECK(discarding IN (0, 1))"
             )
+        if "observed_mtime_ns" not in columns:
+            self._db.execute("ALTER TABLE traffic_files ADD COLUMN observed_mtime_ns INTEGER")
+        if "observed_ctime_ns" not in columns:
+            self._db.execute("ALTER TABLE traffic_files ADD COLUMN observed_ctime_ns INTEGER")
+        if "file_size" not in columns:
+            self._db.execute("ALTER TABLE traffic_files ADD COLUMN file_size INTEGER")
+        if "observed_head_digest" not in columns:
+            self._db.execute("ALTER TABLE traffic_files ADD COLUMN observed_head_digest BLOB")
+        if "observed_tail_digest" not in columns:
+            self._db.execute("ALTER TABLE traffic_files ADD COLUMN observed_tail_digest BLOB")
         self._db.commit()
         self._secure_database_files()
 
@@ -114,13 +171,32 @@ class TrafficCollector:
             raise RuntimeError("accounting log is not a regular file")
         return fd, info
 
+    @staticmethod
+    def _sample_digest(fd: int, start: int, length: int) -> bytes:
+        data = os.pread(fd, length, start)
+        if len(data) != length:
+            raise RuntimeError("accounting log changed while being inspected")
+        return hashlib.sha256(data).digest()
+
+    @classmethod
+    def _observed_fingerprint(cls, fd: int, size: int) -> tuple[bytes, bytes]:
+        sample = min(FINGERPRINT_SAMPLE_BYTES, size)
+        return cls._sample_digest(fd, 0, sample), cls._sample_digest(fd, size - sample, sample)
+
     def _candidates(self) -> list[Path]:
         parent = self.log_path.parent
         try:
-            entries = list(parent.iterdir())
+            candidates = []
+            with os.scandir(parent) as entries:
+                for scanned, entry in enumerate(entries, 1):
+                    if scanned > self.max_directory_entries:
+                        raise RuntimeError("accounting log directory entry limit exceeded")
+                    if entry.name == self.log_path.name or entry.name.startswith(self.log_path.name + "."):
+                        candidates.append(Path(entry.path))
+                        if len(candidates) > self.max_rotations + 1:
+                            raise RuntimeError("accounting log rotation limit exceeded")
         except OSError as exc:
             raise RuntimeError("accounting log directory unavailable") from exc
-        candidates = [entry for entry in entries if entry.name == self.log_path.name or entry.name.startswith(self.log_path.name + ".")]
         if self.log_path not in candidates:
             raise RuntimeError("active accounting log is missing")
         # Process oldest rotations first and the active inode last. Identity+offset
@@ -131,43 +207,55 @@ class TrafficCollector:
         )
 
     def collect(self) -> int:
+        users = self.managed_users()
+        if not isinstance(users, set) or any(not isinstance(value, str) for value in users):
+            raise RuntimeError("managed-user state unavailable")
+        users = frozenset(users)
         with self._lock:
             accepted = 0
             try:
-                users = self.managed_users()
-                if not isinstance(users, set) or any(not isinstance(value, str) for value in users):
-                    raise RuntimeError("managed-user state unavailable")
                 budget = self.max_read_bytes
-                for path in self._candidates():
+                candidates = self._candidates()
+                for path in candidates:
                     if budget <= 0:
                         break
                     count, consumed = self._collect_file(path, users, budget)
                     accepted += count
                     budget -= consumed
+                self._prune_consumed_deleted(candidates)
                 self._last_error = None
                 return accepted
             except Exception as exc:
                 self._last_error = type(exc).__name__
                 raise
 
-    def _collect_file(self, path: Path, users: set[str], budget: int) -> tuple[int, int]:
+    def _collect_file(self, path: Path, users: AbstractSet[str], budget: int) -> tuple[int, int]:
         fd, info = self._open_regular(path)
         identity = (info.st_dev, info.st_ino)
         try:
             row = self._db.execute(
-                "SELECT offset,tail_digest,discarding FROM traffic_files WHERE device=? AND inode=?", identity
+                "SELECT offset,tail_digest,discarding,path,observed_mtime_ns,observed_ctime_ns,"
+                "file_size,observed_head_digest,observed_tail_digest "
+                "FROM traffic_files WHERE device=? AND inode=?", identity
             ).fetchone()
             offset = int(row[0]) if row else 0
             discarding = bool(row[2]) if row else False
-            if row and offset:
+            if row:
                 probe_start = max(0, offset - 64)
-                os.lseek(fd, probe_start, os.SEEK_SET)
-                actual_tail = hashlib.sha256(os.read(fd, offset - probe_start)).digest()
+                actual_tail = self._sample_digest(fd, probe_start, offset - probe_start)
             else:
                 actual_tail = None
             if info.st_size < offset or (row and row[1] is not None and actual_tail != row[1]):
-                offset = 0
-                discarding = False
+                raise RuntimeError("accounting log violates rename-only rotation contract")
+            if row and row[6] is not None and row[7] is not None and row[8] is not None:
+                observed_size = int(row[6])
+                if info.st_size < observed_size:
+                    raise RuntimeError("accounting log violates rename-only rotation contract")
+                sample = min(FINGERPRINT_SAMPLE_BYTES, observed_size)
+                observed_head = self._sample_digest(fd, 0, sample)
+                observed_tail = self._sample_digest(fd, observed_size - sample, sample)
+                if observed_head != row[7] or observed_tail != row[8]:
+                    raise RuntimeError("accounting log violates rename-only rotation contract")
             os.lseek(fd, offset, os.SEEK_SET)
             data = os.read(fd, min(budget, info.st_size - offset))
 
@@ -198,12 +286,20 @@ class TrafficCollector:
             tail_start = max(0, new_offset - 64)
             os.lseek(fd, tail_start, os.SEEK_SET)
             tail_digest = hashlib.sha256(os.read(fd, new_offset - tail_start)).digest()
+            observed_head_digest, observed_tail_digest = self._observed_fingerprint(fd, info.st_size)
         finally:
             os.close(fd)
 
         accepted = 0
         increments: dict[str, tuple[int, int]] = {}
         existing_totals: dict[str, tuple[int, int]] = {}
+        global_total = sum(
+            int(upload) + int(download)
+            for upload, download in self._db.execute(
+                "SELECT upload_bytes,download_bytes FROM traffic_counters"
+            ).fetchall()
+        )
+        pending_global = 0
         for raw in complete.splitlines():
             parsed = self._parse(raw, users)
             if parsed is None:
@@ -220,18 +316,30 @@ class TrafficCollector:
             if (
                 base[0] > MAX_COUNTER - prior[0] - upload
                 or base[1] > MAX_COUNTER - prior[1] - download
+                or base[0] + base[1] > MAX_COUNTER - prior[0] - prior[1] - upload - download
+                or global_total > MAX_COUNTER - pending_global - upload - download
             ):
                 continue
             increments[username] = (prior[0] + upload, prior[1] + download)
+            pending_global += upload + download
             accepted += 1
         now = _now()
         with self._db:
             self._db.execute(
-                "INSERT INTO traffic_files(device,inode,offset,path,tail_digest,discarding) VALUES(?,?,?,?,?,?) "
+                "INSERT INTO traffic_files(device,inode,offset,path,tail_digest,discarding,"
+                "observed_mtime_ns,observed_ctime_ns,file_size,observed_head_digest,"
+                "observed_tail_digest) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(device,inode) DO UPDATE SET "
                 "offset=excluded.offset,path=excluded.path,tail_digest=excluded.tail_digest,"
-                "discarding=excluded.discarding",
-                (*identity, new_offset, str(path), tail_digest, int(discarding)),
+                "discarding=excluded.discarding,observed_mtime_ns=excluded.observed_mtime_ns,"
+                "observed_ctime_ns=excluded.observed_ctime_ns,file_size=excluded.file_size,"
+                "observed_head_digest=excluded.observed_head_digest,"
+                "observed_tail_digest=excluded.observed_tail_digest",
+                (
+                    *identity, new_offset, str(path), tail_digest, int(discarding),
+                    info.st_mtime_ns, info.st_ctime_ns, info.st_size,
+                    observed_head_digest, observed_tail_digest,
+                ),
             )
             for username, (upload, download) in increments.items():
                 self._db.execute(
@@ -244,7 +352,27 @@ class TrafficCollector:
         self._secure_database_files()
         return accepted, len(data)
 
-    def _parse(self, raw: bytes, users: set[str]) -> tuple[str, int, int] | None:
+    def _prune_consumed_deleted(self, candidates: list[Path]) -> None:
+        present = set()
+        for path in candidates:
+            fd, info = self._open_regular(path)
+            os.close(fd)
+            present.add((info.st_dev, info.st_ino))
+        with self._db:
+            for device, inode, offset, size, discarding in self._db.execute(
+                "SELECT device,inode,offset,file_size,discarding FROM traffic_files"
+            ).fetchall():
+                if (
+                    (device, inode) not in present
+                    and size is not None
+                    and int(offset) == int(size)
+                    and not discarding
+                ):
+                    self._db.execute(
+                        "DELETE FROM traffic_files WHERE device=? AND inode=?", (device, inode)
+                    )
+
+    def _parse(self, raw: bytes, users: AbstractSet[str]) -> tuple[str, int, int] | None:
         if not raw or len(raw) > self.max_line_bytes:
             return None
         try:
@@ -293,6 +421,14 @@ class TrafficCollector:
         except (OSError, RuntimeError):
             return True
 
+    def drain(self) -> bool:
+        for _ in range(self.max_drain_rounds):
+            self.collect()
+            with self._lock:
+                if not self._pending():
+                    return True
+        return False
+
     def list_traffic(self) -> dict:
         with self._lock:
             rows = self._db.execute(
@@ -305,6 +441,9 @@ class TrafficCollector:
                     "upload_bytes": upload,
                     "download_bytes": download,
                     "total_bytes": upload + download,
+                    "upload_bytes_decimal": str(upload),
+                    "download_bytes_decimal": str(download),
+                    "total_bytes_decimal": str(upload + download),
                     "period_start": period_start,
                     "updated_at": updated_at,
                 }
@@ -314,6 +453,14 @@ class TrafficCollector:
                 "upload_bytes": sum(row["upload_bytes"] for row in users),
                 "download_bytes": sum(row["download_bytes"] for row in users),
                 "total_bytes": sum(row["total_bytes"] for row in users),
+            }
+            if aggregate["total_bytes"] > MAX_COUNTER:
+                raise RuntimeError("accounting counter invariant violated")
+            aggregate = {
+                **aggregate,
+                "upload_bytes_decimal": str(aggregate["upload_bytes"]),
+                "download_bytes_decimal": str(aggregate["download_bytes"]),
+                "total_bytes_decimal": str(aggregate["total_bytes"]),
             }
             return {
                 "source": "caddy_connect_access_log",
@@ -335,6 +482,23 @@ class TrafficCollector:
                 },
             }
 
+    def archive_user(self, username: str) -> None:
+        now = _now()
+        with self._lock, self._db:
+            row = self._db.execute(
+                "SELECT upload_bytes,download_bytes,period_start,updated_at "
+                "FROM traffic_counters WHERE username=?", (username,),
+            ).fetchone()
+            if row is not None:
+                self._db.execute(
+                    "INSERT INTO traffic_archives(username,upload_bytes,download_bytes,period_start,"
+                    "updated_at,archived_at) VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(username) DO NOTHING",
+                    (username, *row, now),
+                )
+                self._db.execute("DELETE FROM traffic_counters WHERE username=?", (username,))
+        self._secure_database_files()
+
     def reset(self, username: str) -> dict:
         users = self.managed_users()
         if username not in users:
@@ -352,6 +516,9 @@ class TrafficCollector:
             "upload_bytes": 0,
             "download_bytes": 0,
             "total_bytes": 0,
+            "upload_bytes_decimal": "0",
+            "download_bytes_decimal": "0",
+            "total_bytes_decimal": "0",
             "period_start": now,
             "updated_at": now,
         }

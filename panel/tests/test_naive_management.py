@@ -20,6 +20,8 @@ async def test_naive_list_is_secret_free_and_viewer_is_read_only(client, login_u
         "items": [{
             "username": "phone", "enabled": True, "upload_bytes": 0,
             "download_bytes": 0, "total_bytes": 0,
+            "upload_bytes_decimal": "0", "download_bytes_decimal": "0",
+            "total_bytes_decimal": "0",
             "period_start": naive.period_start, "updated_at": naive.period_start,
         }],
         "service": {"ready": True, "host": "naive.example.com"},
@@ -209,6 +211,8 @@ async def test_naive_traffic_is_allowlisted_in_users_and_dashboard_and_admin_can
     dashboard = (await client.get("/api/dashboard")).json()["protocols"]["naive"]["traffic"]
     assert dashboard["aggregate"] == {
         "upload_bytes": 12345, "download_bytes": 67890, "total_bytes": 80235,
+        "upload_bytes_decimal": "12345", "download_bytes_decimal": "67890",
+        "total_bytes_decimal": "80235",
     }
     csrf = client.cookies["panel_csrf"]
     reset = await client.post(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 from pathlib import Path
 
@@ -37,6 +38,8 @@ def test_exact_connect_directions_are_durable_and_idempotent(tmp_path):
     assert traffic.list_traffic()["users"][0] | {"period_start": "x", "updated_at": "x"} == {
         "username": "alice", "upload_bytes": 12345, "download_bytes": 12345,
         "total_bytes": 24690, "period_start": "x", "updated_at": "x",
+        "upload_bytes_decimal": "12345", "download_bytes_decimal": "12345",
+        "total_bytes_decimal": "24690",
     }
     assert traffic.collect() == 0
     traffic.close()
@@ -90,7 +93,7 @@ def test_record_larger_than_read_budget_is_durably_quarantined_then_progresses(t
     assert restarted.list_traffic()["pending"] is False
 
 
-def test_rotation_and_copytruncate_are_processed_once(tmp_path):
+def test_rename_rotation_is_processed_once(tmp_path):
     traffic, log = collector(tmp_path)
     log.write_text(record(upload=1, download=2))
     assert traffic.collect() == 1
@@ -99,9 +102,30 @@ def test_rotation_and_copytruncate_are_processed_once(tmp_path):
     log.write_text(record(upload=3, download=4))
     assert traffic.collect() == 1
     assert traffic.collect() == 0
-    log.write_text(record(upload=5, download=6))  # copytruncate
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 10
+
+
+def test_same_size_same_tail_copytruncate_fails_closed(tmp_path):
+    traffic, log = collector(tmp_path)
+    first = record(upload=1, download=2, padding="x" * 160)
+    replacement = record(upload=7, download=8, padding="x" * 160)
+    assert len(first) == len(replacement)
+    assert first[-64:] == replacement[-64:]
+    log.write_text(first)
     assert traffic.collect() == 1
-    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 21
+
+    log.write_text(replacement)
+    # Prove the decision is based on persisted content, not mutable metadata.
+    current = log.stat()
+    with sqlite3.connect(tmp_path / "traffic.sqlite3") as database:
+        database.execute(
+            "UPDATE traffic_files SET observed_mtime_ns=?,observed_ctime_ns=?",
+            (current.st_mtime_ns, current.st_ctime_ns),
+        )
+
+    with pytest.raises(RuntimeError, match="rename-only"):
+        traffic.collect()
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 3
 
 
 def test_strict_filtering_rejects_unknown_sentinels_bad_schema_and_oversize(tmp_path):
@@ -120,6 +144,8 @@ def test_strict_filtering_rejects_unknown_sentinels_bad_schema_and_oversize(tmp_
     assert traffic.collect() == 1
     assert traffic.list_traffic()["aggregate"] == {
         "upload_bytes": 2, "download_bytes": 3, "total_bytes": 5,
+        "upload_bytes_decimal": "2", "download_bytes_decimal": "3",
+        "total_bytes_decimal": "5",
     }
 
 
@@ -177,12 +203,36 @@ def test_database_and_wal_are_private_and_database_symlinks_are_rejected(tmp_pat
         TrafficCollector(unsafe_log, unsafe_database, lambda: {"alice"})
 
 
+def test_log_and_database_parent_symlinks_are_rejected(tmp_path):
+    real_logs = tmp_path / "real-logs"
+    real_logs.mkdir()
+    (real_logs / "access.json").write_text("")
+    linked_logs = tmp_path / "linked-logs"
+    linked_logs.symlink_to(real_logs, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="unsafe"):
+        TrafficCollector(
+            linked_logs / "access.json", tmp_path / "traffic.sqlite3", lambda: {"alice"},
+        )
+
+    safe_logs = tmp_path / "safe-logs"
+    safe_logs.mkdir()
+    (safe_logs / "access.json").write_text("")
+    real_data = tmp_path / "real-data"
+    real_data.mkdir()
+    linked_data = tmp_path / "linked-data"
+    linked_data.symlink_to(real_data, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="unsafe"):
+        TrafficCollector(
+            safe_logs / "access.json", linked_data / "traffic.sqlite3", lambda: {"alice"},
+        )
+
+
 def test_counter_overflow_is_quarantined_without_wrapping_or_replay(tmp_path):
     traffic, log = collector(tmp_path)
     log.write_text(record(upload=2**63 - 1, download=0))
     assert traffic.collect() == 1
     with log.open("a") as stream:
-        stream.write(record(upload=1, download=0))
+        stream.write(record(upload=0, download=1))
     assert traffic.collect() == 0
     assert traffic.collect() == 0
     assert traffic.list_traffic()["aggregate"]["total_bytes"] == 2**63 - 1
@@ -205,3 +255,70 @@ def test_contract_is_secret_free_and_documents_accounting_limits(tmp_path):
     assert body["semantics"]["excludes_tls_ip_overhead"] is True
     assert body["semantics"]["reset_is_local_baseline_only"] is True
     assert "password" not in json.dumps(body).lower()
+
+
+def test_rotation_candidates_are_bounded_before_collection(tmp_path):
+    log = tmp_path / "logs" / "access.json"
+    log.parent.mkdir()
+    log.write_text("")
+    for index in range(3):
+        log.with_name(f"access.json.{index}").write_text(record(upload=1, download=1))
+    traffic = TrafficCollector(
+        log, tmp_path / "traffic.sqlite3", lambda: {"alice"}, max_rotations=2,
+    )
+
+    with pytest.raises(RuntimeError, match="rotation limit"):
+        traffic.collect()
+
+
+def test_safely_consumed_deleted_rotation_state_is_pruned(tmp_path):
+    traffic, log = collector(tmp_path)
+    log.write_text(record(upload=1, download=2))
+    traffic.collect()
+    rotated = log.with_name("access.json.1")
+    os.rename(log, rotated)
+    log.write_text(record(upload=3, download=4))
+    traffic.collect()
+    rotated.unlink()
+
+    traffic.collect()
+
+    with sqlite3.connect(tmp_path / "traffic.sqlite3") as database:
+        assert database.execute("SELECT COUNT(*) FROM traffic_files").fetchone()[0] == 1
+
+
+def test_archiving_deleted_user_removes_live_counter_without_losing_history(tmp_path):
+    traffic, log = collector(tmp_path)
+    log.write_text(record(upload=11, download=13))
+    assert traffic.collect() == 1
+
+    traffic.archive_user("alice")
+
+    assert traffic.list_traffic()["users"] == []
+    with sqlite3.connect(tmp_path / "traffic.sqlite3") as database:
+        assert database.execute(
+            "SELECT username,upload_bytes,download_bytes FROM traffic_archives"
+        ).fetchall() == [("alice", 11, 13)]
+
+
+def test_aggregate_counter_never_exceeds_signed_sqlite_integer(tmp_path):
+    traffic, log = collector(tmp_path)
+    log.write_text(record(user="alice", upload=2**63 - 2, download=0))
+    assert traffic.collect() == 1
+    with log.open("a") as stream:
+        stream.write(record(user="bob", upload=2, download=0))
+
+    assert traffic.collect() == 0
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 2**63 - 2
+
+
+def test_counter_contract_includes_exact_decimal_strings(tmp_path):
+    traffic, log = collector(tmp_path)
+    log.write_text(record(upload=2**53 + 1, download=2))
+    traffic.collect()
+
+    body = traffic.list_traffic()
+
+    assert body["users"][0]["upload_bytes_decimal"] == "9007199254740993"
+    assert body["users"][0]["total_bytes_decimal"] == "9007199254740995"
+    assert body["aggregate"]["total_bytes_decimal"] == "9007199254740995"

@@ -238,11 +238,18 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
                 continue
             if values[0] + values[1] != values[2]:
                 continue
+            decimals = [row.get(f"{key}_decimal", str(value)) for key, value in zip(
+                ("upload_bytes", "download_bytes", "total_bytes"), values, strict=True,
+            )]
+            if any(decimal != str(value) for decimal, value in zip(decimals, values, strict=True)):
+                continue
             if not isinstance(row.get("period_start"), str) or not isinstance(row.get("updated_at"), str):
                 continue
             rows.append({
                 "username": row["username"], "upload_bytes": values[0],
                 "download_bytes": values[1], "total_bytes": values[2],
+                "upload_bytes_decimal": decimals[0], "download_bytes_decimal": decimals[1],
+                "total_bytes_decimal": decimals[2],
                 "period_start": row["period_start"], "updated_at": row["updated_at"],
             })
         directions = {"upload_bytes": "client_to_proxy", "download_bytes": "proxy_to_client"}
@@ -254,13 +261,18 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
             "crash_can_lose_active_tunnel", "completed_records_survive_restart",
             "excludes_tls_ip_overhead", "reset_is_local_baseline_only",
         )
+        upload_total = sum(row["upload_bytes"] for row in rows)
+        download_total = sum(row["download_bytes"] for row in rows)
+        total = sum(row["total_bytes"] for row in rows)
+        if total > 2**63 - 1:
+            raise NaiveError("Invalid NaiveProxy traffic response")
         return {
             "source": "caddy_connect_access_log", "unit": "bytes", "directions": directions,
             "pending": data.get("pending") is True,
             "aggregate": {
-                "upload_bytes": sum(row["upload_bytes"] for row in rows),
-                "download_bytes": sum(row["download_bytes"] for row in rows),
-                "total_bytes": sum(row["total_bytes"] for row in rows),
+                "upload_bytes": upload_total, "download_bytes": download_total,
+                "total_bytes": total, "upload_bytes_decimal": str(upload_total),
+                "download_bytes_decimal": str(download_total), "total_bytes_decimal": str(total),
             },
             "users": rows,
             "semantics": {key: semantics[key] for key in semantic_keys if type(semantics.get(key)) is bool},
@@ -562,7 +574,8 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
                 "username": item.get("username"), "enabled": item.get("enabled") is True,
                 **by_username.get(item.get("username"), {
                     "upload_bytes": 0, "download_bytes": 0, "total_bytes": 0,
-                    "period_start": "", "updated_at": "",
+                    "upload_bytes_decimal": "0", "download_bytes_decimal": "0",
+                    "total_bytes_decimal": "0", "period_start": "", "updated_at": "",
                 }),
             }
             for item in items if isinstance(item, dict) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(item.get("username", "")))

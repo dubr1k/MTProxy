@@ -63,31 +63,36 @@ Before first start, copy the active Caddyfile to `${NAIVE_DATA_DIR}/Caddyfile`, 
 ```sh
 NAIVE_DATA_DIR=${NAIVE_DATA_DIR:-/var/lib/naive-manager}
 test ! -L "${NAIVE_DATA_DIR}" || { echo "NAIVE_DATA_DIR must not be a symlink" >&2; exit 1; }
-getent group naive-caddy >/dev/null || groupadd --system --gid 101 naive-caddy
-id naive-caddy >/dev/null 2>&1 || useradd --system --uid 10002 --gid naive-caddy --home /nonexistent --shell /usr/sbin/nologin naive-caddy
-test "$(id -u naive-caddy)" = 10002 || { echo "naive-caddy must use UID 10002" >&2; exit 1; }
-test "$(getent group naive-caddy | cut -d: -f3)" = 101 || { echo "naive-caddy must use GID 101" >&2; exit 1; }
-install -d -o 10002 -g 101 -m 0750 "${NAIVE_DATA_DIR}"
-install -d -o naive-caddy -g naive-caddy -m 0700 /var/log/naive-proxy
+# Fail closed if the fixed production IDs belong to another account/group.
+uid_name=$(getent passwd 10003 | cut -d: -f1 || true)
+gid_name=$(getent group 10004 | cut -d: -f1 || true)
+test -z "${uid_name}" -o "${uid_name}" = naive-caddy || { echo "UID 10003 collision: ${uid_name}" >&2; exit 1; }
+test -z "${gid_name}" -o "${gid_name}" = naive-accounting || { echo "GID 10004 collision: ${gid_name}" >&2; exit 1; }
+getent group naive-accounting >/dev/null || groupadd --system --gid 10004 naive-accounting
+id naive-caddy >/dev/null 2>&1 || useradd --system --uid 10003 --gid naive-accounting --home /nonexistent --shell /usr/sbin/nologin naive-caddy
+test "$(id -u naive-caddy)" = 10003 || { echo "naive-caddy must use UID 10003" >&2; exit 1; }
+test "$(id -g naive-caddy)" = 10004 || { echo "naive-caddy must use GID 10004" >&2; exit 1; }
+# UID 10002/GID 101 remain the manager identity; GID 10004 is read-only supplementary access.
+install -d -o 10002 -g 101 -m 0700 "${NAIVE_DATA_DIR}"
+install -d -o 10003 -g 10004 -m 0750 /var/log/naive-proxy
 for file in Caddyfile manager-token; do
   test -f "${NAIVE_DATA_DIR}/${file}" && test ! -L "${NAIVE_DATA_DIR}/${file}" || exit 1
 done
 chown -h 10002:101 "${NAIVE_DATA_DIR}/Caddyfile" "${NAIVE_DATA_DIR}/manager-token"
 chmod 0640 "${NAIVE_DATA_DIR}/Caddyfile"
 chmod 0400 "${NAIVE_DATA_DIR}/manager-token"
-chown 10002:101 "${NAIVE_DATA_DIR}"
 docker compose -f compose.yaml -f compose.naive.yaml run --rm --build naive-manager --bootstrap-only
-caddy validate --config /var/lib/naive-manager/Caddyfile
+caddy adapt --adapter caddyfile --validate --config "${NAIVE_DATA_DIR}/Caddyfile" >/dev/null
 install -o root -g root -m 0755 scripts/check-naive-caddy-build.sh /usr/local/libexec/check-naive-caddy-build
 install -o root -g root -m 0644 deploy/caddy-naive.service /etc/systemd/system/caddy-naive.service
 systemctl daemon-reload
 ```
 
-The container manager and host Caddy deliberately share the dedicated file identity `10002:101`; this is required for Caddy's mode-`0600` access log to remain readable through the manager's read-only bind mount. The systemd unit compensates by making the token, state, journal, backups, traffic DB, and WAL paths inaccessible inside Caddy's mount namespace. It otherwise has a strict filesystem sandbox and can write only `/var/log/naive-proxy`. Verify `systemd-analyze verify`, inspect `systemctl show caddy-naive -p User -p Group`, and confirm the sensitive paths are unreadable from the running service namespace before cutover.
+Host Caddy and the container manager have separate identities: Caddy is UID `10003`, while the manager remains `10002:101` and receives only supplementary accounting GID `10004`. `/var/log/naive-proxy` is `10003:10004` mode `0750`; Caddy creates mode-`0640` logs, so the manager can read but cannot create, truncate, rename, or append them. Manager data remains `10002:101` mode `0700`. At Caddy start and systemd reload, privileged `install` stages the manager-owned source as `/run/caddy-naive/Caddyfile` (`10003:10004`, `0400`) in a mode-`0700` runtime directory. Caddy cannot traverse `/var/lib/naive-manager` at runtime. Manager-driven mutations do not use the staged file: they adapt and validate the just-written source through the loopback admin API and send that exact JSON to `/load`, preserving transactional rollback without a stale-stage window. Verify `systemd-analyze verify`, inspect `systemctl show caddy-naive -p User -p Group`, and confirm the manager cannot append the log while Caddy cannot read manager state before cutover.
 
-For migration, first stop mutations, back up the active unit, Caddy binary, Caddyfile, manager data, and log directory; install the pinned binary and checker; run the checker and exact `caddy adapt --validate`; bootstrap the manager; then switch the unit and start the Compose override. Do not delete the old unit or backup until health, cover HTTPS, authenticated CONNECT, traffic collection, and all adjacent SNI routes pass. Every later credential mutation follows paired backup → Caddy adapt with `validate=true` → fsync journal → atomic replace → Caddy `/load` → HTTPS probe. Failure restores both files and verifies the restored live generation. An unconfirmed rollback leaves the manager unhealthy and keeps the journal for startup recovery.
+For migration, first stop manager mutations and Caddy, then back up the active unit, binary, Caddyfile, manager data, and log directory. Run the UID/GID collision preflight before changing ownership; create the separate identities and permissions; install the pinned binary/checker; run the checker and exact `caddy adapt --validate`; bootstrap the manager; switch the unit; then start Caddy and the Compose override. Re-running bootstrap is idempotent. Faults at prepared, files-replaced, or reload-pending migration phases restore the paired old config/state generation before retry. Do not delete the old unit or backup until health, cover HTTPS, authenticated CONNECT, traffic collection, and all adjacent SNI routes pass. Every later credential mutation follows paired backup → Caddy adapt with `validate=true` → fsync journal → atomic replace → Caddy `/load` → HTTPS probe. Failure restores both files and verifies the restored live generation. An unconfirmed rollback leaves the manager unhealthy and keeps the journal for startup recovery.
 
-Rollback is deliberately host-controlled: stop `naive-manager`, restore the saved Caddyfile/unit/binary and manager-data snapshot as one generation, run the restored build's validation, restart Caddy, and re-run cover/authenticated/SNI probes before removing the override. Never copy only `traffic.sqlite3` without its `-wal`/`-shm` files while the manager is running. A traffic reset changes only the local baseline; viewers are denied reset, and audit records the username/action without credentials or authorization headers.
+Rollback is deliberately host-controlled: stop `naive-manager` and Caddy; restore the saved Caddyfile/unit/binary, manager-data snapshot, log ownership/modes, and previous service identities as one generation; run the restored build's validation; restart Caddy; and re-run cover/authenticated/SNI probes before removing the override. Never copy only `traffic.sqlite3` without its `-wal`/`-shm` files while the manager is running. A traffic reset changes only the local baseline; viewers are denied reset, and audit records the username/action without credentials or authorization headers.
 
 The UI provides an HTTPS proxy URL, QR, and ready-to-download `config.json`:
 

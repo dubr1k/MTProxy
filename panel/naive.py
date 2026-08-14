@@ -85,6 +85,8 @@ class MemoryNaive:
                 "username": username, "upload_bytes": upload, "download_bytes": download,
                 "total_bytes": upload + download, "period_start": self.period_start,
                 "updated_at": self.period_start,
+                "upload_bytes_decimal": str(upload), "download_bytes_decimal": str(download),
+                "total_bytes_decimal": str(upload + download),
             })
         return {
             "source": "caddy_connect_access_log", "unit": "bytes", "pending": False,
@@ -93,6 +95,9 @@ class MemoryNaive:
                 "upload_bytes": sum(row["upload_bytes"] for row in rows),
                 "download_bytes": sum(row["download_bytes"] for row in rows),
                 "total_bytes": sum(row["total_bytes"] for row in rows),
+                "upload_bytes_decimal": str(sum(row["upload_bytes"] for row in rows)),
+                "download_bytes_decimal": str(sum(row["download_bytes"] for row in rows)),
+                "total_bytes_decimal": str(sum(row["total_bytes"] for row in rows)),
             },
             "users": rows,
             "semantics": {
@@ -125,5 +130,6 @@ class MemoryNaive:
         self.set_traffic(username, upload=0, download=0)
         return {
             "username": username, "upload_bytes": 0, "download_bytes": 0, "total_bytes": 0,
+            "upload_bytes_decimal": "0", "download_bytes_decimal": "0", "total_bytes_decimal": "0",
             "period_start": self.period_start, "updated_at": self.period_start,
         }

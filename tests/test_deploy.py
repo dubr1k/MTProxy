@@ -17,17 +17,70 @@ class DeployCliTests(unittest.TestCase):
         compose = (ROOT / "compose.naive.yaml").read_text()
         checker = (ROOT / "scripts/check-naive-caddy-build.sh").read_text()
         self.assertIn("User=naive-caddy", unit)
-        self.assertIn("Group=naive-caddy", unit)
+        self.assertIn("Group=naive-accounting", unit)
         self.assertIn("NoNewPrivileges=true", unit)
         self.assertIn("ProtectSystem=strict", unit)
-        self.assertIn("ReadWritePaths=/var/log/naive-proxy", unit)
-        self.assertIn("InaccessiblePaths=-/var/lib/naive-manager/manager-token", unit)
+        self.assertIn("RuntimeDirectory=caddy-naive", unit)
+        self.assertIn("RuntimeDirectoryMode=0700", unit)
+        self.assertIn("ProtectProc=invisible", unit)
+        self.assertIn("ProcSubset=pid", unit)
+        self.assertIn(
+            "ExecStartPre=+/usr/bin/install -o 10003 -g 10004 -m 0400 "
+            "/var/lib/naive-manager/Caddyfile /run/caddy-naive/Caddyfile",
+            unit,
+        )
+        self.assertIn(
+            "ExecReload=+/usr/bin/install -o 10003 -g 10004 -m 0400 "
+            "/var/lib/naive-manager/Caddyfile /run/caddy-naive/Caddyfile",
+            unit,
+        )
+        self.assertIn("--config /run/caddy-naive/Caddyfile", unit)
+        self.assertIn("ReadWritePaths=/var/log/naive-proxy /run/caddy-naive", unit)
+        self.assertIn("InaccessiblePaths=/var/lib/naive-manager", unit)
         self.assertNotIn("User=root", unit)
+        self.assertNotIn("--config /var/lib/naive-manager/Caddyfile", unit)
+        self.assertIn('user: "10002:101"', compose)
+        self.assertIn("group_add:\n      - \"10004\"", compose)
         self.assertIn("/var/log/naive-proxy:/logs:ro", compose)
         self.assertIn("v2.11.4", checker)
         self.assertIn("http.handlers.forward_proxy", checker)
         self.assertIn("h1:XKxkMTgNSizEvKG6QHue6cAsFOteU2qA61w2tKkCWi0=", checker)
         self.assertTrue(os.access(ROOT / "scripts/check-naive-caddy-build.sh", os.X_OK))
+
+    @unittest.skipUnless(os.geteuid() == 0, "numeric permission behavior requires root")
+    def test_naive_log_permissions_allow_caddy_write_and_manager_read_only(self):
+        """Catch shared UID/GID or writable-group regressions with real kernel checks."""
+        with tempfile.TemporaryDirectory(dir="/tmp") as td:
+            root = Path(td)
+            root.chmod(0o755)
+            log_dir = root / "naive-proxy"
+            log_dir.mkdir(mode=0o750)
+            os.chown(log_dir, 10003, 10004)
+            access = log_dir / "access.json"
+            access.write_text("record\n")
+            os.chown(access, 10003, 10004)
+            access.chmod(0o640)
+
+            def attempt(uid, gid, groups, script):
+                def demote():
+                    os.setgroups(groups)
+                    os.setgid(gid)
+                    os.setuid(uid)
+                return subprocess.run(
+                    [sys.executable, "-c", script, str(access)],
+                    text=True,
+                    capture_output=True,
+                    preexec_fn=demote,
+                )
+
+            self.assertEqual(
+                attempt(10003, 10003, [10004], "import pathlib,sys; pathlib.Path(sys.argv[1]).open('a').write('caddy\\n')").returncode,
+                0,
+            )
+            manager_read = attempt(10002, 101, [10004], "import pathlib,sys; print(pathlib.Path(sys.argv[1]).read_text())")
+            self.assertEqual(manager_read.returncode, 0, manager_read.stderr)
+            manager_write = attempt(10002, 101, [10004], "import pathlib,sys; pathlib.Path(sys.argv[1]).open('a').write('manager\\n')")
+            self.assertNotEqual(manager_write.returncode, 0)
     def run_cli(self, *args, root: Path, check=True):
         env = os.environ.copy()
         env["MTPROXY_TEST_ROOT"] = str(root)
