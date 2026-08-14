@@ -33,6 +33,19 @@ def synchronized(method):
     return wrapped
 
 
+def lifecycle_synchronized(method):
+    """Acquire the accounting operation boundary before manager state."""
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        traffic = self.traffic
+        if traffic is None:
+            with self._lock:
+                return method(self, *args, **kwargs)
+        with traffic.operation(), self._lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 class ManagerConflict(RuntimeError):
     pass
 
@@ -135,7 +148,7 @@ class NaiveCredentialManager:
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _recovery_failed: bool = field(default=False, init=False, repr=False)
 
-    @synchronized
+    @lifecycle_synchronized
     def bootstrap(self) -> None:
         _assert_regular(self.caddyfile)
         if self._transaction_file.exists():
@@ -247,7 +260,7 @@ class NaiveCredentialManager:
             "config": {"listen": "socks://127.0.0.1:1080", "proxy": proxy_url},
         }
 
-    @synchronized
+    @lifecycle_synchronized
     def create(self, username: str) -> dict:
         self._valid_username(username)
         state = self._read_state()
@@ -266,7 +279,7 @@ class NaiveCredentialManager:
         self._apply(state)
         return self.reveal(username)
 
-    @synchronized
+    @lifecycle_synchronized
     def rotate(self, username: str) -> dict:
         state = self._read_state()
         row = self._find(state, username)
@@ -275,7 +288,7 @@ class NaiveCredentialManager:
         self._apply(state)
         return self.reveal(username)
 
-    @synchronized
+    @lifecycle_synchronized
     def set_enabled(self, username: str, enabled: bool) -> dict:
         state = self._read_state()
         row = self._find(state, username)
@@ -284,24 +297,24 @@ class NaiveCredentialManager:
         self._apply(state)
         return {"username": username, "enabled": bool(enabled)}
 
+    @lifecycle_synchronized
     def delete(self, username: str) -> None:
         traffic = self.traffic
         if traffic is None:
             raise ManagerConflict("traffic accounting is unavailable")
-        with traffic.operation(), self._lock:
-            state = self._read_state()
-            self._find(state, username)
-            try:
-                if not traffic.drain():
-                    raise ManagerConflict("traffic backlog remains pending")
-            except ManagerConflict:
-                raise
-            except RuntimeError as exc:
-                raise ManagerConflict("traffic accounting is degraded") from exc
-            state["users"] = [row for row in state["users"] if row["username"] != username]
-            state["tombstones"].append({"username": username, "deleted_at": _now()})
-            self._apply(state)
-            traffic.archive_user(username)
+        state = self._read_state()
+        self._find(state, username)
+        try:
+            if not traffic.drain():
+                raise ManagerConflict("traffic backlog remains pending")
+        except ManagerConflict:
+            raise
+        except RuntimeError as exc:
+            raise ManagerConflict("traffic accounting is degraded") from exc
+        state["users"] = [row for row in state["users"] if row["username"] != username]
+        state["tombstones"].append({"username": username, "deleted_at": _now()})
+        self._apply(state)
+        traffic.archive_user(username)
 
     def _archive_tombstones(self, state: dict) -> None:
         if self.traffic is None:

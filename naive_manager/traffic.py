@@ -9,12 +9,20 @@ import stat
 import threading
 from collections.abc import Set as AbstractSet
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
 
 MAX_COUNTER = 2**63 - 1
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    path: Path
+    identity: tuple[int, int]
+    active: bool
 
 
 def _now() -> str:
@@ -210,14 +218,9 @@ class TrafficCollector:
             cursor += len(chunk)
         return digest
 
-    def _candidates(self) -> list[Path]:
+    def _candidates(self) -> list[_Candidate]:
         parent = self.log_path.parent
-        suffix = self.log_path.suffix
-        stem = self.log_path.name.removesuffix(suffix) if suffix else self.log_path.name
-        rotation = re.compile(
-            rf"{re.escape(stem)}-\d{{4}}-\d{{2}}-\d{{2}}T"
-            rf"\d{{2}}-\d{{2}}-\d{{2}}\.\d{{3}}-(?:size|rotate){re.escape(suffix)}\Z"
-        )
+        rotation = self._rotation_matcher()
         try:
             candidates = []
             with os.scandir(parent) as entries:
@@ -225,16 +228,61 @@ class TrafficCollector:
                     if scanned > self.max_directory_entries:
                         raise RuntimeError("accounting log directory entry limit exceeded")
                     if entry.name == self.log_path.name or rotation.fullmatch(entry.name):
-                        candidates.append(Path(entry.path))
+                        path = Path(entry.path)
+                        fd, info = self._open_regular(path)
+                        os.close(fd)
+                        if entry.inode() != info.st_ino:
+                            raise RuntimeError("accounting log changed during discovery")
+                        candidates.append(_Candidate(
+                            path=path,
+                            identity=(info.st_dev, info.st_ino),
+                            active=entry.name == self.log_path.name,
+                        ))
                         if len(candidates) > self.max_rotations + 1:
                             raise RuntimeError("accounting log rotation limit exceeded")
         except OSError as exc:
             raise RuntimeError("accounting log directory unavailable") from exc
-        if self.log_path not in candidates:
+        if not any(candidate.active for candidate in candidates):
             raise RuntimeError("active accounting log is missing")
         # Process oldest rotations first and the active inode last. Identity+offset
         # keeps this ordering replay-safe across restart and rename rotation.
-        return sorted(candidates, key=lambda value: (value == self.log_path, value.name))
+        return sorted(candidates, key=lambda value: (value.active, value.path.name))
+
+    def _rotation_matcher(self) -> re.Pattern[str]:
+        suffix = self.log_path.suffix
+        stem = self.log_path.name.removesuffix(suffix) if suffix else self.log_path.name
+        return re.compile(
+            rf"{re.escape(stem)}-\d{{4}}-\d{{2}}-\d{{2}}T"
+            rf"\d{{2}}-\d{{2}}-\d{{2}}\.\d{{3}}-(?:size|rotate){re.escape(suffix)}\Z"
+        )
+
+    def _present_identities(self) -> set[tuple[int, int]]:
+        """Rescan and open current names so stale discovery paths cannot drive pruning."""
+        parent = self.log_path.parent
+        rotation = self._rotation_matcher()
+        present = set()
+        active_seen = False
+        candidates = 0
+        try:
+            with os.scandir(parent) as entries:
+                for scanned, entry in enumerate(entries, 1):
+                    if scanned > self.max_directory_entries:
+                        raise RuntimeError("accounting log directory entry limit exceeded")
+                    if entry.name == self.log_path.name or rotation.fullmatch(entry.name):
+                        candidates += 1
+                        if candidates > self.max_rotations + 1:
+                            raise RuntimeError("accounting log rotation limit exceeded")
+                        fd, info = self._open_regular(Path(entry.path))
+                        os.close(fd)
+                        if entry.inode() != info.st_ino:
+                            raise RuntimeError("accounting log changed during discovery")
+                        present.add((info.st_dev, info.st_ino))
+                        active_seen = active_seen or entry.name == self.log_path.name
+        except OSError as exc:
+            raise RuntimeError("accounting log directory unavailable") from exc
+        if not active_seen:
+            raise RuntimeError("active accounting log is missing")
+        return present
 
     def collect(self) -> int:
         with self.operation():
@@ -250,24 +298,33 @@ class TrafficCollector:
             try:
                 self._assert_accounting_ready()
                 budget = self.max_read_bytes
+                verify_budget = self.max_verify_bytes
                 candidates = self._candidates()
-                for path in candidates:
+                for candidate in candidates:
                     if budget <= 0:
                         break
-                    count, consumed = self._collect_file(path, users, budget)
+                    count, consumed, verified = self._collect_file(
+                        candidate, users, budget, verify_budget,
+                    )
                     accepted += count
                     budget -= consumed
-                self._prune_consumed_deleted(candidates)
+                    verify_budget -= verified
+                self._prune_consumed_deleted()
                 self._last_error = None
                 return accepted
             except Exception as exc:
                 self._last_error = type(exc).__name__
                 raise
 
-    def _collect_file(self, path: Path, users: AbstractSet[str], budget: int) -> tuple[int, int]:
+    def _collect_file(
+        self, candidate: _Candidate, users: AbstractSet[str], budget: int, verify_budget: int,
+    ) -> tuple[int, int, int]:
+        path = candidate.path
         fd, info = self._open_regular(path)
         identity = (info.st_dev, info.st_ino)
         try:
+            if identity != candidate.identity:
+                raise RuntimeError("accounting log changed during discovery")
             row = self._db.execute(
                 "SELECT offset,discarding,consumed_prefix_digest "
                 "FROM traffic_files WHERE device=? AND inode=?", identity
@@ -279,7 +336,7 @@ class TrafficCollector:
             if row and offset and row[2] is None:
                 raise RuntimeError("accounting prefix cannot be verified after schema upgrade")
             available = info.st_size - offset
-            if row and offset > self.max_verify_bytes:
+            if row and offset > verify_budget:
                 raise RuntimeError("accounting prefix verification budget exceeded")
             prefix = self._hash_prefix(fd, offset)
             if row and prefix.digest() != row[2]:
@@ -376,14 +433,10 @@ class TrafficCollector:
                     (username, upload, download, now, now),
                 )
         self._secure_database_files()
-        return accepted, len(data)
+        return accepted, len(data), offset
 
-    def _prune_consumed_deleted(self, candidates: list[Path]) -> None:
-        present = set()
-        for path in candidates:
-            fd, info = self._open_regular(path)
-            os.close(fd)
-            present.add((info.st_dev, info.st_ino))
+    def _prune_consumed_deleted(self) -> None:
+        present = self._present_identities()
         loss_detected = False
         with self._db:
             for device, inode, offset, size, discarding in self._db.execute(
@@ -439,10 +492,12 @@ class TrafficCollector:
 
     def _pending(self) -> bool:
         try:
-            for path in self._candidates():
-                fd, info = self._open_regular(path)
+            for candidate in self._candidates():
+                fd, info = self._open_regular(candidate.path)
                 try:
                     identity = (info.st_dev, info.st_ino)
+                    if identity != candidate.identity:
+                        raise RuntimeError("accounting log changed during discovery")
                     row = self._db.execute(
                         "SELECT offset FROM traffic_files WHERE device=? AND inode=?", identity
                     ).fetchone()

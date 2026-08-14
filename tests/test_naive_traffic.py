@@ -106,6 +106,62 @@ def test_rename_rotation_is_processed_once(tmp_path):
     assert traffic.list_traffic()["aggregate"]["total_bytes"] == 10
 
 
+@pytest.mark.parametrize("rotate_after_scan", [False, True])
+def test_rotation_at_prune_identity_rescan_boundary_is_not_replayed(
+    tmp_path, monkeypatch, rotate_after_scan,
+):
+    """A stale discovery path must never decide whether an inode is still present."""
+    traffic, log = collector(tmp_path)
+    log.write_text(record(upload=1, download=2))
+    rotated = log.with_name("access-2026-08-14T15-00-00.000-size.json")
+    real_present_identities = traffic._present_identities
+
+    def rotate():
+        os.rename(log, rotated)
+        log.write_text("")
+
+    def rotate_at_boundary():
+        if not rotate_after_scan:
+            rotate()
+        present = real_present_identities()
+        if rotate_after_scan:
+            rotate()
+        return present
+
+    monkeypatch.setattr(traffic, "_present_identities", rotate_at_boundary)
+
+    assert traffic.collect() == 1
+    monkeypatch.setattr(traffic, "_present_identities", real_present_identities)
+    assert traffic.collect() == 0
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 3
+
+
+def test_new_active_created_after_discovery_is_deferred_to_next_pass(tmp_path, monkeypatch):
+    """A stale active pathname must not open a replacement inode in the same pass."""
+    traffic, log = collector(tmp_path)
+    log.write_text(record(upload=1, download=2))
+    rotated = log.with_name("access-2026-08-14T15-00-00.000-size.json")
+    real_collect_file = traffic._collect_file
+    rotated_once = False
+
+    def rotate_before_open(candidate, users, read_budget, verify_budget):
+        nonlocal rotated_once
+        if not rotated_once:
+            rotated_once = True
+            os.rename(log, rotated)
+            log.write_text(record(upload=3, download=4))
+        return real_collect_file(candidate, users, read_budget, verify_budget)
+
+    monkeypatch.setattr(traffic, "_collect_file", rotate_before_open)
+
+    with pytest.raises(RuntimeError, match="changed during discovery"):
+        traffic.collect()
+    monkeypatch.setattr(traffic, "_collect_file", real_collect_file)
+    assert traffic.collect() == 2
+    assert traffic.collect() == 0
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 10
+
+
 def test_timberjack_rotation_names_are_processed_oldest_first_and_unrelated_files_ignored(tmp_path):
     """Catch matching access.json.* instead of Caddy 2.11 timberjack backup names."""
     traffic, log = collector(tmp_path)
@@ -190,6 +246,35 @@ def test_consumed_prefix_larger_than_request_budget_fails_closed(tmp_path):
     with pytest.raises(RuntimeError, match="verification budget"):
         traffic.collect()
     assert traffic.health()["ready"] is False
+
+
+def test_prefix_verification_budget_is_shared_across_all_candidates(tmp_path, monkeypatch):
+    """Two retained files must not each receive the full request verification budget."""
+    log = tmp_path / "logs" / "access.json"
+    log.parent.mkdir()
+    rotated = log.with_name("access-2026-08-14T15-00-00.000-size.json")
+    line = record(upload=1, download=2).rstrip("\n") + " " * 10 + "\n"
+    assert len(line.encode()) == 98
+    rotated.write_text(line)
+    log.write_text(line)
+    traffic = TrafficCollector(
+        log, tmp_path / "traffic.sqlite3", lambda: {"alice"},
+        max_line_bytes=128, max_read_bytes=512, max_verify_bytes=98,
+    )
+    assert traffic.collect() == 2
+    verified = []
+    real_hash_prefix = traffic._hash_prefix
+
+    def recording_hash_prefix(fd, length):
+        verified.append(length)
+        return real_hash_prefix(fd, length)
+
+    monkeypatch.setattr(traffic, "_hash_prefix", recording_hash_prefix)
+
+    with pytest.raises(RuntimeError, match="verification budget"):
+        traffic.collect()
+    assert verified == [98]
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 6
 
 
 def test_strict_filtering_rejects_unknown_sentinels_bad_schema_and_oversize(tmp_path):

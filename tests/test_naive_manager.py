@@ -1101,6 +1101,101 @@ def test_delete_serializes_with_collector_that_already_captured_old_user_snapsho
         ).fetchall() == [("old-user", 1, 2)]
 
 
+def test_create_serializes_with_collector_snapshot_before_new_user_record(tmp_path):
+    """Creation must commit membership before a later record can be consumed."""
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    log = tmp_path / "access.json"
+    log.write_text("")
+    snapshot_taken = threading.Event()
+    release_snapshot = threading.Event()
+    first_snapshot = True
+    snapshot_lock = threading.Lock()
+
+    def paused_snapshot():
+        nonlocal first_snapshot
+        users = service.managed_usernames()
+        with snapshot_lock:
+            pause = first_snapshot
+            first_snapshot = False
+        if pause:
+            snapshot_taken.set()
+            assert release_snapshot.wait(2)
+        return users
+
+    traffic = TrafficCollector(log, tmp_path / "traffic.sqlite3", paused_snapshot)
+    service.traffic = traffic
+    outcomes = {}
+    collecting = threading.Thread(target=lambda: outcomes.setdefault("collected", traffic.collect()))
+    creating = threading.Thread(target=lambda: outcomes.setdefault("created", service.create("new-user")))
+    collecting.start()
+    assert snapshot_taken.wait(1)
+    creating.start()
+    creating.join(1)
+    assert creating.is_alive()
+    release_snapshot.set()
+    collecting.join(2)
+    creating.join(2)
+    assert not collecting.is_alive() and not creating.is_alive()
+    assert outcomes["collected"] == 0
+
+    with log.open("a") as stream:
+        stream.write(json.dumps({
+            "request": {"method": "CONNECT"}, "status": 200, "user_id": "new-user",
+            "bytes_read": 2, "size": 3,
+        }) + "\n")
+    assert traffic.collect() == 1
+    assert traffic.collect() == 0
+    assert traffic.list_traffic()["users"][0]["total_bytes"] == 5
+
+
+def test_concurrent_create_and_collect_stress_completes_without_deadlock(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    log = tmp_path / "access.json"
+    log.write_text("")
+    traffic = TrafficCollector(log, tmp_path / "traffic.sqlite3", service.managed_usernames)
+    service.traffic = traffic
+    start = threading.Barrier(2)
+    failures = []
+
+    def collect_repeatedly():
+        try:
+            start.wait()
+            for _ in range(40):
+                traffic.collect()
+        except BaseException as exc:
+            failures.append(exc)
+
+    def create_repeatedly():
+        try:
+            start.wait()
+            for index in range(8):
+                service.create(f"stress-{index}")
+                with log.open("a") as stream:
+                    stream.write(json.dumps({
+                        "request": {"method": "CONNECT"}, "status": 200,
+                        "user_id": f"stress-{index}", "bytes_read": 1, "size": 1,
+                    }) + "\n")
+        except BaseException as exc:
+            failures.append(exc)
+
+    collector_thread = threading.Thread(target=collect_repeatedly)
+    creator_thread = threading.Thread(target=create_repeatedly)
+    collector_thread.start()
+    creator_thread.start()
+    collector_thread.join(10)
+    creator_thread.join(10)
+
+    assert not collector_thread.is_alive() and not creator_thread.is_alive()
+    assert failures == []
+    while traffic.list_traffic()["pending"]:
+        traffic.collect()
+    assert traffic.list_traffic()["aggregate"]["total_bytes"] == 16
+
+
 def test_persistent_accounting_loss_surfaces_as_conflict_for_report_reset_and_delete(tmp_path):
     """Catch degraded accounting escaping as an internal error or allowing lifecycle mutation."""
     hooks = Hooks()
