@@ -12,6 +12,7 @@ import os
 import re
 import selectors
 import secrets
+import signal
 import stat
 import subprocess
 import tempfile
@@ -50,6 +51,14 @@ QUOTA_FIELDS = {"days", "megabytes"}
 MAX_QUOTA_DAYS = 2**31 - 1
 MAX_QUOTA_MIB = 2**31 - 1
 MAX_GO_DURATION_NS = 2**63 - 1
+TRANSACTION_MODES = {
+    "user.create": "dynamic",
+    "user.rotate": "restart",
+    "user.enable": "restart",
+    "user.disable": "restart",
+    "user.delete": "restart",
+    "user.quotas": "reload",
+}
 _DURATION_UNITS_NS = {
     "ns": Decimal(1),
     "us": Decimal(1_000),
@@ -395,6 +404,21 @@ def _hash(value: Any) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
+def _transaction_mode(operation: str, before: dict, desired: dict) -> str:
+    mode = TRANSACTION_MODES.get(operation)
+    if mode is None:
+        raise ValidationError("invalid transaction metadata")
+    if mode != "dynamic":
+        return mode
+    old_names = {row.get("name") for row in before.get("users", [])}
+    added = [row for row in desired.get("users", []) if row.get("name") not in old_names]
+    return (
+        "restart"
+        if any(row.get("allowPrivateIP") is True or row.get("allowLoopbackIP") is True for row in added)
+        else "reload"
+    )
+
+
 def _fsync_dir(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -521,6 +545,7 @@ class MitaCLI:
                     close_fds=True,
                     pass_fds=tuple(pass_fds),
                     env={**os.environ, **self.env},
+                    start_new_session=True,
                 )
             except OSError as exc:
                 raise MitaError("mita operation unavailable") from exc
@@ -554,15 +579,24 @@ class MitaCLI:
                         if key.fileobj is stdout:
                             stdout_chunks.append(chunk)
                 returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
-            except BaseException:
-                process.kill()
+            except BaseException as exc:
+                if process.returncode is None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 for stream in (stdout, stderr):
                     try:
                         selector.unregister(stream)
                     except (KeyError, ValueError):
                         pass
                     stream.close()
-                process.wait()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired as wait_error:
+                    raise MitaError("mita operation unavailable") from wait_error
+                if isinstance(exc, subprocess.TimeoutExpired):
+                    raise MitaError("mita operation unavailable") from exc
                 raise
             finally:
                 selector.close()
@@ -608,7 +642,8 @@ class MitaCLI:
     def status(self) -> str:
         text = self._text(["status"])
         match = re.fullmatch(
-            r'mita server status is "(RUNNING|STOPPED|UNKNOWN)"', text
+            r'mita server status is "(RUNNING|IDLE|STARTING|STOPPING|STOPPED|UNKNOWN)"',
+            text,
         )
         if match is None:
             raise MitaError("mita returned invalid status")
@@ -630,9 +665,13 @@ class MieruManager:
         state_dir: Path,
         public_host: str,
         protocol_probe: Callable[[], None] | None = None,
+        status_timeout: float = 10,
+        status_poll_interval: float = 0.05,
     ):
         self.mita, self.state_dir, self.public_host = mita, Path(state_dir), public_host
         self.protocol_probe = protocol_probe or mita.probe
+        self.status_timeout = status_timeout
+        self.status_poll_interval = status_poll_interval
         self._lock = threading.RLock()
         self.state_file = self.state_dir / "state.json"
         self.journal_file = self.state_dir / "journal.json"
@@ -719,6 +758,18 @@ class MieruManager:
                 "status": status.lower(),
             }
 
+    def _wait_status(self, target: str, error: str) -> str:
+        deadline = time.monotonic() + self.status_timeout
+        while True:
+            status = self.mita.status().upper()
+            if status == target:
+                return status
+            if status not in {"STARTING", "STOPPING"} or time.monotonic() >= deadline:
+                raise MitaError(error)
+            time.sleep(
+                min(self.status_poll_interval, max(0, deadline - time.monotonic()))
+            )
+
     def lifecycle(self, action: str) -> dict:
         if action not in {"start", "stop", "restart"}:
             raise ValidationError("invalid lifecycle action")
@@ -733,18 +784,18 @@ class MieruManager:
             else:
                 if action == "restart":
                     self.mita.stop()
+                    self._wait_status("IDLE", "mita failed to reach idle state")
                 self.mita.start()
             after = self.mita.observe()
             validate_config(after, elevated=True)
             if _hash(after) != state["config_hash"]:
                 raise ConfigConflict("lifecycle changed observed configuration")
-            status = self.mita.status().upper()
             if action == "stop":
-                if status == "RUNNING":
-                    raise MitaError("mita failed to stop")
+                status = self._wait_status("IDLE", "mita failed to reach idle state")
             else:
-                if status != "RUNNING":
-                    raise MitaError("mita failed to reach running state")
+                status = self._wait_status(
+                    "RUNNING", "mita failed to reach running state"
+                )
                 self.protocol_probe()
             return {
                 "revision": state["revision"],
@@ -794,17 +845,17 @@ class MieruManager:
     def _transaction(
         self, desired: dict, state: dict, *, mode: str, operation: str
     ) -> str:
-        if mode not in {"reload", "restart"} or not re.fullmatch(
-            r"[a-z]+(?:\.[a-z]+)+", operation
-        ):
+        if mode not in {"reload", "restart"} or operation not in TRANSACTION_MODES:
             raise ValidationError("invalid transaction metadata")
         validate_config(desired, elevated=True)
         before = self.mita.observe()
         validate_config(before, elevated=True)
+        expected = self._expected(desired)
+        if mode != _transaction_mode(operation, before, expected):
+            raise ValidationError("invalid transaction metadata")
         previous_hash = _hash(before)
         if previous_hash != state["config_hash"]:
             raise ConfigConflict("observed config changed outside manager")
-        expected = self._expected(desired)
         desired_hash = _hash(expected)
         next_generation = state["generation"] + 1
         next_revision = _hash(
@@ -847,9 +898,9 @@ class MieruManager:
                 self.mita.reload()
             else:
                 self.mita.stop()
+                self._wait_status("IDLE", "mita failed to reach idle state")
                 self.mita.start()
-            if self.mita.status() != "RUNNING":
-                raise MitaError("mita failed to reach running state")
+            self._wait_status("RUNNING", "mita failed to reach running state")
             self.protocol_probe()
         except BaseException as exc:
             try:
@@ -857,9 +908,9 @@ class MieruManager:
                 journal["phase"] = "rollback_applied"
                 _atomic(self.journal_file, journal)
                 self.mita.stop()
+                self._wait_status("IDLE", "rollback failed to reach idle state")
                 self.mita.start()
-                if self.mita.status() != "RUNNING":
-                    raise MitaError("rollback status failed")
+                self._wait_status("RUNNING", "rollback status failed")
                 self.protocol_probe()
             except BaseException as rollback_error:
                 raise MitaError(
@@ -903,8 +954,9 @@ class MieruManager:
                 or journal["schema"] != "mieru-transaction-journal-v2"
                 or journal["phase"] not in {"prepared", "applied", "rollback_applied"}
                 or journal["mode"] not in {"reload", "restart"}
-                or re.fullmatch(r"[a-z]+(?:\.[a-z]+)+", journal["operation"]) is None
-                or Path(journal["backup_basename"]).name != journal["backup_basename"]
+                or journal["operation"] not in TRANSACTION_MODES
+                or journal["backup_basename"]
+                != f"g{journal['state_generation']}-{journal['state_revision']}.json"
                 or not re.fullmatch(r"[0-9a-f]{64}", journal["previous_config_hash"])
                 or not re.fullmatch(r"[0-9a-f]{64}", journal["desired_config_hash"])
                 or not re.fullmatch(r"[0-9a-f]{64}", journal["state_revision"])
@@ -962,12 +1014,29 @@ class MieruManager:
             validate_config(config, elevated=True)
             if _hash(config) != journal["previous_config_hash"]:
                 raise ValueError("backup config mismatch")
+            if journal["state_revision"] != state["revision"]:
+                raise ValueError("journal state revision mismatch")
+            if observed_hash == journal["desired_config_hash"]:
+                if journal["mode"] != _transaction_mode(
+                    journal["operation"], config, observed
+                ):
+                    raise ValueError("journal mode mismatch")
+                canonical_next_revision = _hash(
+                    {
+                        "config": observed,
+                        "disabled": state["disabled"],
+                        "tombstones": state["tombstones"],
+                        "generation": journal["next_generation"],
+                    }
+                )
+                if journal["next_revision"] != canonical_next_revision:
+                    raise ValueError("journal next revision mismatch")
             if observed_hash != journal["previous_config_hash"]:
                 self.mita.apply(config)
             self.mita.stop()
+            self._wait_status("IDLE", "recovery failed to reach idle state")
             self.mita.start()
-            if self.mita.status() != "RUNNING":
-                raise MitaError("recovery status failed")
+            self._wait_status("RUNNING", "recovery status failed")
             self.protocol_probe()
             if _hash(self.mita.observe()) != journal["previous_config_hash"]:
                 raise MitaError("recovery readback mismatch")
@@ -1149,7 +1218,7 @@ class MieruManager:
                 "stale": True,
                 "users": [],
                 "capability": "unavailable",
-                "reason": "mita v3.35 CLI does not expose typed GetUsers histories",
+                "reason": "typed_histories_unavailable",
             }
 
     def reset_metric_baseline(self, username: str) -> dict:

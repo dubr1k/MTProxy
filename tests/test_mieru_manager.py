@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
+import time
 
 import pytest
 
@@ -29,7 +31,9 @@ def _status_cli(tmp_path, output):
     return MitaCLI(executable=fake)
 
 
-@pytest.mark.parametrize("status", ["RUNNING", "STOPPED", "UNKNOWN"])
+@pytest.mark.parametrize(
+    "status", ["RUNNING", "IDLE", "STARTING", "STOPPING", "STOPPED", "UNKNOWN"]
+)
 def test_cli_parses_official_exact_status_grammar(tmp_path, status):
     assert _status_cli(tmp_path, f'mita server status is "{status}"').status() == status
 
@@ -38,7 +42,7 @@ def test_cli_parses_official_exact_status_grammar(tmp_path, status):
     "output",
     [
         "RUNNING",
-        'mita server status is "IDLE"',
+        'mita server status is "PAUSED"',
         'mita server status is "RUNNING" trailing',
         'prefix mita server status is "RUNNING"',
         'mita server status is "RUNNING"\nmita server status is "STOPPED"',
@@ -203,6 +207,7 @@ class FakeMita:
         self.fail_probe = False
         self.metrics_value = {"users": []}
         self.running = True
+        self.statuses = []
 
     def version(self):
         return "3.35.0"
@@ -226,7 +231,9 @@ class FakeMita:
         self.running = True
 
     def status(self):
-        return "RUNNING" if self.running else "STOPPED"
+        if self.statuses:
+            return self.statuses.pop(0)
+        return "RUNNING" if self.running else "IDLE"
 
     def probe(self):
         self.calls.append(("probe",))
@@ -264,7 +271,7 @@ def test_lifecycle_revalidates_readback_and_probes_running_service(tmp_path):
     mita.calls.clear()
 
     stopped = service.lifecycle("stop")
-    assert stopped == {"ready": False, "status": "stopped", "revision": revision}
+    assert stopped == {"ready": False, "status": "idle", "revision": revision}
     assert mita.calls == [("stop",)]
 
     mita.calls.clear()
@@ -278,6 +285,42 @@ def test_lifecycle_revalidates_readback_and_probes_running_service(tmp_path):
     assert mita.calls == [("stop",), ("start",), ("probe",)]
     with pytest.raises(ValidationError, match="lifecycle"):
         service.lifecycle("reload")
+
+
+def test_lifecycle_polls_official_transient_statuses_until_exact_terminal_state(tmp_path):
+    mita = FakeMita()
+    service = manager(tmp_path, mita)
+    revision = service.bootstrap()["revision"]
+    mita.calls.clear()
+    mita.statuses = ["STOPPING", "IDLE"]
+
+    assert service.lifecycle("stop") == {
+        "ready": False,
+        "status": "idle",
+        "revision": revision,
+    }
+
+    mita.calls.clear()
+    mita.statuses = ["STARTING", "RUNNING"]
+    assert service.lifecycle("start")["ready"] is True
+    assert mita.calls == [("start",), ("probe",)]
+
+
+def test_lifecycle_rejects_stopped_as_stop_terminal_and_bounds_transient_polling(tmp_path):
+    mita = FakeMita()
+    service = MieruManager(
+        mita=mita,
+        state_dir=tmp_path / "state",
+        public_host="proxy.example.com",
+        status_timeout=0.01,
+        status_poll_interval=0.001,
+    )
+    service.bootstrap()
+    mita.statuses = ["STOPPED"] * 100
+
+    with pytest.raises(Exception, match="failed to reach idle state"):
+        service.lifecycle("stop")
+    assert mita.calls == [("stop",)]
 
 
 def test_create_uses_complete_snapshot_cas_and_reveals_password_once(tmp_path):
@@ -311,6 +354,24 @@ def test_create_with_private_or_loopback_policy_forces_controlled_restart(tmp_pa
             "bob", [], expected_revision=revision, elevated=True, **{flag: True}
         )
         assert mita.calls[-3:] == [("stop",), ("start",), ("probe",)]
+
+
+def test_transaction_restart_waits_for_idle_then_running_through_transients(tmp_path):
+    mita = FakeMita()
+    service = manager(tmp_path, mita)
+    revision = service.bootstrap()["revision"]
+    mita.calls.clear()
+    mita.statuses = ["STOPPING", "IDLE", "STARTING", "RUNNING"]
+
+    service.create_user(
+        "bob",
+        [],
+        expected_revision=revision,
+        elevated=True,
+        allow_private_ip=True,
+    )
+
+    assert mita.calls[-3:] == [("stop",), ("start",), ("probe",)]
 
 
 def test_rotation_delete_and_disable_force_restart_and_tombstone_names(tmp_path):
@@ -374,7 +435,18 @@ def _write_recovery_fixture(root, state, before, desired, *, generation=None):
         ).hexdigest(),
         "state_revision": state["revision"],
         "state_generation": state["generation"] if generation is None else generation,
-        "next_revision": "f" * 64,
+        "next_revision": hashlib.sha256(
+            json.dumps(
+                {
+                    "config": desired,
+                    "disabled": state["disabled"],
+                    "tombstones": state["tombstones"],
+                    "generation": state["generation"] + 1,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
         "next_generation": (state["generation"] if generation is None else generation) + 1,
         "backup_basename": backup.name,
         "backup_size": len(backup_bytes),
@@ -424,6 +496,38 @@ def test_stale_or_tampered_recovery_journal_fails_closed_without_backup_apply(tm
     assert journal.exists()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("operation", "other.action"),
+        ("mode", "restart"),
+        ("next_revision", "0" * 64),
+        ("backup_basename", "not-generation-bound.json"),
+    ],
+)
+def test_recovery_rejects_semantically_tampered_metadata_before_side_effects(
+    tmp_path, field, value
+):
+    mita = FakeMita()
+    service = manager(tmp_path, mita)
+    service.bootstrap()
+    root = tmp_path / "state"
+    state = json.loads((root / "state.json").read_text())
+    desired = {**BASE, "loggingLevel": "DEBUG"}
+    mita.config = json.loads(json.dumps(desired))
+    journal_path, _ = _write_recovery_fixture(root, state, BASE, desired)
+    journal = json.loads(journal_path.read_text())
+    journal[field] = value
+    journal_path.write_text(json.dumps(journal))
+    journal_path.chmod(0o600)
+    mita.calls.clear()
+
+    with pytest.raises(ConfigConflict, match="recovery"):
+        manager(tmp_path, mita).bootstrap()
+    assert mita.calls == []
+    assert mita.config == desired
+
+
 def test_per_user_metrics_fail_closed_when_typed_getusers_boundary_is_unavailable(tmp_path):
     mita = FakeMita()
     service = manager(tmp_path, mita)
@@ -437,7 +541,7 @@ def test_per_user_metrics_fail_closed_when_typed_getusers_boundary_is_unavailabl
         "stale": True,
         "users": [],
         "capability": "unavailable",
-        "reason": "mita v3.35 CLI does not expose typed GetUsers histories",
+        "reason": "typed_histories_unavailable",
     }
     with pytest.raises(ConfigConflict, match="unavailable"):
         service.reset_metric_baseline("alice")
@@ -502,7 +606,7 @@ elif args == ['stop']:
 elif args == ['start']:
     running.write_text('yes')
 elif args == ['status']:
-    state = 'RUNNING' if running.exists() else 'STOPPED'
+    state = 'RUNNING' if running.exists() else 'IDLE'
     print(f'mita server status is "{state}"')
 elif args == ['get', 'metrics']:
     print('{"users": []}')
@@ -535,7 +639,11 @@ else:
     assert service.lifecycle("restart")["ready"] is True
 
     state = json.loads((tmp_path / "manager/state.json").read_text())
-    backup = tmp_path / "manager/backups" / f"{state['revision']}.json"
+    backup = (
+        tmp_path
+        / "manager/backups"
+        / f"g{state['generation']}-{state['revision']}.json"
+    )
     backup.parent.mkdir(parents=True, exist_ok=True)
     backup_data = json.dumps(BASE, sort_keys=True, separators=(",", ":")).encode()
     backup.write_bytes(backup_data)
@@ -543,6 +651,19 @@ else:
     changed = {**BASE, "loggingLevel": "DEBUG"}
     changed_hash = hashlib.sha256(
         json.dumps(changed, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    next_generation = state["generation"] + 1
+    next_revision = hashlib.sha256(
+        json.dumps(
+            {
+                "config": changed,
+                "disabled": state["disabled"],
+                "tombstones": state["tombstones"],
+                "generation": next_generation,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
     live_config.write_text(json.dumps(changed))
     journal = tmp_path / "manager/journal.json"
@@ -558,8 +679,8 @@ else:
                 "desired_config_hash": changed_hash,
                 "state_revision": state["revision"],
                 "state_generation": state["generation"],
-                "next_revision": changed_hash,
-                "next_generation": state["generation"] + 1,
+                "next_revision": next_revision,
+                "next_generation": next_generation,
                 "backup_basename": backup.name,
                 "backup_size": len(backup_data),
                 "backup_sha256": hashlib.sha256(backup_data).hexdigest(),
@@ -667,3 +788,60 @@ def test_cli_kills_child_during_execution_when_either_output_stream_exceeds_cap(
     with pytest.raises(Exception, match="too large"):
         cli.version()
     assert marker.exists() is False
+
+
+def _process_running(pid):
+    try:
+        state = (Path("/proc") / str(pid) / "stat").read_text().split()[2]
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return state != "Z"
+
+
+def test_cli_timeout_kills_descendant_that_inherits_output_pipes(tmp_path):
+    grandchild_pid = tmp_path / "grandchild.pid"
+    fake = tmp_path / "mita-descendant"
+    fake.write_text(
+        "#!/usr/bin/python3\n"
+        "import os, subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', "
+        "'import os,time; open(os.environ[\"PID_FILE\"],\"w\").write(str(os.getpid())); time.sleep(60)'])\n"
+    )
+    fake.chmod(0o755)
+    cli = MitaCLI(
+        executable=fake,
+        env={"PID_FILE": str(grandchild_pid)},
+        timeout=0.1,
+        max_output=1024,
+    )
+
+    with pytest.raises(Exception, match="operation unavailable"):
+        cli.version()
+    pid = int(grandchild_pid.read_text())
+    deadline = time.monotonic() + 1
+    while _process_running(pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not _process_running(pid)
+
+
+def test_cli_eof_before_child_exit_is_sanitized_and_reaps_child(tmp_path):
+    child_pid = tmp_path / "child.pid"
+    fake = tmp_path / "mita-eof-hang"
+    fake.write_text(
+        "#!/usr/bin/python3\n"
+        "import os,time\n"
+        "open(os.environ['PID_FILE'],'w').write(str(os.getpid()))\n"
+        "os.close(1); os.close(2); time.sleep(60)\n"
+    )
+    fake.chmod(0o755)
+    cli = MitaCLI(
+        executable=fake,
+        env={"PID_FILE": str(child_pid)},
+        timeout=0.1,
+        max_output=1024,
+    )
+
+    with pytest.raises(Exception, match="mita operation unavailable") as error:
+        cli.version()
+    assert type(error.value).__name__ == "MitaError"
+    assert not _process_running(int(child_pid.read_text()))

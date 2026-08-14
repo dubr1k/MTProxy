@@ -211,7 +211,12 @@ class LocalMieruExecutor:
                       "mieru_revision": data.get("revision")}
         elif item.operation == "mieru.metrics":
             data = await self.client.metrics()
-            result = {"metrics_status": data.get("status"), "metrics_stale": data.get("stale") is True}
+            result = {
+                "metrics_status": data.get("status"),
+                "metrics_stale": data.get("stale") is True,
+                "metrics_capability": data.get("capability"),
+                "metrics_reason": data.get("reason"),
+            }
         elif item.operation in {
             "mieru.lifecycle.start",
             "mieru.lifecycle.stop",

@@ -56,7 +56,16 @@ class MieruClient:
         return await self._request("GET", "/v1/users")
 
     async def metrics(self):
-        return await self._request("GET", "/v1/metrics")
+        value = await self._request("GET", "/v1/metrics")
+        if value != {
+            "status": "error",
+            "stale": True,
+            "users": [],
+            "capability": "unavailable",
+            "reason": "typed_histories_unavailable",
+        }:
+            raise MieruError("Invalid Mieru metrics response")
+        return value
 
     async def lifecycle(self, action):
         if action not in {"start", "stop", "restart"}:
@@ -113,10 +122,11 @@ class MemoryMieru:
         if self.broken:
             raise MieruError("unavailable")
         return {
-            "status": "ready",
-            "stale": False,
+            "status": "error",
+            "stale": True,
             "users": [],
-            "semantics": "rolling application-byte admission quota (approximate)",
+            "capability": "unavailable",
+            "reason": "typed_histories_unavailable",
         }
 
     async def create(self, payload):
@@ -160,4 +170,4 @@ class MemoryMieru:
         return {"username": username, "revision": self._next()}
 
     async def reset_metrics(self, username):
-        return {"username": username, "baseline_reset": True}
+        raise MieruError("Mieru metrics unavailable", 409)

@@ -64,7 +64,14 @@ def test_fleet_inventory_accepts_mieru_version_and_capabilities(tmp_path):
 async def test_node_agent_routes_typed_mieru_operations_without_generic_paths():
     class Client:
         async def health(self): return {"status": "running", "ready": True, "revision": "mrev-1"}
-        async def metrics(self): return {"status": "ready", "stale": False, "users": []}
+        async def metrics(self):
+            return {
+                "status": "error",
+                "stale": True,
+                "users": [],
+                "capability": "unavailable",
+                "reason": "typed_histories_unavailable",
+            }
         async def lifecycle(self, action):
             assert action == "restart"
             return {"status": "running", "ready": True, "revision": "mrev-1"}
@@ -74,6 +81,13 @@ async def test_node_agent_routes_typed_mieru_operations_without_generic_paths():
     assert inspected == {"mieru_status": "running", "mieru_ready": True, "mieru_revision": "mrev-1"}
     restarted = await executor.execute(command(operation="mieru.lifecycle.restart", payload={}))
     assert restarted["mieru_status"] == "running"
+    metrics = await executor.execute(command(operation="mieru.metrics", payload={}))
+    assert metrics == {
+        "metrics_status": "error",
+        "metrics_stale": True,
+        "metrics_capability": "unavailable",
+        "metrics_reason": "typed_histories_unavailable",
+    }
 
 
 async def test_uncertain_mieru_lifecycle_is_durable_indeterminate(tmp_path):

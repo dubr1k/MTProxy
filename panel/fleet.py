@@ -119,7 +119,8 @@ def validate_result(value: Any, operation: str | None = None, status: str | None
     if not isinstance(value, dict):
         raise ProtocolError("result must be an object")
     allowed = {"username", "enabled", "used_bytes", "telemt_revision", "inventory", "message",
-               "mieru_status", "mieru_ready", "mieru_revision", "metrics_status", "metrics_stale"}
+               "mieru_status", "mieru_ready", "mieru_revision", "metrics_status", "metrics_stale",
+               "metrics_capability", "metrics_reason"}
     if set(value) - allowed:
         raise ProtocolError("result contains unsupported fields")
     if "username" in value and (not isinstance(value["username"], str) or not USER_RE.fullmatch(value["username"])):
@@ -147,13 +148,21 @@ def validate_result(value: Any, operation: str | None = None, status: str | None
         raise ProtocolError("result metrics status is invalid")
     if "metrics_stale" in value and not isinstance(value["metrics_stale"], bool):
         raise ProtocolError("result metrics stale flag is invalid")
+    if "metrics_capability" in value and value["metrics_capability"] != "unavailable":
+        raise ProtocolError("result metrics capability is invalid")
+    if "metrics_reason" in value and value["metrics_reason"] != "typed_histories_unavailable":
+        raise ProtocolError("result metrics reason is invalid")
     if "inventory" in value:
         validate_inventory(value["inventory"])
     if status in {"failed", "indeterminate"} and set(value) != {"message"}:
         raise ProtocolError("failure result is invalid")
     if status == "succeeded" and operation:
         if operation.startswith("mieru."):
-            required = {"metrics_status", "metrics_stale"} if operation == "mieru.metrics" else {"mieru_status", "mieru_ready", "mieru_revision"}
+            required = (
+                {"metrics_status", "metrics_stale", "metrics_capability", "metrics_reason"}
+                if operation == "mieru.metrics"
+                else {"mieru_status", "mieru_ready", "mieru_revision"}
+            )
             if set(value) != required:
                 raise ProtocolError("Mieru result is invalid")
         elif operation == "telemt.inventory.refresh":

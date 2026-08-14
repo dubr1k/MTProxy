@@ -714,6 +714,14 @@ def create_app(
                     "traffic": {"available": False, "label": "application bytes"},
                 }
             else:
+                if mieru_metrics != {
+                    "status": "error",
+                    "stale": True,
+                    "users": [],
+                    "capability": "unavailable",
+                    "reason": "typed_histories_unavailable",
+                }:
+                    raise MieruError("Invalid Mieru metrics response")
                 active = sum(
                     item.get("enabled") is True
                     for item in mieru_users
@@ -737,14 +745,10 @@ def create_app(
                         "total": active + disabled,
                     },
                     "traffic": {
-                        "available": mieru_metrics.get("status") == "ready",
+                        "available": False,
+                        "capability": "unavailable",
+                        "reason": "typed_histories_unavailable",
                         "label": "application bytes",
-                        "stale": mieru_metrics.get("stale") is True,
-                        "bytes": sum(
-                            item.get("application_bytes", 0)
-                            for item in mieru_metrics.get("users", [])
-                            if isinstance(item, dict)
-                        ),
                     },
                 }
         else:
@@ -950,6 +954,14 @@ def create_app(
             for row in metrics.get("users", [])
             if isinstance(row, dict)
         }
+        if metrics != {
+            "status": "error",
+            "stale": True,
+            "users": [],
+            "capability": "unavailable",
+            "reason": "typed_histories_unavailable",
+        }:
+            raise MieruError("Invalid Mieru metrics response")
         safe = []
         for item in items:
             if not isinstance(item, dict) or not re.fullmatch(
@@ -959,6 +971,7 @@ def create_app(
             row = {
                 "username": item["username"],
                 "enabled": item.get("enabled") is True,
+                "traffic_available": False,
                 "quotas": item.get("quotas", [])
                 if isinstance(item.get("quotas", []), list)
                 else [],
@@ -970,6 +983,10 @@ def create_app(
             safe.append(row)
         return {
             "items": safe,
+            "metrics": {
+                "capability": "unavailable",
+                "reason": "typed_histories_unavailable",
+            },
             "service": {
                 "ready": health.get("ready") is True,
                 "status": health.get("status"),

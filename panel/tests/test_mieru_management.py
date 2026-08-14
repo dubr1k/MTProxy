@@ -25,7 +25,13 @@ class StubManager:
         return [{"username": "alice", "enabled": True, "quotas": []}]
 
     def metrics(self):
-        return {"status": "ready", "stale": False, "users": []}
+        return {
+            "status": "error",
+            "stale": True,
+            "users": [],
+            "capability": "unavailable",
+            "reason": "typed_histories_unavailable",
+        }
 
     def lifecycle(self, action):
         self.lifecycle_actions.append(action)
@@ -59,7 +65,9 @@ class StubManager:
         return {"username": username, "revision": "rev-2"}
 
     def reset_metric_baseline(self, username):
-        return {"username": username, "baseline_reset": True}
+        from mieru_manager.service import ConfigConflict
+
+        raise ConfigConflict("metrics unavailable")
 
 
 def request(socket_path, token, method, path, body=None):
@@ -176,6 +184,42 @@ async def test_panel_mieru_owner_lifecycle_is_one_time_and_audited(
     assert "mierus://" not in audit and "mieru.create" in audit
 
 
+async def test_panel_preserves_unavailable_metrics_without_synthesizing_zero(
+    client, login_user, mieru
+):
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+    created = await client.post(
+        "/api/mieru/users",
+        json={"username": "phone", "quotas": [], "expected_revision": "rev-1"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert created.status_code == 201
+
+    listed = (await client.get("/api/mieru/users")).json()
+    assert listed["metrics"] == {
+        "capability": "unavailable",
+        "reason": "typed_histories_unavailable",
+    }
+    assert listed["items"][0]["traffic_available"] is False
+    assert "upload_bytes" not in listed["items"][0]
+    assert "download_bytes" not in listed["items"][0]
+    reset = await client.post(
+        "/api/mieru/users/phone/reset-metrics",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert reset.status_code == 409
+
+    dashboard = (await client.get("/api/dashboard")).json()["protocols"]["mieru"]
+    assert dashboard["status"] == "ready"
+    assert dashboard["traffic"] == {
+        "available": False,
+        "capability": "unavailable",
+        "reason": "typed_histories_unavailable",
+        "label": "application bytes",
+    }
+
+
 async def test_panel_mieru_viewer_is_read_only(client, login_user):
     store = client._transport.app.state.store
     store.create_admin("viewer-m", "viewer password long enough", "viewer")
@@ -195,9 +239,8 @@ async def test_dashboard_reports_mieru_disabled_ready_and_degraded(
 ):
     await login_user(client)
     ready = (await client.get("/api/dashboard")).json()["protocols"]["mieru"]
-    assert (
-        ready["status"] == "ready" and ready["traffic"]["label"] == "application bytes"
-    )
+    assert ready["status"] == "ready"
+    assert ready["traffic"]["capability"] == "unavailable"
     mieru.broken = True
     degraded = (await client.get("/api/dashboard")).json()["protocols"]["mieru"]
     assert degraded["status"] == "degraded"
