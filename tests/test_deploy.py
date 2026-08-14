@@ -233,6 +233,48 @@ class DeployCliTests(unittest.TestCase):
         service = json.loads(proc.stdout)["services"]["fleet-ingress"]
         self.assertEqual(service["user"], "10001:10001")
 
+    def test_host_fleet_ingress_root_stages_certbot_key_for_panel(self):
+        env_file = ROOT / "deploy/fleet-ingress.env.example"
+        values = dict(
+            line.split("=", 1)
+            for line in env_file.read_text().splitlines()
+            if line and not line.startswith("#")
+        )
+        self.assertEqual(
+            values["FLEET_SERVER_KEY_SOURCE"],
+            "/etc/letsencrypt/live/fleet.example.com/privkey.pem",
+        )
+        self.assertEqual(
+            values["FLEET_SERVER_CERT_SOURCE"],
+            "/etc/letsencrypt/live/fleet.example.com/fullchain.pem",
+        )
+        self.assertEqual(values["FLEET_SERVER_KEY"], "/run/mtproxy-fleet-ingress/server.key")
+        self.assertEqual(values["FLEET_SERVER_CERT"], "/run/mtproxy-fleet-ingress/server.crt")
+
+        unit_text = (ROOT / "deploy/mtproxy-fleet-ingress.service").read_text()
+        self.assertIn("RuntimeDirectory=mtproxy-fleet-ingress", unit_text)
+        self.assertIn("RuntimeDirectoryMode=0700", unit_text)
+        self.assertIn(
+            "ExecStartPre=+/usr/bin/install -o panel -g panel -m 0400 "
+            "${FLEET_SERVER_KEY_SOURCE} /run/mtproxy-fleet-ingress/server.key",
+            unit_text,
+        )
+        self.assertIn(
+            "ExecStartPre=+/usr/bin/install -o panel -g panel -m 0444 "
+            "${FLEET_SERVER_CERT_SOURCE} /run/mtproxy-fleet-ingress/server.crt",
+            unit_text,
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            unit = Path(td) / "mtproxy-fleet-ingress.service"
+            unit.write_text(unit_text.replace(
+                "/opt/mtproxy-panel/venv/bin/python -m panel.agent_ingress", "/bin/true"
+            ))
+            verified = subprocess.run(
+                ["systemd-analyze", "verify", str(unit)], text=True, capture_output=True
+            )
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

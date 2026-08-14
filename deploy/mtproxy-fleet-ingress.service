@@ -8,6 +8,12 @@ Type=simple
 User=panel
 Group=panel
 EnvironmentFile=/etc/mtproxy-panel/fleet-ingress.env
+RuntimeDirectory=mtproxy-fleet-ingress
+RuntimeDirectoryMode=0700
+# The leading '+' runs only these copies as root.  The panel never receives
+# access to Certbot's root-owned private-key tree.
+ExecStartPre=+/usr/bin/install -o panel -g panel -m 0444 ${FLEET_SERVER_CERT_SOURCE} /run/mtproxy-fleet-ingress/server.crt
+ExecStartPre=+/usr/bin/install -o panel -g panel -m 0400 ${FLEET_SERVER_KEY_SOURCE} /run/mtproxy-fleet-ingress/server.key
 ExecStart=/opt/mtproxy-panel/venv/bin/python -m panel.agent_ingress
 Restart=on-failure
 RestartSec=3s

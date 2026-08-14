@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
 
 from scripts.proxyctl import InstallerConflict, RuntimeInstaller, RuntimePlan
+
+proxyctl = sys.modules[RuntimeInstaller.__module__]
 
 
 class FakeRunner:
@@ -247,6 +251,83 @@ def test_uninstall_retries_each_destructive_phase_and_preserves_credentials(tmp_
     assert route.read_bytes() == original_route
     assert not (root / "var/lib/proxy-control/runtime.json").exists()
     assert (root / "opt/mtproxy-shared443/secrets/users.conf").read_bytes() == secret
+
+
+def test_uninstall_resumes_when_crash_hits_nested_ownership_uninstall_checkpoint(tmp_path, monkeypatch):
+    """A durable inner `uninstalling` journal must be resumable by the outer transaction."""
+    root, route = runtime_root(tmp_path)
+    original_route = route.read_bytes()
+    runner = FakeRunner()
+    manager = RuntimeInstaller(plan(Path(__file__).parents[1]), root=root, runner=runner)
+    manager.install()
+    real_write_state = proxyctl._write_state
+    crashed = False
+
+    def crash_after_nested_checkpoint(path, state):
+        nonlocal crashed
+        real_write_state(path, state)
+        if path.name == "ownership.json" and state["status"] == "uninstalling" and not crashed:
+            crashed = True
+            raise SystemExit("injected nested checkpoint crash")
+
+    monkeypatch.setattr(proxyctl, "_write_state", crash_after_nested_checkpoint)
+    with pytest.raises(SystemExit, match="nested checkpoint"):
+        manager.uninstall()
+
+    runtime_state = json.loads((root / "var/lib/proxy-control/runtime.json").read_text())
+    ownership_state = json.loads((root / "var/lib/proxy-control/ownership.json").read_text())
+    assert runtime_state["phase"] == "compose_down"
+    assert ownership_state["status"] == "uninstalling"
+
+    manager.uninstall()
+
+    assert route.read_bytes() == original_route
+    assert not (root / "var/lib/proxy-control/runtime.json").exists()
+    assert not (root / "var/lib/proxy-control/ownership.json").exists()
+
+
+def test_runtime_phase_checkpoints_follow_durable_filesystem_mutations(tmp_path, monkeypatch):
+    """Copied trees, symlinks, mkdirs, and removals must reach disk before their phase journals."""
+    root, _ = runtime_root(tmp_path)
+    manager = RuntimeInstaller(plan(Path(__file__).parents[1]), root=root, runner=FakeRunner())
+    real_fsync = os.fsync
+    synced: set[Path] = set()
+    phase_syncs: dict[str, set[Path]] = {}
+
+    def track_fsync(fd):
+        try:
+            synced.add(Path(os.readlink(f"/proc/self/fd/{fd}")))
+        except OSError:
+            pass
+        return real_fsync(fd)
+
+    real_checkpoint = manager._checkpoint
+
+    def capture_checkpoint(state, *, status=None, phase=None):
+        real_checkpoint(state, status=status, phase=phase)
+        if phase is not None:
+            phase_syncs[phase] = set(synced)
+        if phase in {"sites_removing", "sites_removed"}:
+            synced.clear()
+
+    monkeypatch.setattr(proxyctl.os, "fsync", track_fsync)
+    monkeypatch.setattr(manager, "_checkpoint", capture_checkpoint)
+
+    manager.install()
+
+    project = root / "opt/mtproxy-shared443"
+    assert project / "compose.yaml" in phase_syncs["project_rendered"]
+    assert project / "scripts/proxyctl.py" in phase_syncs["project_rendered"]
+    assert project / "docker" in phase_syncs["project_rendered"]
+    assert project / "panel" in phase_syncs["project_rendered"]
+    assert root / "var/www/tga.dubr1kkk.uk/.well-known/acme-challenge" in phase_syncs["sites_installed"]
+    assert root / "etc/nginx/sites-enabled" in phase_syncs["sites_installed"]
+
+    manager.uninstall()
+
+    assert root / "etc/nginx/sites-available" in phase_syncs["sites_removed"]
+    assert root / "etc/nginx/sites-enabled" in phase_syncs["sites_removed"]
+    assert project in phase_syncs["project_cleaned"]
 
 
 def test_failed_install_rollback_is_retried_before_reinstall(tmp_path):

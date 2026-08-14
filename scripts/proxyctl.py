@@ -495,6 +495,69 @@ def _ensure_parent(path: Path) -> None:
         _fsync_dir(directory.parent)
 
 
+def _durable_mkdir(path: Path, *, mode: int = 0o777) -> None:
+    missing = []
+    cursor = path
+    while not cursor.exists():
+        missing.append(cursor)
+        cursor = cursor.parent
+    if not cursor.is_dir():
+        raise NotADirectoryError(cursor)
+    for directory in reversed(missing):
+        directory.mkdir(mode=mode if directory == path else 0o777)
+        _fsync_dir(directory)
+        _fsync_dir(directory.parent)
+
+
+def _fsync_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_tree(path: Path) -> None:
+    """Persist a newly copied tree bottom-up before journaling its phase."""
+    for directory, names, files in os.walk(path, topdown=False):
+        current = Path(directory)
+        for name in files:
+            child = current / name
+            if not child.is_symlink() and child.is_file():
+                _fsync_file(child)
+        for name in names:
+            child = current / name
+            if not child.is_symlink() and child.is_dir():
+                _fsync_dir(child)
+        _fsync_dir(current)
+    _fsync_dir(path.parent)
+
+
+def _durable_copy2(source: Path, destination: Path) -> None:
+    _ensure_parent(destination)
+    shutil.copy2(source, destination)
+    _fsync_file(destination)
+    _fsync_dir(destination.parent)
+
+
+def _durable_symlink(target: str, path: Path) -> None:
+    _ensure_parent(path)
+    os.symlink(target, path)
+    _fsync_dir(path.parent)
+
+
+def _durable_remove(path: Path, *, missing_ok: bool = False) -> None:
+    if not path.exists() and not path.is_symlink():
+        if missing_ok:
+            return
+        raise FileNotFoundError(path)
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+    _fsync_dir(path.parent)
+
+
 def _atomic_write(path: Path, data: bytes, *, mode: int, owner: tuple[int, int] | None = None) -> None:
     _ensure_parent(path)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -502,10 +565,10 @@ def _atomic_write(path: Path, data: bytes, *, mode: int, owner: tuple[int, int] 
         with tmp.open("wb") as handle:
             handle.write(data)
             handle.flush()
+            os.fchmod(handle.fileno(), mode)
+            if owner is not None:
+                os.fchown(handle.fileno(), *owner)
             os.fsync(handle.fileno())
-        os.chmod(tmp, mode)
-        if owner is not None:
-            os.chown(tmp, *owner)
         os.replace(tmp, path)
         _fsync_dir(path.parent)
     finally:
@@ -773,39 +836,54 @@ def _uninstall_installation_unlocked(
     if loaded is None:
         return
     manifest, state = loaded
-    if state["status"] != "active":
+    if state["status"] not in {"active", "uninstalling"}:
         raise InstallerConflict("repair the interrupted transaction before uninstall")
     route = _root_path(root, state["route_file"])
     backup = _root_path(root, state["backup_file"])
-    if not route.is_file() or not backup.is_file():
+    if not route.is_file():
         raise InstallerConflict("owned route or backup is missing")
-    owned, original = route.read_bytes(), backup.read_bytes()
-    if _sha256(owned) != state["route_sha256_owned"]:
-        raise InstallerConflict("owned route file has drifted")
+    current = route.read_bytes()
+    if not backup.is_file():
+        if state["status"] == "uninstalling" and _sha256(current) == state["route_sha256_before"]:
+            validate()
+            reload()
+            manifest.unlink()
+            _fsync_dir(manifest.parent)
+            return
+        raise InstallerConflict("owned route or backup is missing")
+    original = backup.read_bytes()
     if _sha256(original) != state["route_sha256_before"]:
         raise InstallerConflict("owned backup has drifted")
-    state["status"] = "uninstalling"
-    _write_state(manifest, state)
+    current_hash = _sha256(current)
+    if current_hash not in {state["route_sha256_owned"], state["route_sha256_before"]}:
+        raise InstallerConflict("owned route file has drifted")
+    if state["status"] == "active":
+        if current_hash != state["route_sha256_owned"]:
+            raise InstallerConflict("owned route file has drifted")
+        state["status"] = "uninstalling"
+        _write_state(manifest, state)
     try:
-        _atomic_write(
-            route,
-            original,
-            mode=state["route_mode"],
-            owner=(state["route_uid"], state["route_gid"]),
-        )
+        if current_hash == state["route_sha256_owned"]:
+            _atomic_write(
+                route,
+                original,
+                mode=state["route_mode"],
+                owner=(state["route_uid"], state["route_gid"]),
+            )
         validate()
         reload()
     except BaseException:
-        _atomic_write(
-            route,
-            owned,
-            mode=state["route_mode"],
-            owner=(state["route_uid"], state["route_gid"]),
-        )
-        state["status"] = "active"
-        _write_state(manifest, state)
-        validate()
-        reload()
+        if current_hash == state["route_sha256_owned"]:
+            _atomic_write(
+                route,
+                current,
+                mode=state["route_mode"],
+                owner=(state["route_uid"], state["route_gid"]),
+            )
+            state["status"] = "active"
+            _write_state(manifest, state)
+            validate()
+            reload()
         raise
     backup.unlink()
     _fsync_dir(backup.parent)
@@ -1013,19 +1091,17 @@ class RuntimeInstaller:
 
     def _write_acme_site(self) -> None:
         for domain in (self.plan.proxy_domain, self.plan.panel_domain):
-            _root_path(self.root, f"/var/www/{domain}/.well-known/acme-challenge").mkdir(
-                parents=True, exist_ok=True
-            )
+            _durable_mkdir(_root_path(self.root, f"/var/www/{domain}/.well-known/acme-challenge"))
         available = _root_path(self.root, "/etc/nginx/sites-available")
         enabled = _root_path(self.root, "/etc/nginx/sites-enabled")
         _atomic_write(available / "proxy-control-acme.conf", self._acme_site_content(), mode=0o644)
-        os.symlink("../sites-available/proxy-control-acme.conf", enabled / "proxy-control-acme.conf")
+        _durable_symlink("../sites-available/proxy-control-acme.conf", enabled / "proxy-control-acme.conf")
 
     def _write_panel_site(self) -> None:
         available = _root_path(self.root, "/etc/nginx/sites-available")
         enabled = _root_path(self.root, "/etc/nginx/sites-enabled")
         _atomic_write(available / "proxy-control-panel.conf", self._panel_site_content(), mode=0o640)
-        os.symlink("../sites-available/proxy-control-panel.conf", enabled / "proxy-control-panel.conf")
+        _durable_symlink("../sites-available/proxy-control-panel.conf", enabled / "proxy-control-panel.conf")
 
     def _render_project(self, *, recovery: bool = False) -> bool:
         project = _root_path(self.root, self.plan.project_dir)
@@ -1035,24 +1111,25 @@ class RuntimeInstaller:
             names = {entry.name for entry in project.iterdir()}
             if not recovery or ".mtproxy-owned" not in names or not names <= {".mtproxy-owned", "secrets"}:
                 raise InstallerConflict("pre-existing project requires explicit migration; refusing overwrite")
-        project.mkdir(parents=True, exist_ok=True)
+        _durable_mkdir(project)
         if not marker.exists():
             _atomic_write(marker, (uuid.uuid4().hex + "\n").encode(), mode=0o600)
         source = Path(self.plan.source_dir)
         if not source.is_dir():
             raise InstallerConflict("installer source directory does not exist")
         for name in ("compose.yaml", "uninstall.sh"):
-            shutil.copy2(source / name, project / name)
+            _durable_copy2(source / name, project / name)
         target_scripts = project / "scripts"
-        target_scripts.mkdir(exist_ok=True)
-        shutil.copy2(source / "scripts/proxyctl.py", target_scripts / "proxyctl.py")
+        _durable_mkdir(target_scripts)
+        _durable_copy2(source / "scripts/proxyctl.py", target_scripts / "proxyctl.py")
         for directory in ("docker", "panel"):
             shutil.copytree(
                 source / directory, project / directory, dirs_exist_ok=True,
                 ignore=shutil.ignore_patterns("tests", "__pycache__", "*.pyc", "*.sqlite3*"),
             )
+            _fsync_tree(project / directory)
         secret_dir = project / "secrets"
-        secret_dir.mkdir(mode=0o700, exist_ok=True)
+        _durable_mkdir(secret_dir, mode=0o700)
         users_file = secret_dir / "users.conf"
         existing: dict[str, str] = {}
         if users_file.is_file():
@@ -1095,7 +1172,7 @@ class RuntimeInstaller:
                     raise InstallerConflict(f"managed file has drifted: {host_path}")
         for _host_path, path in reversed(paths):
             if path.exists() or path.is_symlink():
-                path.unlink()
+                _durable_remove(path)
 
     def _snapshot_managed_files(self, state: dict) -> dict[str, tuple]:
         snapshots = {}
@@ -1112,10 +1189,9 @@ class RuntimeInstaller:
     def _restore_managed_files(self, snapshots: dict[str, tuple]) -> None:
         for host_path, snapshot in snapshots.items():
             path = _root_path(self.root, host_path)
-            path.unlink(missing_ok=True)
+            _durable_remove(path, missing_ok=True)
             if snapshot[0] == "symlink":
-                _ensure_parent(path)
-                os.symlink(snapshot[1], path)
+                _durable_symlink(snapshot[1], path)
             else:
                 _atomic_write(path, snapshot[1], mode=snapshot[2])
 
@@ -1169,7 +1245,7 @@ class RuntimeInstaller:
         if project.is_dir():
             for child in list(project.iterdir()):
                 if child.name not in {"secrets", ".mtproxy-owned"}:
-                    shutil.rmtree(child) if child.is_dir() else child.unlink()
+                    _durable_remove(child)
 
     def _rollback_runtime(self, state: dict) -> None:
         """Idempotently restore host routing while retaining generated credentials."""

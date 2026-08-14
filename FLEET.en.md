@@ -26,7 +26,7 @@ Run the panel and ingress against the **same** `PANEL_DATABASE`. Back it up befo
    # Keep ca.key offline/root-only; the ingress needs only ca.crt.
    ```
 
-3. Install `deploy/mtproxy-fleet-ingress.service` and `deploy/fleet-ingress.env.example`, adjusting paths and the WebPKI hostname. Expose only the selected TCP ingress port. The listener terminates mTLS directly, so no reverse-proxy client-certificate headers are involved.
+3. Install `deploy/mtproxy-fleet-ingress.service` and `deploy/fleet-ingress.env.example`, adjusting the root-only Certbot source paths and the WebPKI hostname. The unit's root-only `ExecStartPre=+` steps copy the certificate as `0444` and private key as `0400`, owned by `panel:panel`, into its `0700` `/run/mtproxy-fleet-ingress` runtime directory; the long-running process remains `panel:panel`. Do not make the Certbot private key or its parent directories group/world-readable. Restart the unit after certificate renewal so the staged copies are refreshed (for example, from a root-owned Certbot deploy hook: `systemctl restart mtproxy-fleet-ingress.service`). Expose only the selected TCP ingress port. The listener terminates mTLS directly, so no reverse-proxy client-certificate headers are involved.
 4. Start it and verify the listener and journal. For containers, `compose.fleet-central.yaml` is an equivalent hardened sidecar sharing the external `mtproxy_panel-data` volume. Bind-mounted ingress private keys must be readable only by container UID/GID 10001. (The separate node-agent image runs as UID 10002.)
 
 ## Enroll `vpn-nl2` without exporting its private key
