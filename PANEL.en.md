@@ -27,6 +27,17 @@ Passwords require at least 12 characters and are stored with Argon2id. SQLite st
 
 For owners and administrators, the Connections view can create, block, unblock, rotate, and remove individual proxy access records. An active Telegram link and QR code can be reopened through the explicit “QR and link” action. Every reveal is audited, while the link and secret are excluded from audit records and user-list responses.
 
+## Telemt 3.4.25 traffic, quotas, and limits
+
+The panel deliberately exposes two different counters:
+
+- `runtime_total_octets` comes from `GET /v1/users` (`total_octets`) and is summed on the dashboard as traffic of the current Telemt runtime generation. It normally starts with the process, but a 3.4.25 in-runtime reload creates a new statistics generation and starts this counter again. It is a diagnostic runtime metric, not quota usage; resetting quota does not clear it.
+- `quota_used_bytes` comes from `GET /v1/stats/users/quota` (`used_bytes`) and is displayed against `data_quota_bytes`. This is the resettable counter Telemt uses for quota enforcement. `quota_last_reset_epoch_secs` is the last manual-reset time, or `0` when no reset has occurred.
+
+“Reset quota” calls `POST /v1/users/{username}/reset-quota`: Telemt clears quota usage and immediately persists quota state without changing the configured quota or runtime `total_octets`. Telemt 3.4.25 has no periodic quota-state checkpoint. State is saved on an explicit reset and graceful shutdown, so an abrupt termination can lose usage accumulated since the last save. The panel does not claim or emulate automatic daily/monthly resets; use separately verified external automation when a calendar period is required.
+
+The limits form changes only documented Telemt fields: quota bytes, up/down bits per second, TCP connections, unique IPs, and RFC3339 expiration. An empty field sends `null` and removes that override. Panel responses use explicit field allowlists: Telemt `links`, `secret`, ad tags, IP lists, and any unknown or future nested fields from list/update/reset responses are not passed through.
+
 ## Optional NaiveProxy management
 
 The host-Caddy integration is enabled through a separate Docker override, so a regular MTProxy deployment without NaiveProxy remains compatible:

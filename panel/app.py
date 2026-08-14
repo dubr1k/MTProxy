@@ -162,8 +162,57 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
         if not settings.naive_enabled:
             raise HTTPException(404, "feature unavailable")
 
-    def safe_user(data):
-        return {key: value for key, value in data.items() if key not in {"secret", "links"}}
+    def safe_user(data, quota=None):
+        """Map Telemt's user view to the panel contract; never pass future fields through."""
+        if not isinstance(data, dict):
+            return {}
+        result = {}
+        string_fields = ("username", "expiration_rfc3339")
+        bool_fields = ("enabled", "in_runtime")
+        integer_fields = (
+            "max_tcp_conns", "data_quota_bytes", "rate_limit_up_bps", "rate_limit_down_bps",
+            "max_unique_ips", "current_connections", "active_unique_ips", "recent_unique_ips",
+        )
+        for key in string_fields:
+            if isinstance(data.get(key), str) or (key == "expiration_rfc3339" and data.get(key) is None and key in data):
+                result[key] = data[key]
+        for key in bool_fields:
+            if isinstance(data.get(key), bool):
+                result[key] = data[key]
+        for key in integer_fields:
+            value = data.get(key)
+            if (isinstance(value, int) and not isinstance(value, bool) and value >= 0) or (value is None and key in data):
+                result[key] = value
+        runtime_total = data.get("total_octets")
+        if isinstance(runtime_total, int) and not isinstance(runtime_total, bool) and runtime_total >= 0:
+            result["runtime_total_octets"] = runtime_total
+        if isinstance(quota, dict):
+            used = quota.get("used_bytes")
+            last_reset = quota.get("last_reset_epoch_secs")
+            if isinstance(used, int) and not isinstance(used, bool) and used >= 0:
+                result["quota_used_bytes"] = used
+            if isinstance(last_reset, int) and not isinstance(last_reset, bool) and last_reset >= 0:
+                result["quota_last_reset_epoch_secs"] = last_reset
+        return result
+
+    def safe_quota_reset(data):
+        if not isinstance(data, dict):
+            return {}
+        result = {}
+        if isinstance(data.get("username"), str):
+            result["username"] = data["username"]
+        for key in ("used_bytes", "last_reset_epoch_secs"):
+            value = data.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                result[key] = value
+        return result
+
+    def quota_by_username(data):
+        rows = data.get("users", []) if isinstance(data, dict) else []
+        return {
+            row["username"]: row for row in rows
+            if isinstance(row, dict) and isinstance(row.get("username"), str)
+        }
 
     def secret_reveal(data):
         user = data.get("user") if isinstance(data.get("user"), dict) else data
@@ -316,12 +365,19 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
         )
         return {
             "health": health, "stats": stats, "connections": connections,
-            "active_ips": active_ips, "traffic": {"total_octets": total_octets},
+            "active_ips": active_ips, "traffic": {"runtime_total_octets": total_octets},
         }
 
     @app.get("/api/users")
     async def users(_user=Depends(current)):
-        return {"items": [safe_user(item) for item in await app.state.telemt.list_users()]}
+        items, quota_data = await asyncio.gather(
+            app.state.telemt.list_users(), app.state.telemt.quota_stats(),
+        )
+        quotas = quota_by_username(quota_data)
+        return {"items": [
+            safe_user(item, quotas.get(item.get("username")))
+            for item in items if isinstance(item, dict)
+        ]}
 
     @app.post("/api/users", status_code=201)
     async def add_user(body: UserCreate, request: Request, user=Depends(roles("owner", "admin"))):
@@ -360,7 +416,7 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
     async def user_reset_quota(username: str, request: Request, user=Depends(roles("owner", "admin"))):
         data = await app.state.telemt.reset_quota(username)
         audit(user, "user.reset_quota", username, request)
-        return data
+        return safe_quota_reset(data)
 
     @app.post("/api/users/{username}/{operation}")
     async def user_operation(username: str, operation: Literal["enable", "disable", "rotate"], request: Request, user=Depends(roles("owner", "admin"))):
@@ -368,7 +424,7 @@ def create_app(settings: Settings | None = None, *, telemt=None, naive=None):
             result = await app.state.telemt.rotate(username)
             data = {"username": username, "reveal_token": reveal(secret_reveal(result), user)}
         else:
-            data = await app.state.telemt.set_enabled(username, operation == "enable")
+            data = safe_user(await app.state.telemt.set_enabled(username, operation == "enable"))
         audit(user, f"user.{operation}", username, request)
         return data
 

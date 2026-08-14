@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import time
 from urllib.parse import quote
 
 import httpx
@@ -45,11 +46,14 @@ class TelemtClient:
     async def stats(self): return (await self._request("GET", "/v1/stats/summary"))[0]
     async def connections(self): return (await self._request("GET", "/v1/runtime/connections/summary"))[0]
     async def active_ips(self): return (await self._request("GET", "/v1/stats/users/active-ips"))[0]
+    async def quota_stats(self): return (await self._request("GET", "/v1/stats/users/quota"))[0]
 
 
 class MemoryTelemt:
     def __init__(self, public_host="localhost", public_port=443):
         self.users = {}
+        self.quota_usage = {}
+        self.reset_extra = {}
         self.public_host, self.public_port = public_host, public_port
 
     async def list_users(self): return list(self.users.values())
@@ -72,11 +76,26 @@ class MemoryTelemt:
         return {"user": self.users[username], "secret": secret}
     async def update_user(self, username, fields):
         self.users[username].update(fields)
+        if "data_quota_bytes" in fields and fields["data_quota_bytes"] is None:
+            self.quota_usage.pop(username, None)
+        elif "data_quota_bytes" in fields:
+            current = self.quota_usage.setdefault(username, {
+                "username": username, "used_bytes": 0, "last_reset_epoch_secs": 0,
+            })
+            current["data_quota_bytes"] = fields["data_quota_bytes"]
         return self.users[username]
     async def reset_quota(self, username):
-        self.users[username]["total_octets"] = 0
-        return {"username": username, "used_bytes": 0}
+        current = self.quota_usage.setdefault(username, {
+            "username": username,
+            "data_quota_bytes": self.users[username].get("data_quota_bytes", 0),
+        })
+        current.update({"used_bytes": 0, "last_reset_epoch_secs": int(time.time())})
+        return {
+            "username": username, "used_bytes": 0,
+            "last_reset_epoch_secs": current["last_reset_epoch_secs"], **self.reset_extra,
+        }
     async def health(self): return {"ready": True}
     async def stats(self): return {"connections": 0, "bytes": 0}
     async def connections(self): return {"active": 0, "top_users": []}
     async def active_ips(self): return []
+    async def quota_stats(self): return {"users": list(self.quota_usage.values())}

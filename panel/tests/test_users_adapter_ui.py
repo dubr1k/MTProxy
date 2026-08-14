@@ -27,22 +27,42 @@ async def test_user_crud_rotate_and_one_time_reveal(client, login_user, telemt):
     assert (await client.delete("/api/users/alice", headers={"X-CSRF-Token": csrf})).status_code == 204
 
 
-async def test_dashboard_collects_real_per_user_traffic(client, login_user, telemt):
+async def test_dashboard_labels_process_runtime_traffic_separately_from_quota(client, login_user, telemt):
     telemt.users.update({
         "alice": {"username": "alice", "enabled": True, "total_octets": 100},
         "bob": {"username": "bob", "enabled": True, "total_octets": 250},
     })
+    telemt.quota_usage["alice"] = {"username": "alice", "data_quota_bytes": 1000, "used_bytes": 900, "last_reset_epoch_secs": 123}
     await login_user(client)
     response = await client.get("/api/dashboard")
     assert response.status_code == 200
     assert set(response.json()) >= {"health", "stats", "connections", "active_ips", "traffic"}
-    assert response.json()["traffic"] == {"total_octets": 350}
+    assert response.json()["traffic"] == {"runtime_total_octets": 350}
+
+
+async def test_user_list_merges_resettable_quota_usage_without_confusing_runtime_traffic(client, login_user, telemt):
+    telemt.users["alice"] = {
+        "username": "alice", "enabled": True, "data_quota_bytes": 10_000, "total_octets": 750,
+    }
+    telemt.quota_usage["alice"] = {
+        "username": "alice", "data_quota_bytes": 10_000, "used_bytes": 4_000,
+        "last_reset_epoch_secs": 1_700_000_000,
+    }
+    await login_user(client)
+
+    user = (await client.get("/api/users")).json()["items"][0]
+
+    assert user["runtime_total_octets"] == 750
+    assert user["quota_used_bytes"] == 4_000
+    assert user["quota_last_reset_epoch_secs"] == 1_700_000_000
+    assert "total_octets" not in user and "used_bytes" not in user
 
 
 async def test_admin_can_set_and_reset_per_user_limits(client, login_user, telemt):
     await login_user(client)
     csrf = client.cookies["panel_csrf"]
     telemt.users["alice"] = {"username": "alice", "enabled": True, "total_octets": 500}
+    telemt.quota_usage["alice"] = {"username": "alice", "data_quota_bytes": 10_000, "used_bytes": 500, "last_reset_epoch_secs": 1}
     payload = {
         "data_quota_bytes": 10_000,
         "rate_limit_up_bps": 1_000_000,
@@ -59,9 +79,28 @@ async def test_admin_can_set_and_reset_per_user_limits(client, login_user, telem
     assert {key: telemt.users["alice"][key] for key in payload} == payload
     reset = await client.post("/api/users/alice/reset-quota", headers={"X-CSRF-Token": csrf})
     assert reset.status_code == 200
-    assert telemt.users["alice"]["total_octets"] == 0
+    assert reset.json()["used_bytes"] == 0
+    assert telemt.quota_usage["alice"]["used_bytes"] == 0
+    assert telemt.users["alice"]["total_octets"] == 500
     audit = (await client.get("/api/audit")).json()["items"]
     assert {row["action"] for row in audit} >= {"user.limits", "user.reset_quota"}
+
+
+async def test_sparse_limit_update_keeps_existing_quota_state(client, login_user, telemt):
+    telemt.users["alice"] = {"username": "alice", "enabled": True, "data_quota_bytes": 10_000}
+    telemt.quota_usage["alice"] = {
+        "username": "alice", "data_quota_bytes": 10_000, "used_bytes": 4_000,
+        "last_reset_epoch_secs": 123,
+    }
+    await login_user(client)
+
+    response = await client.post(
+        "/api/users/alice/limits", json={"max_tcp_conns": 3},
+        headers={"X-CSRF-Token": client.cookies["panel_csrf"]},
+    )
+
+    assert response.status_code == 200
+    assert telemt.quota_usage["alice"]["used_bytes"] == 4_000
 
 
 async def test_viewer_cannot_change_or_reset_limits(client, login_user, telemt):
@@ -94,6 +133,29 @@ async def test_telemt_adapter_patches_limits_and_resets_quota():
     assert seen[1][:2] == ("POST", "/v1/users/alice/reset-quota")
 
 
+async def test_telemt_adapter_reads_3425_quota_stats_route():
+    import httpx
+    seen = []
+
+    async def handler(request):
+        seen.append((request.method, request.url.path))
+        return httpx.Response(200, json={
+            "ok": True,
+            "data": {"users": [{
+                "username": "alice", "data_quota_bytes": 2048,
+                "used_bytes": 512, "last_reset_epoch_secs": 123,
+            }]},
+            "revision": "r",
+        })
+
+    telemt = TelemtClient("http://telemt:9091", "Bearer internal-token", transport=httpx.MockTransport(handler))
+    assert await telemt.quota_stats() == {"users": [{
+        "username": "alice", "data_quota_bytes": 2048,
+        "used_bytes": 512, "last_reset_epoch_secs": 123,
+    }]}
+    assert seen == [("GET", "/v1/stats/users/quota")]
+
+
 async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(client, login_user):
     await login_user(client)
     page = await client.get("/")
@@ -117,9 +179,11 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert "renderNaive" in js and "naiveAction" in js and "showNaiveAccess" in js
     assert "admin-form');if(!form.reportValidity()" in js
     assert 'id="limits-modal"' in text and 'id="save-limits"' in text
-    assert "data.traffic?.total_octets" in js
-    assert "user.total_octets" in js and "data-action=\"limits\"" in js
+    assert "data.traffic?.runtime_total_octets" in js
+    assert "user.quota_used_bytes" in js and "data-action=\"limits\"" in js
     assert "/limits`" in js and "/reset-quota`" in js
+    assert "текущего runtime-поколения" in js
+    assert "Автоматического ежемесячного сброса нет" in text
 
 
 async def test_telemt_adapter_sends_auth_and_maps_envelope():
@@ -158,6 +222,64 @@ async def test_user_list_strips_links_and_all_secret_material(client, login_user
     assert "links" not in body["items"][0]
     assert "secret" not in str(body).lower()
     assert "tg://" not in str(body)
+
+
+async def test_user_api_allowlist_drops_unknown_and_nested_future_secret_fields(client, login_user, telemt):
+    await login_user(client)
+    telemt.users["alice"] = {
+        "username": "alice", "enabled": True, "total_octets": 12,
+        "future_auth": {
+            "secret": "future-secret", "nested": {"token": "future-token"},
+        },
+        "secret_backup": "backup-secret",
+    }
+    telemt.quota_usage["alice"] = {
+        "username": "alice", "data_quota_bytes": 100, "used_bytes": 12,
+        "last_reset_epoch_secs": 1, "future": {"secret": "quota-secret"},
+    }
+
+    body = (await client.get("/api/users")).json()
+
+    assert body == {"items": [{
+        "username": "alice", "enabled": True, "runtime_total_octets": 12,
+        "quota_used_bytes": 12, "quota_last_reset_epoch_secs": 1,
+    }]}
+    assert not any(value in str(body) for value in ("future-secret", "future-token", "backup-secret", "quota-secret"))
+
+
+async def test_limit_and_reset_responses_use_allowlists(client, login_user, telemt):
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+    telemt.users["alice"] = {
+        "username": "alice", "enabled": True,
+        "future": {"secret": "patched-secret"},
+    }
+    telemt.reset_extra = {"future": {"token": "reset-token"}}
+
+    changed = await client.post(
+        "/api/users/alice/limits", json={"data_quota_bytes": 1000}, headers={"X-CSRF-Token": csrf},
+    )
+    reset = await client.post("/api/users/alice/reset-quota", headers={"X-CSRF-Token": csrf})
+
+    assert changed.json() == {"username": "alice", "enabled": True, "data_quota_bytes": 1000}
+    assert set(reset.json()) == {"username", "used_bytes", "last_reset_epoch_secs"}
+    assert "patched-secret" not in str(changed.json()) and "reset-token" not in str(reset.json())
+
+
+async def test_enable_disable_response_uses_user_allowlist(client, login_user, telemt):
+    await login_user(client)
+    telemt.users["alice"] = {
+        "username": "alice", "enabled": True,
+        "future": {"secret": "operation-secret"},
+    }
+
+    response = await client.post(
+        "/api/users/alice/disable",
+        headers={"X-CSRF-Token": client.cookies["panel_csrf"]},
+    )
+
+    assert response.json() == {"username": "alice", "enabled": False}
+    assert "operation-secret" not in response.text
 
 
 async def test_admin_can_reopen_share_link_and_qr_without_exposing_it_in_lists_or_audit(client, login_user, telemt):
