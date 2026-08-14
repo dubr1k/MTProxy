@@ -11,6 +11,7 @@ PANEL=panel.lab.test
 ROUTE=/etc/nginx/stream.d/routes.conf
 RESULTS_FAILED=0
 BASELINE=/tmp/lab-baseline.sha256
+declare -A CASE_STATUS=()
 
 emit() {
   local name=$1 status=$2 started=$3 message=${4:-}
@@ -22,18 +23,34 @@ PY
 )
   message=${message//$'\t'/ }
   message=${message//$'\n'/ }
+  message=${message:0:4000}
   printf 'LAB_RESULT\t%s\t%s\t%s\t%s\n' "$name" "$status" "$elapsed" "$message"
   [[ $status == passed ]] || RESULTS_FAILED=1
 }
 
 case_run() {
-  local name=$1 function=$2 started log
+  local name=$1 function=$2 started log rc message prerequisite
+  shift 2
   started=$(python3 -c 'import time; print(time.time())')
+  for prerequisite in "$@"; do
+    if [[ ${CASE_STATUS[$prerequisite]:-missing} != passed ]]; then
+      CASE_STATUS[$name]=skipped
+      emit "$name" skipped "$started" "prerequisite failed: $prerequisite"
+      return 0
+    fi
+  done
   log=$(mktemp)
-  if "$function" >"$log" 2>&1; then
+  set +e
+  ( set -Eeuo pipefail; "$function" ) >"$log" 2>&1
+  rc=$?
+  set -e
+  if ((rc == 0)); then
+    CASE_STATUS[$name]=passed
     emit "$name" passed "$started"
   else
-    emit "$name" failed "$started" "$(tail -n 3 "$log" | tr '\n' ' ')"
+    CASE_STATUS[$name]=failed
+    message=$(tr '\n' ' ' <"$log")
+    emit "$name" failed "$started" "$message"
   fi
   rm -f "$log"
 }
@@ -224,11 +241,14 @@ runtime_cmd() {
 full_audit() { python3 "$ROOT/scripts/proxyctl.py" audit --proxy-domain "$PROXY" --panel-domain "$PANEL" --json >/tmp/audit.json; }
 full_plan() { runtime_cmd plan >/tmp/plan.json; }
 full_install() {
+  test ! -e /var/lib/proxy-control/runtime.json
+  test ! -e /var/lib/proxy-control/ownership.json
+  test ! -e /opt/mtproxy-shared443
   runtime_cmd install >/tmp/install.out
   systemctl is-active docker nginx >/dev/null
   test "$(stat -c %a /var/lib/proxy-control/runtime.json)" = 600
-  test "$(stat -c %a /var/lib/proxy-control/ownership.json)" = 600
   jq -e '.status == "active" and (.owned_packages == [])' /var/lib/proxy-control/runtime.json >/dev/null
+  test "$(stat -c %a /var/lib/proxy-control/ownership.json)" = 600
 }
 full_repair() { python3 "$ROOT/scripts/proxyctl.py" repair; test "$(jq -r .status /var/lib/proxy-control/runtime.json)" = active; }
 full_idempotence() {
@@ -242,6 +262,7 @@ full_uninstall() {
   python3 "$ROOT/scripts/proxyctl.py" uninstall
   python3 "$ROOT/scripts/proxyctl.py" uninstall
   test ! -e /var/lib/proxy-control/runtime.json
+  test ! -e /var/lib/proxy-control/ownership.json
   sha256sum -c "$BASELINE" >/dev/null
   systemctl is-active nginx lab-xray lab-warp lab-3x-ui > /tmp/status.after
   cmp /tmp/status.before /tmp/status.after
@@ -250,29 +271,36 @@ full_uninstall() {
 }
 
 interrupt_install_recovery() {
+  test ! -e /var/lib/proxy-control/runtime.json
+  test ! -e /var/lib/proxy-control/ownership.json
+  test ! -e /opt/mtproxy-shared443
   mapfile -t args < <(proxy_args)
-  python3 "$ROOT/scripts/proxyctl.py" install "${args[@]}" >/tmp/interrupted-install.log 2>&1 &
-  local child=$!
-  for _ in $(seq 1 600); do
-    if [[ -f /var/lib/proxy-control/runtime.json ]]; then kill -KILL "$child" 2>/dev/null || true; break; fi
-    sleep .05
-  done
-  wait "$child" 2>/dev/null || true
+  set +e
+  PROXYCTL_TEST_CRASH_AFTER_PHASE=project_rendered \
+    python3 "$ROOT/scripts/proxyctl.py" install "${args[@]}" >/tmp/interrupted-install.log 2>&1
+  local interrupted_rc=$?
+  set -e
+  test "$interrupted_rc" -eq 137
   test -f /var/lib/proxy-control/runtime.json
+  test "$(jq -r .phase /var/lib/proxy-control/runtime.json)" = project_rendered
   runtime_cmd install >/tmp/recovered-install.out
   test "$(jq -r .status /var/lib/proxy-control/runtime.json)" = active
+  test -f /var/lib/proxy-control/ownership.json
 }
 
 interrupt_uninstall_recovery() {
-  python3 "$ROOT/scripts/proxyctl.py" uninstall >/tmp/interrupted-uninstall.log 2>&1 &
-  local child=$!
-  for _ in $(seq 1 600); do
-    if jq -e '.status == "uninstalling"' /var/lib/proxy-control/runtime.json >/dev/null 2>&1; then kill -KILL "$child" 2>/dev/null || true; break; fi
-    sleep .05
-  done
-  wait "$child" 2>/dev/null || true
+  test "$(jq -r .status /var/lib/proxy-control/runtime.json)" = active
+  test -f /var/lib/proxy-control/ownership.json
+  set +e
+  PROXYCTL_TEST_CRASH_AFTER_PHASE=compose_down \
+    python3 "$ROOT/scripts/proxyctl.py" uninstall >/tmp/interrupted-uninstall.log 2>&1
+  local interrupted_rc=$?
+  set -e
+  test "$interrupted_rc" -eq 137
+  test "$(jq -r .phase /var/lib/proxy-control/runtime.json)" = compose_down
   python3 "$ROOT/scripts/proxyctl.py" uninstall
   test ! -e /var/lib/proxy-control/runtime.json
+  test ! -e /var/lib/proxy-control/ownership.json
 }
 
 docker_build_check() {
@@ -299,6 +327,10 @@ full_secrets_scan() {
   test "$(stat -c %a /opt/mtproxy-shared443/secrets 2>/dev/null || echo 700)" = 700
 }
 
+if [[ ${GUEST_RUNNER_LIB_ONLY:-0} == 1 ]]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 add_hosts
 make_fixture
 if [[ $MODE == smoke ]]; then
@@ -312,18 +344,19 @@ elif [[ $MODE == full ]]; then
   if ! full_environment_preflight; then
     exit "$RESULTS_FAILED"
   fi
-  case_run audit full_audit
-  case_run plan full_plan
-  case_run install full_install
-  case_run repair full_repair
-  case_run idempotence full_idempotence
-  case_run uninstall full_uninstall
-  case_run interrupted-install-recovery interrupt_install_recovery
-  case_run interrupted-uninstall-recovery interrupt_uninstall_recovery
-  case_run coexistence full_coexist
-  case_run dns-tls-preflight full_dns_tls
-  case_run docker-build docker_build_check
-  case_run secrets-scan full_secrets_scan
+  CASE_STATUS[environment-preflight]=passed
+  case_run audit full_audit environment-preflight
+  case_run plan full_plan audit
+  case_run install full_install plan
+  case_run docker-build docker_build_check install
+  case_run repair full_repair install
+  case_run idempotence full_idempotence repair
+  case_run secrets-scan full_secrets_scan idempotence
+  case_run uninstall full_uninstall idempotence
+  case_run interrupted-install-recovery interrupt_install_recovery uninstall
+  case_run interrupted-uninstall-recovery interrupt_uninstall_recovery interrupted-install-recovery
+  case_run coexistence full_coexist interrupted-uninstall-recovery
+  case_run dns-tls-preflight full_dns_tls audit
 else
   printf 'unknown mode: %s\n' "$MODE" >&2
   exit 2

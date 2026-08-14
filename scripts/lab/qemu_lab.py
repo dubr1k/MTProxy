@@ -24,9 +24,10 @@ CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "mtprox
 SCENARIOS = {
     "smoke": ("archive-integrity", "audit", "plan", "coexistence", "dns-tls-preflight", "secrets-scan"),
     "full": (
-        "environment-preflight", "audit", "plan", "install", "repair", "idempotence", "uninstall",
+        "environment-preflight", "audit", "plan", "install", "docker-build", "repair", "idempotence",
+        "secrets-scan", "uninstall",
         "interrupted-install-recovery", "interrupted-uninstall-recovery",
-        "coexistence", "dns-tls-preflight", "docker-build", "secrets-scan",
+        "coexistence", "dns-tls-preflight",
     ),
 }
 

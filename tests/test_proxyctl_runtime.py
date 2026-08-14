@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from scripts.proxyctl import InstallerConflict, RuntimeInstaller, RuntimePlan
+from scripts.proxyctl import CommandRunner, InstallerConflict, RuntimeInstaller, RuntimePlan
 
 proxyctl = sys.modules[RuntimeInstaller.__module__]
 
@@ -42,6 +44,31 @@ class FakeRunner:
             raise self.failure("injected command failure")
         if command[:3] == ("apt-get", "install", "-y"):
             self.installed.update(command[3:])
+
+
+def test_command_runner_reports_captured_stderr_for_failed_command():
+    with pytest.raises(InstallerConflict, match="specific compose failure"):
+        CommandRunner().run(("sh", "-c", "printf 'specific compose failure\\n' >&2; exit 7"))
+
+
+def test_test_hook_kills_process_only_after_requested_phase_is_durable(tmp_path):
+    root = tmp_path / "root"
+    code = """
+from pathlib import Path
+from scripts.proxyctl import RuntimeInstaller, RuntimePlan
+plan = RuntimePlan(proxy_domain='proxy.example.com', panel_domain='panel.example.com',
+    email='lab@example.com', route_file='/etc/nginx/stream.d/routes.conf',
+    source_dir='.', protocol_probe='/bin/true')
+manager = RuntimeInstaller(plan, root=Path(r'%s'))
+manager._checkpoint({}, status='installing', phase='project_rendered')
+""" % root
+    completed = subprocess.run(
+        [sys.executable, "-c", code], cwd=Path(__file__).parents[1],
+        env={**os.environ, "PROXYCTL_TEST_CRASH_AFTER_PHASE": "project_rendered"},
+    )
+    assert completed.returncode == -signal.SIGKILL
+    state = json.loads((root / "var/lib/proxy-control/runtime.json").read_text())
+    assert state == {"phase": "project_rendered", "status": "installing"}
 
 
 def runtime_root(tmp_path: Path) -> tuple[Path, Path]:

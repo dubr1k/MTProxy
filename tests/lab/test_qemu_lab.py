@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import os
 import socket
 import subprocess
 import tempfile
@@ -17,6 +18,38 @@ spec.loader.exec_module(lab)
 
 
 class QemuLabTests(unittest.TestCase):
+    def test_case_run_preserves_failure_output_and_does_not_swallow_early_failure(self):
+        runner = MODULE.parent / "guest-runner.sh"
+        script = f"""
+source {runner!s}
+fails_early() {{ printf 'first useful error\\n' >&2; false; printf 'must not run\\n' >&2; }}
+case_run install fails_early
+"""
+        completed = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True,
+            env={**os.environ, "GUEST_RUNNER_LIB_ONLY": "1"},
+        )
+        self.assertIn("LAB_RESULT\tinstall\tfailed", completed.stdout)
+        self.assertIn("first useful error", completed.stdout)
+        self.assertNotIn("must not run", completed.stdout)
+
+    def test_case_run_skips_scenario_when_explicit_prerequisite_failed(self):
+        runner = MODULE.parent / "guest-runner.sh"
+        script = f"""
+source {runner!s}
+fails() {{ false; }}
+must_not_run() {{ printf 'prerequisite was ignored\\n' >&2; return 0; }}
+case_run install fails
+case_run repair must_not_run install
+"""
+        completed = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True,
+            env={**os.environ, "GUEST_RUNNER_LIB_ONLY": "1"},
+        )
+        self.assertIn("LAB_RESULT\trepair\tskipped", completed.stdout)
+        self.assertIn("prerequisite failed: install", completed.stdout)
+        self.assertNotIn("prerequisite was ignored", completed.stdout)
+
     def test_allocate_port_returns_bindable_loopback_port(self):
         port = lab.allocate_port()
         with socket.socket() as probe:

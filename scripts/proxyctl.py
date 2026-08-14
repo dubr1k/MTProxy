@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import shutil
 import socket
 import ssl
@@ -1017,10 +1018,17 @@ class CommandRunner:
     def run(self, argv, *, stdin_path: Path | None = None, env: dict[str, str] | None = None) -> None:
         stdin = stdin_path.open("rb") if stdin_path else subprocess.DEVNULL
         try:
-            subprocess.run(
-                [str(value) for value in argv], check=True, stdin=stdin,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+            command = [str(value) for value in argv]
+            completed = subprocess.run(
+                command, check=False, stdin=stdin, text=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env,
             )
+            if completed.returncode:
+                detail = " ".join((completed.stderr or "").split())[-2000:]
+                suffix = f": {detail}" if detail else ""
+                raise InstallerConflict(
+                    f"command failed ({completed.returncode}): {' '.join(command)}{suffix}"
+                )
         finally:
             if stdin_path:
                 stdin.close()
@@ -1239,6 +1247,8 @@ class RuntimeInstaller:
             state["phase"] = phase
         state.pop("rollback_error", None)
         _write_state(self.state_path, state)
+        if phase is not None and os.environ.get("PROXYCTL_TEST_CRASH_AFTER_PHASE") == phase:
+            os.kill(os.getpid(), signal.SIGKILL)
 
     def _clean_project_preserving_credentials(self) -> None:
         project = _root_path(self.root, self.plan.project_dir)
