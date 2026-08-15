@@ -105,6 +105,7 @@ def test_mieru_overlay_supplies_pinned_host_binary_and_read_only_uds_access():
     assert manager["user"] == "10005:10005"
     assert manager["environment"]["MIERU_MITA_SHA256"] == MITA_AMD64_EXECUTABLE_SHA256
     assert manager["read_only"] is True
+    assert manager["environment"]["TMPDIR"] == "/run/mieru-manager"
     assert manager["cap_drop"] == ["ALL"]
     assert manager["healthcheck"]["test"] == [
         "CMD",
@@ -129,6 +130,15 @@ def test_mieru_overlay_has_only_intended_writable_runtime_mounts():
     assert writable_targets == {"/var/lib/mieru-manager", "/run/mieru-manager"}
     assert manager["tmpfs"] == ["/tmp:size=8m,mode=0700"]
     assert manager["pids_limit"] == 128
+
+
+def test_mita_systemd_unit_keeps_socket_directory_stable_and_config_mutable():
+    unit = (ROOT / "deploy" / "mita.service").read_text()
+    tmpfiles = (ROOT / "deploy" / "mita.tmpfiles.conf").read_text()
+    assert "RuntimeDirectory=mita" not in unit
+    assert "MITA_CONFIG_JSON_FILE=/var/lib/mita/server_config.json" in unit
+    assert "ExecStartPost=" in unit and "/usr/bin/mita start" in unit
+    assert "d /run/mita 0770 mita mita -" in tmpfiles
 
 
 def test_systemd_manager_uses_reserved_mieru_identity():

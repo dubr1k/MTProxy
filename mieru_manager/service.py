@@ -856,10 +856,14 @@ class MieruManager:
         result = copy.deepcopy(config)
         for user in result.get("users", []):
             if "password" in user:
-                raw = user.pop("password")
+                raw = user["password"]
+                user["password"] = ""
                 user["hashedPassword"] = hashlib.sha256(
                     (raw + "\0" + user["name"]).encode()
                 ).hexdigest()
+            # mita's protobuf JSON renderer omits an empty repeated quota field.
+            if user.get("quotas") == []:
+                user.pop("quotas")
         return result
 
     def _check_revision(self, state: dict, expected: str) -> None:

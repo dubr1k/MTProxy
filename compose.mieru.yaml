@@ -14,6 +14,7 @@ services:
       MIERU_MANAGER_TOKEN_FILE: /run/secrets/mieru-manager-token
       MIERU_MITA_SHA256: ${MIERU_MITA_SHA256:?set the pinned host mita binary SHA-256}
       MIERU_SOCKET_MODE: "660"
+      TMPDIR: /run/mieru-manager
       MITA_UDS_PATH: /run/mita/mita.sock
     secrets: [mieru-manager-token]
     volumes:

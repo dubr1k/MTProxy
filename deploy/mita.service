@@ -1,0 +1,38 @@
+[Unit]
+Description=Mieru proxy server v3.35.0 (Proxy Control)
+After=network-online.target systemd-tmpfiles-setup.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mita
+Group=mita
+Environment=MITA_LOG_NO_TIMESTAMP=true
+Environment=MITA_CONFIG_JSON_FILE=/var/lib/mita/server_config.json
+Environment=MITA_UDS_PATH=/run/mita/mita.sock
+StateDirectory=mita
+StateDirectoryMode=0700
+ExecStart=/usr/bin/mita run
+ExecStartPost=/bin/sh -ec 'for i in $(seq 1 50); do test -S /run/mita/mita.sock && exec /usr/bin/mita start; sleep 0.1; done; exit 1'
+Restart=on-failure
+RestartSec=2s
+UMask=0007
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+ReadOnlyPaths=/usr/bin/mita
+ReadWritePaths=/run/mita /var/lib/mita
+
+[Install]
+WantedBy=multi-user.target

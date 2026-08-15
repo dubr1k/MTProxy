@@ -251,10 +251,13 @@ class FakeMita:
         value = json.loads(json.dumps(config))
         for user in value.get("users", []):
             if "password" in user:
-                raw = user.pop("password")
+                raw = user["password"]
+                user["password"] = ""
                 user["hashedPassword"] = hashlib.sha256(
                     (raw + "\0" + user["name"]).encode()
                 ).hexdigest()
+            if user.get("quotas") == []:
+                user.pop("quotas")
         return value
 
 

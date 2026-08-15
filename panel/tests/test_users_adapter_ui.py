@@ -262,6 +262,9 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'class="nav-item owner-only" data-view="admins" hidden' in text
     css = await client.get("/static/style.css")
     assert "@media(max-width:760px)" in css.text
+    assert "@media(max-width:1040px)" in css.text
+    assert "@media(max-width:900px)" in css.text
+    assert ".row-actions{display:flex;justify-content:flex-end;gap:5px;flex-wrap:wrap}" in css.text
     js = (await client.get("/static/app.js")).text
     assert "function proxyLink" in js and "navigationGeneration" in js
     assert 'value="cancel" formnovalidate' in text
@@ -291,6 +294,10 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert "renderMieru" in js and "mieruAction" in js
     assert "rolling application-byte admission quota" in js
     assert 'data-quick="mieru-users"' in js
+    assert 'id="fleet-modal"' in text and 'id="create-fleet-node"' in text
+    assert 'id="new-node-id"' in text and 'id="new-node-name"' in text
+    assert "openFleetModal" in js and "createFleetNode" in js
+    assert "name==='fleet'&&state.me?.role==='owner'" in js
 
 
 async def test_telemt_adapter_sends_auth_and_maps_envelope():
