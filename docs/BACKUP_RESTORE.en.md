@@ -42,7 +42,7 @@ docker compose images --format json > "$backup/compose-images.json"
 Prefer the online backup API. Example for the panel container:
 
 ```bash
-docker exec -i mtproxy-panel-1 python - <<'PY'
+docker exec -i proxy-control-panel python - <<'PY'
 import sqlite3
 src = sqlite3.connect('/data/panel.sqlite3')
 dst = sqlite3.connect('/data/panel.backup.sqlite3')

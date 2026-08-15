@@ -17,6 +17,8 @@ Access lifecycle · one-time QR and client configs · honest accounting · trans
 
 </div>
 
+<p align="center"><img src="assets/proxy-control-cover.png" alt="Proxy Control illustration" width="100%"></p>
+
 > [!IMPORTANT]
 > Proxy Control targets operators who understand Docker, Nginx `stream`, DNS, and backups. Core, Naive, and Mieru pass local/CI gates; Telemt, Naive, and Mieru have been validated in a live deployment. The complete QEMU lifecycle and production fleet enrollment are not yet confirmed release gates.
 
@@ -36,7 +38,7 @@ The FastAPI/SQLite panel provides `owner` / `admin` / `viewer` roles, Argon2id, 
 ## Design properties
 
 - **One public TCP/443 owner.** Host Nginx `stream` + `ssl_preread` keeps shared 443 and routes SNI to loopback listeners.
-- **One Compose stack.** Every node container uses the compatibility project name `mtproxy`; overlays never create separate projects.
+- **One Compose stack.** Every node container has an explicit `proxy-control-*` name; the compatibility project name `mtproxy`, service names, and volumes remain stable for migration safety. Overlays never create separate projects.
 - **Bounded secret disclosure.** List APIs omit passwords, access URLs, QR codes, and reveal tokens. Mieru/Naive create and rotate responses are one-time and `Cache-Control: no-store`.
 - **Fail-closed transactions.** Config/state changes use backup, journal, validation, atomic replace, and rollback.
 - **Honest metrics.** The UI never invents traffic. Missing protocol boundaries render as `unavailable` or `degraded`.

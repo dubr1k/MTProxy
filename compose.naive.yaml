@@ -2,6 +2,7 @@ name: mtproxy
 
 services:
   naive-manager:
+    container_name: proxy-control-naive-manager
     build:
       context: .
       dockerfile: naive_manager/Dockerfile

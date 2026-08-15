@@ -2,6 +2,7 @@ name: mtproxy
 
 services:
   mask:
+    container_name: proxy-control-mask
     image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     environment:
       MTPROXY_DOMAIN: ${MTPROXY_DOMAIN}
@@ -26,6 +27,7 @@ services:
           - ${MTPROXY_DOMAIN}
 
   mtproxy:
+    container_name: proxy-control-mtproxy
     image: ghcr.io/samnet-dev/mtproxymax-telemt@sha256:ab27edbceb9f8c042911a7d9a44835318d1db5943ff50f276792fa29601ff856
     entrypoint: ["/usr/local/bin/telemt-entrypoint.sh"]
     restart: unless-stopped
@@ -57,6 +59,7 @@ services:
       start_period: 20s
 
   panel:
+    container_name: proxy-control-panel
     build:
       context: ./panel
     restart: unless-stopped

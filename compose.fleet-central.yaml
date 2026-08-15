@@ -2,6 +2,7 @@ name: mtproxy
 
 services:
   fleet-ingress:
+    container_name: proxy-control-fleet-ingress
     build:
       context: .
       dockerfile: deploy/Dockerfile.ingress

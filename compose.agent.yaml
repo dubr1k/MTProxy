@@ -2,6 +2,7 @@ name: mtproxy
 
 services:
   fleet-agent:
+    container_name: proxy-control-fleet-agent
     build:
       context: .
       dockerfile: deploy/Dockerfile.agent

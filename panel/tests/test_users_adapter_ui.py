@@ -294,6 +294,9 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'id="mieru-access-modal"' in text and 'id="mieru-qr-image"' in text
     assert 'id="copy-mieru-url"' in text and 'id="download-mieru-qr"' in text
     assert "renderMieru" in js and "mieruAction" in js
+    assert "function syncMieruCreateButton" in js and "form.checkValidity()" in js
+    assert '<button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-mieru" type="button" disabled>Создать</button>' in text
+    assert ".cell b,.cell small{display:block}" in css.text
     assert "showMieruAccess" in js and "qrSource(data.qr)" in js
     assert "Новая ссылка + QR" in js
     assert "rolling application-byte admission quota" in js

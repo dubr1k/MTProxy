@@ -418,6 +418,17 @@ class DeployCliTests(unittest.TestCase):
                 set(model["services"]),
                 {"mask", "mtproxy", "panel", "naive-manager", "mieru-manager", "fleet-agent", "fleet-ingress"},
             )
+            expected_container_names = {
+                "mask": "proxy-control-mask",
+                "mtproxy": "proxy-control-mtproxy",
+                "panel": "proxy-control-panel",
+                "naive-manager": "proxy-control-naive-manager",
+                "mieru-manager": "proxy-control-mieru-manager",
+                "fleet-agent": "proxy-control-fleet-agent",
+                "fleet-ingress": "proxy-control-fleet-ingress",
+            }
+            for service, container_name in expected_container_names.items():
+                self.assertEqual(model["services"][service]["container_name"], container_name)
             agent = model["services"]["fleet-agent"]
             self.assertEqual(agent["environment"]["TELEMT_API_URL"], "http://mtproxy:9091")
             self.assertNotIn("network_mode", agent)

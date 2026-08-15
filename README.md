@@ -17,6 +17,8 @@
 
 </div>
 
+<p align="center"><img src="assets/proxy-control-cover.png" alt="Proxy Control illustration" width="100%"></p>
+
 > [!IMPORTANT]
 > Proxy Control рассчитан на операторов, которые понимают Docker, Nginx `stream`, DNS и резервное копирование. Core, Naive и Mieru проходят локальные/CI-gates; Telemt, Naive и Mieru проверены в рабочем развёртывании. Полный QEMU lifecycle и production fleet enrollment пока не являются подтверждёнными release-gates.
 
@@ -36,7 +38,7 @@ Proxy Control разделяет три прокси-протокола на н�
 ## Ключевые свойства
 
 - **Один public TCP/443 owner.** Host Nginx `stream` + `ssl_preread` остаётся владельцем shared 443 и маршрутизирует SNI на loopback listeners.
-- **Один Compose stack.** Все контейнеры узла используют compatibility project name `mtproxy`; overlays не создают отдельные проекты.
+- **Один Compose stack.** Все контейнеры узла имеют явные имена `proxy-control-*`; compatibility project name `mtproxy`, service names и volumes сохраняются для миграционной совместимости. Overlays не создают отдельные проекты.
 - **Секреты выдаются ограниченно.** List API не содержит passwords, access URLs, QR или reveal tokens. Mieru/Naive create/rotate раскрываются one-time и с `Cache-Control: no-store`.
 - **Транзакции fail closed.** Config/state меняются через backup, journal, validation, atomic replace и rollback.
 - **Честные метрики.** Интерфейс не синтезирует трафик. Недоступная protocol boundary отображается как `unavailable`/`degraded`.

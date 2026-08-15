@@ -2,6 +2,7 @@ name: mtproxy
 
 services:
   mieru-manager:
+    container_name: proxy-control-mieru-manager
     build:
       context: .
       dockerfile: mieru_manager/Dockerfile

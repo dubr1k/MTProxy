@@ -85,11 +85,11 @@
 
   <dialog id="mieru-modal" class="sheet">
     <form method="dialog" id="mieru-form">
-      <div class="modal-head"><div><span class="eyebrow">MIERU V3.35</span><h2>Новый Mieru-доступ</h2></div><button class="icon-button close" value="cancel" formnovalidate>×</button></div>
+      <div class="modal-head"><div><span class="eyebrow">MIERU V3.35</span><h2>Новый Mieru-доступ</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
       <p class="modal-copy">Пароль и mierus:// ссылка показываются один раз. Квота — rolling application-byte admission quota (approximate), а не жёсткий биллинговый лимит.</p>
       <label>Имя<input id="new-mieru-user" pattern="[A-Za-z0-9_.\-]+" maxlength="64" required></label>
       <div class="limit-form-grid"><label>Окно, дней<input id="mieru-days" type="number" min="1" max="3650" value="30"></label><label>Квота, MiB<input id="mieru-mib" type="number" min="1" max="2147483647" value="1024"></label></div>
-      <div class="form-error" id="mieru-error"></div><footer><button class="secondary" value="cancel">Отмена</button><button class="primary" id="create-mieru" type="button">Создать</button></footer>
+      <div class="form-error" id="mieru-error"></div><footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-mieru" type="button" disabled>Создать</button></footer>
     </form>
   </dialog>
 
