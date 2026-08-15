@@ -31,41 +31,41 @@ Run the panel and ingress against the **same** `PANEL_DATABASE`. Back it up befo
 3. Install `deploy/mtproxy-fleet-ingress.service` and `deploy/fleet-ingress.env.example`, adjusting the root-only Certbot source paths and the WebPKI hostname. The unit's root-only `ExecStartPre=+` steps copy the certificate as `0444` and private key as `0400`, owned by `panel:panel`, into its `0700` `/run/mtproxy-fleet-ingress` runtime directory; the long-running process remains `panel:panel`. Do not make the Certbot private key or its parent directories group/world-readable. Restart the unit after certificate renewal so the staged copies are refreshed (for example, from a root-owned Certbot deploy hook: `systemctl restart mtproxy-fleet-ingress.service`). Expose only the selected TCP ingress port. The listener terminates mTLS directly, so no reverse-proxy client-certificate headers are involved.
 4. Start it and verify the listener and journal. For containers, `compose.fleet-central.yaml` is a hardened overlay of the same `mtproxy` stack and shares its `panel-data` volume. It must be invoked together with `compose.yaml`, never as a separate project. Bind-mounted ingress private keys must be readable only by container UID/GID 10001. (The node-agent image runs as UID 10002.)
 
-## Enroll `vpn-nl2` without exporting its private key
+## Enroll `example-node-02` without exporting its private key
 
 On central, register the node:
 
 ```sh
 python -m panel.cli --database /var/lib/mtproxy-panel/panel.sqlite3 \
-  fleet-register-node vpn-nl2 --display-name 'Netherlands 2'
+  fleet-register-node example-node-02 --display-name 'Example Region 2'
 ```
 
-On `vpn-nl2`, generate the key and CSR locally:
+On `example-node-02`, generate the key and CSR locally:
 
 ```sh
 install -d -m 0700 /etc/mtproxy-agent
 openssl req -new -newkey rsa:3072 -nodes -sha256 \
-  -subj '/CN=vpn-nl2' \
-  -keyout /etc/mtproxy-agent/vpn-nl2.key \
-  -out /etc/mtproxy-agent/vpn-nl2.csr
-chmod 0600 /etc/mtproxy-agent/vpn-nl2.key
+  -subj '/CN=example-node-02' \
+  -keyout /etc/mtproxy-agent/example-node-02.key \
+  -out /etc/mtproxy-agent/example-node-02.csr
+chmod 0600 /etc/mtproxy-agent/example-node-02.key
 ```
 
 Move only the CSR to the protected CA system using the operator's approved file-transfer channel. Sign it there (the signer ignores requested identity extensions and writes the canonical node URI SAN):
 
 ```sh
-python -m panel.cli fleet-sign-csr vpn-nl2 --ca-dir /root/mtproxy-fleet-ca \
-  --csr /secure-inbox/vpn-nl2.csr --out /secure-outbox/vpn-nl2.crt --days 90
+python -m panel.cli fleet-sign-csr example-node-02 --ca-dir /root/mtproxy-fleet-ca \
+  --csr /secure-inbox/example-node-02.csr --out /secure-outbox/example-node-02.crt --days 90
 ```
 
 Transfer the issued public certificate to central and bind its exact serial/fingerprint/validity record:
 
 ```sh
 python -m panel.cli --database /var/lib/mtproxy-panel/panel.sqlite3 \
-  fleet-bind-cert vpn-nl2 --cert /secure-inbox/vpn-nl2.crt
+  fleet-bind-cert example-node-02 --cert /secure-inbox/example-node-02.crt
 ```
 
-Return only `vpn-nl2.crt` and `ca.crt` as needed; never move `vpn-nl2.key` or `ca.key`. On the node, install the Python package/venv, `deploy/mtproxy-agent.service`, and `deploy/agent.env.example`; store the local Telemt bearer as `/etc/mtproxy-agent/telemt-api-token`, owner/group restricted to the service. The service requires the certificate key to have no group/world mode bits and writes only `/var/lib/mtproxy-agent`.
+Return only `example-node-02.crt` and `ca.crt` as needed; never move `example-node-02.key` or `ca.key`. On the node, install the Python package/venv, `deploy/mtproxy-agent.service`, and `deploy/agent.env.example`; store the local Telemt bearer as `/etc/mtproxy-agent/telemt-api-token`, owner/group restricted to the service. The service requires the certificate key to have no group/world mode bits and writes only `/var/lib/mtproxy-agent`.
 
 ```sh
 systemctl daemon-reload
@@ -88,7 +88,7 @@ Rotation is overlap-first:
 
    ```sh
    python -m panel.cli --database /var/lib/mtproxy-panel/panel.sqlite3 \
-     fleet-revoke-cert vpn-nl2 --serial OLD_HEX_SERIAL
+     fleet-revoke-cert example-node-02 --serial OLD_HEX_SERIAL
    ```
 
 Application revocation is immediate for new HTTP requests even though the TLS chain remains valid. For compromise, revoke first, stop the agent, then issue a fresh key/certificate. The v1 CA tooling does not publish OCSP or a CRL; do not rely on TLS handshake revocation alone.
@@ -108,4 +108,4 @@ Application revocation is immediate for new HTTP requests even though the TLS ch
 - Revocation is enforced by the central database after successful TLS, not OCSP/CRL at handshake time.
 - The rate limiter is per ingress process and resets on restart; deploy one ingress process for v1 or place a connection limiter in front without terminating/replacing mTLS identity.
 - Only inventory, enable, disable, limit updates, and quota reset are allowlisted. Create/delete/rotate/reveal remain excluded because their secret-bearing/reconciliation contracts require a separate design.
-- No production host was changed and `vpn-nl2` was not actually enrolled by this repository change; the artifacts and exact workflow are ready, but deployment still requires its DNS/WebPKI certificate, approved port, CSR transfer, and node-local Telemt API compatibility.
+- No production host was changed and `example-node-02` was not actually enrolled by this repository change; the artifacts and exact workflow are ready, but deployment still requires its DNS/WebPKI certificate, approved port, CSR transfer, and node-local Telemt API compatibility.

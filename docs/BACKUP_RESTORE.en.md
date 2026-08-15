@@ -108,8 +108,16 @@ Preserve the route file, included stream/http files, certificate references, UID
 ## Checksums and encryption
 
 ```bash
-find "$backup" -type f -print0 | sort -z | xargs -0 sha256sum > "$backup/SHA256SUMS"
-chmod 0600 "$backup/SHA256SUMS"
+(
+  cd "$backup"
+  find . -type f ! -name SHA256SUMS -print0 \
+    | sort -z \
+    | xargs -0 sha256sum > SHA256SUMS
+  chmod 0600 SHA256SUMS
+)
+
+# Verify later from the same directory:
+(cd "$backup" && sha256sum -c SHA256SUMS)
 ```
 
 Store the archive in encrypted/access-controlled storage. Checksums detect corruption; they do not provide confidentiality or authenticity without a protected channel/signature.

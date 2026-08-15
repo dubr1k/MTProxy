@@ -119,8 +119,16 @@ docker compose up -d mieru-manager panel
 ## Checksums и шифрование
 
 ```bash
-find "$backup" -type f -print0 | sort -z | xargs -0 sha256sum > "$backup/SHA256SUMS"
-chmod 0600 "$backup/SHA256SUMS"
+(
+  cd "$backup"
+  find . -type f ! -name SHA256SUMS -print0 \
+    | sort -z \
+    | xargs -0 sha256sum > SHA256SUMS
+  chmod 0600 SHA256SUMS
+)
+
+# Позднее проверяйте из того же каталога:
+(cd "$backup" && sha256sum -c SHA256SUMS)
 ```
 
 Храните archive в зашифрованном/access-controlled storage. Checksums обнаруживают повреждение, но не обеспечивают конфиденциальность или authenticity без защищённого канала/подписи.

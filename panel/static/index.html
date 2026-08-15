@@ -97,8 +97,8 @@
     <form method="dialog" id="fleet-form">
       <div class="modal-head"><div><span class="eyebrow">FLEET NODE</span><h2>Добавить узел</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
       <p class="modal-copy">Регистрирует узел в реестре. Для подключения агента после регистрации потребуется выпустить и привязать отдельный mTLS-сертификат.</p>
-      <label>ID узла<input id="new-node-id" pattern="[a-z0-9](?:[a-z0-9.\-]{0,62}[a-z0-9])?" maxlength="64" autocomplete="off" placeholder="например, vpn-nl2" required><small>Строчные латинские буквы, цифры, точка и дефис</small></label>
-      <label>Отображаемое имя<input id="new-node-name" maxlength="128" autocomplete="off" placeholder="например, Netherlands 2" required></label>
+      <label>ID узла<input id="new-node-id" pattern="[a-z0-9](?:[a-z0-9.\-]{0,62}[a-z0-9])?" maxlength="64" autocomplete="off" placeholder="например, example-node-02" required><small>Строчные латинские буквы, цифры, точка и дефис</small></label>
+      <label>Отображаемое имя<input id="new-node-name" maxlength="128" autocomplete="off" placeholder="например, Example Region 2" required></label>
       <label>Регион<input id="new-node-region" pattern="[A-Za-z0-9._\-]{0,64}" maxlength="64" autocomplete="off" placeholder="например, eu-west-amsterdam"><small>Необязательно; секреты и адреса доступа сюда не добавляются</small></label>
       <div class="form-error" id="fleet-error" role="alert"></div>
       <footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-fleet-node" type="button">Добавить узел</button></footer>
