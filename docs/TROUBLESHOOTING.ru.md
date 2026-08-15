@@ -73,8 +73,10 @@ Accounting появляется только после **успешного з�
 4. Проверьте manager token/state metadata:
 
    ```bash
+   export MIERU_MITA_GID="$(getent group mita | cut -d: -f3)"
+   : "${MIERU_MITA_GID:?mita group is missing}"
    sudo ./scripts/prepare-mieru-token.sh verify /etc/mieru-manager/token
-   sudo ./scripts/prepare-mieru-state.sh verify /var/lib/mieru-manager
+   sudo env MIERU_MITA_GID="$MIERU_MITA_GID" ./scripts/prepare-mieru-state.sh verify /var/lib/mieru-manager
    ```
 
 5. Не удаляйте journal/key. Unknown or unauthenticated state должен fail closed.

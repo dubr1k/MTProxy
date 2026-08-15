@@ -72,7 +72,7 @@ export MIERU_MITA_GID="$(stat -c %g /run/mita/mita.sock)"
 getent passwd 10005 || true
 getent group 10005 || true
 sudo ./scripts/prepare-mieru-token.sh prepare "$MIERU_MANAGER_TOKEN_FILE"
-sudo ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
+sudo env MIERU_MITA_GID="$MIERU_MITA_GID" ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
 ```
 
 Любая unrelated UID/GID collision — hard stop. Не применяйте recursive `chown` к restored non-empty state.
@@ -113,7 +113,9 @@ Per-user Mieru metrics намеренно `degraded/unavailable`: `mita get metr
 
 ```bash
 docker compose stop panel mieru-manager
-sudo ./scripts/prepare-mieru-state.sh verify /var/lib/mieru-manager
+export MIERU_MITA_GID="$(getent group mita | cut -d: -f3)"
+: "${MIERU_MITA_GID:?mita group is missing}"
+sudo env MIERU_MITA_GID="$MIERU_MITA_GID" ./scripts/prepare-mieru-state.sh verify /var/lib/mieru-manager
 sudo ./scripts/prepare-mieru-token.sh verify /etc/mieru-manager/token
 systemctl start mita
 docker compose up -d mieru-manager panel

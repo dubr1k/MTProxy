@@ -52,7 +52,7 @@ export MIERU_MITA_GID="$(stat -c %g /run/mita/mita.sock)"
 getent passwd 10005 || true
 getent group 10005 || true
 sudo ./scripts/prepare-mieru-token.sh prepare "$MIERU_MANAGER_TOKEN_FILE"
-sudo ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
+sudo env MIERU_MITA_GID="$MIERU_MITA_GID" ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
 docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
 ```
 
@@ -66,9 +66,12 @@ Stop the Compose services before restoring. Restore the state directory and meta
 
 ```sh
 export MIERU_MANAGER_STATE_DIR=/var/lib/mieru-manager
+export MIERU_MANAGER_TOKEN_FILE=/etc/mieru-manager/token
+export MIERU_MITA_GID="$(getent group mita | cut -d: -f3)"
+: "${MIERU_MITA_GID:?mita group is missing}"
 docker compose -f compose.yaml -f compose.mieru.yaml stop panel mieru-manager
 # Restore trusted backup media here, preserving numeric ownership and modes.
-sudo ./scripts/prepare-mieru-state.sh verify "$MIERU_MANAGER_STATE_DIR"
+sudo env MIERU_MITA_GID="$MIERU_MITA_GID" ./scripts/prepare-mieru-state.sh verify "$MIERU_MANAGER_STATE_DIR"
 sudo ./scripts/prepare-mieru-token.sh verify "$MIERU_MANAGER_TOKEN_FILE"
 docker compose -f compose.yaml -f compose.mieru.yaml up -d --build
 ```

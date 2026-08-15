@@ -64,8 +64,10 @@ Accounting appears only after a **successful CONNECT closes**. Close the client 
 ```bash
 systemctl status mita --no-pager
 MITA_UDS_PATH=/run/mita/mita.sock /usr/bin/mita status
+export MIERU_MITA_GID="$(getent group mita | cut -d: -f3)"
+: "${MIERU_MITA_GID:?mita group is missing}"
 sudo ./scripts/prepare-mieru-token.sh verify /etc/mieru-manager/token
-sudo ./scripts/prepare-mieru-state.sh verify /var/lib/mieru-manager
+sudo env MIERU_MITA_GID="$MIERU_MITA_GID" ./scripts/prepare-mieru-state.sh verify /var/lib/mieru-manager
 ```
 
 Check stable `/run/mita/mita.sock` ownership/mode, pinned executable digest/version, writable config, and manager `TMPDIR`. Never delete journal/key; unknown or unauthenticated state must fail closed.

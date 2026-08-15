@@ -96,7 +96,9 @@ docker compose up -d
 Перед startup после restore:
 
 ```bash
-sudo ./scripts/prepare-mieru-state.sh verify /var/lib/mieru-manager
+export MIERU_MITA_GID="$(getent group mita | cut -d: -f3)"
+: "${MIERU_MITA_GID:?mita group is missing}"
+sudo env MIERU_MITA_GID="$MIERU_MITA_GID" ./scripts/prepare-mieru-state.sh verify /var/lib/mieru-manager
 sudo ./scripts/prepare-mieru-token.sh verify /etc/mieru-manager/token
 systemctl daemon-reload
 systemctl start mita
