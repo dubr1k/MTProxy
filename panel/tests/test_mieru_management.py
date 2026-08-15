@@ -169,6 +169,8 @@ async def test_panel_mieru_owner_lifecycle_is_one_time_and_audited(
     assert created.status_code == 201
     revealed = await client.get("/api/reveal/" + created.json()["reveal_token"])
     assert revealed.json()["share_url"].startswith("mierus://phone:")
+    assert revealed.json()["qr"].startswith("data:image/svg+xml;base64,")
+    assert revealed.headers["cache-control"] == "no-store"
     assert (
         await client.get("/api/reveal/" + created.json()["reveal_token"])
     ).status_code == 410

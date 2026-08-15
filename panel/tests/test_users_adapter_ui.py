@@ -291,7 +291,11 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert "текущего runtime-поколения" in js
     assert "Автоматического ежемесячного сброса нет" in text
     assert 'data-view="mieru"' in text and 'id="mieru-modal"' in text
+    assert 'id="mieru-access-modal"' in text and 'id="mieru-qr-image"' in text
+    assert 'id="copy-mieru-url"' in text and 'id="download-mieru-qr"' in text
     assert "renderMieru" in js and "mieruAction" in js
+    assert "showMieruAccess" in js and "qrSource(data.qr)" in js
+    assert "Новая ссылка + QR" in js
     assert "rolling application-byte admission quota" in js
     assert 'data-quick="mieru-users"' in js
     assert 'id="fleet-modal"' in text and 'id="create-fleet-node"' in text

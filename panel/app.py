@@ -415,6 +415,24 @@ def create_app(
             "data:image/svg+xml;base64," + base64.b64encode(output.getvalue()).decode()
         )
 
+    def mieru_access(value) -> dict[str, str]:
+        if not isinstance(value, str) or len(value) > 4096:
+            raise HTTPException(409, "Mieru connection link unavailable")
+        try:
+            parts = urlsplit(value)
+        except ValueError as exc:
+            raise HTTPException(409, "Mieru connection link unavailable") from exc
+        if (
+            parts.scheme != "mierus"
+            or not parts.username
+            or not parts.password
+            or not parts.hostname
+            or parts.path not in ("", "/")
+            or parts.fragment
+        ):
+            raise HTTPException(409, "Mieru connection link unavailable")
+        return {"share_url": value, "qr": qr_data(value)}
+
     def proxy_link(value) -> str:
         """Accept only canonical Telegram MTProxy links from the upstream API."""
         if not isinstance(value, str) or len(value) > 2048:
@@ -1016,7 +1034,7 @@ def create_app(
         return {
             "username": body.username,
             "revision": data.get("revision"),
-            "reveal_token": reveal({"share_url": data.get("share_url")}, user),
+            "reveal_token": reveal(mieru_access(data.get("share_url")), user),
         }
 
     @app.post("/api/mieru/users/{username}/quotas")
@@ -1061,7 +1079,7 @@ def create_app(
             return {
                 "username": username,
                 "revision": data.get("revision"),
-                "reveal_token": reveal({"share_url": data.get("share_url")}, user),
+                "reveal_token": reveal(mieru_access(data.get("share_url")), user),
             }
         return data
 

@@ -136,6 +136,18 @@
     </form>
   </dialog>
 
+  <dialog id="mieru-access-modal" class="access-dialog">
+    <form method="dialog">
+      <div class="modal-head"><div><span class="eyebrow">MIERU</span><h2 id="mieru-access-title">Конфигурация Mieru</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
+      <div class="access-layout">
+        <div class="qr-wrap"><img id="mieru-qr-image" alt="QR-код Mieru"><span>Ссылка содержит пароль</span></div>
+        <div class="access-details"><span class="status-pill active"><i></i> Конфигурация готова</span><p>Отсканируйте QR-код совместимым клиентом или импортируйте ссылку командой <code>mieru import config</code>.</p><label>Ссылка Mieru<div class="copy-field"><input id="mieru-share-url" readonly aria-label="Ссылка Mieru"><button id="copy-mieru-url" type="button">Копировать</button></div></label><label>Команда импорта<div class="copy-field"><input id="mieru-import-command" readonly aria-label="Команда импорта Mieru"><button id="copy-mieru-command" type="button">Копировать</button></div></label><div class="access-actions"><a class="secondary button" id="download-mieru-qr" download="mieru-access.svg">Скачать QR</a></div></div>
+      </div>
+      <div class="security-note">Ссылка и QR содержат пароль и показываются только один раз. Для повторной выдачи выполните ротацию доступа.</div>
+      <footer><button class="secondary" value="cancel" formnovalidate>Закрыть</button></footer>
+    </form>
+  </dialog>
+
   <dialog id="naive-access-modal" class="access-dialog">
     <form method="dialog">
       <div class="modal-head"><div><span class="eyebrow">NAIVEPROXY</span><h2 id="naive-access-title">Доступ к HTTPS-прокси</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
