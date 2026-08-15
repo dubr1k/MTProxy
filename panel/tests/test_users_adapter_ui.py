@@ -246,6 +246,8 @@ async def test_telemt_adapter_reads_3425_quota_stats_route():
 async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(client, login_user):
     login_page = await client.get("/login")
     assert "Proxy Control" in login_page.text
+    assert "CONTROL PANEL" in login_page.text
+    assert "CONTROL " + "PLANE" not in login_page.text
     assert "mtproxy" not in login_page.text.lower()
     await login_user(client)
     page = await client.get("/")
@@ -486,3 +488,15 @@ async def test_reveal_is_bound_to_creating_admin_session(client, login_user):
     assert (await client.get(f"/api/reveal/{token}")).status_code == 401
     client.cookies.set("panel_session", session)
     assert (await client.get(f"/api/reveal/{token}")).status_code == 200
+
+
+async def test_versions_panel_is_owner_only_and_has_runtime_update_contract(client, login_user):
+    await login_user(client)
+    page = await client.get("/")
+    assert 'data-view="versions"' in page.text
+    assert 'class="nav-item owner-only" data-view="versions" hidden' in page.text
+    js = (await client.get("/static/app.js")).text
+    assert "renderVersions" in js and "versionAction" in js
+    assert "/api/versions" in js and "/update`" in js
+    assert "expected_current" in js
+    assert ".version-grid" in (await client.get("/static/style.css")).text

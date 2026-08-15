@@ -1,7 +1,7 @@
 const cookie=name=>document.cookie.split('; ').find(x=>x.startsWith(name+'='))?.split('=').slice(1).join('=');
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const icon=name=>{const shapes={status:'<circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/>',key:'<path d="M14 7a5 5 0 1 0 3 9l4-4-3-3-2 2-2-2"/>',activity:'<path d="M4 13h4l2-5 4 9 2-5h4"/>',transfer:'<path d="m8 7 4-4 4 4M12 3v14m4 0-4 4-4-4"/>',check:'<path d="m6 12 4 4 8-9"/>',plus:'<path d="M12 5v14M5 12h14"/>',manage:'<path d="M5 7h14M8 12h8M10 17h4"/>',refresh:'<path d="M20 7v5h-5M19 12a7 7 0 1 0-2 5"/>'};return `<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true">${shapes[name]||''}</svg>`};
-const state={view:'dashboard',me:null,users:[],mieruUsers:[],mieruService:{ready:false,revision:''},naiveUsers:[],naiveService:{ready:false,host:''},fleet:[],admins:[],audit:[],filter:'all',query:'',naiveFilter:'all',naiveQuery:''};
+const state={view:'dashboard',me:null,users:[],mieruUsers:[],mieruService:{ready:false,revision:''},naiveUsers:[],naiveService:{ready:false,host:''},versions:{enabled:false,components:{}},fleet:[],admins:[],audit:[],filter:'all',query:'',naiveFilter:'all',naiveQuery:''};
 let navigationGeneration=0;
 let naiveConfigText='',naiveConfigUrl='';
 
@@ -37,7 +37,7 @@ if(loginForm) loginForm.addEventListener('submit',async event=>{
 });
 
 const view=document.querySelector('#view');
-const titles={dashboard:['Обзор','Состояние всех прокси-протоколов в одном месте'],mieru:['Mieru','Пользователи, rolling-квоты и application-byte трафик'],users:['MTProxy','Пользователи, ссылки и ключи доступа'],naive:['NaiveProxy','HTTPS-прокси, конфигурации и доступы'],fleet:['Узлы','Реестр флота и подготовленные команды'],admins:['Администраторы','Роли и доступ к панели'],audit:['Журнал действий','Изменения, входы и операции с ключами']};
+const titles={dashboard:['Обзор','Состояние всех прокси-протоколов в одном месте'],mieru:['Mieru','Пользователи, rolling-квоты и application-byte трафик'],users:['MTProxy','Пользователи, ссылки и ключи доступа'],naive:['NaiveProxy','HTTPS-прокси, конфигурации и доступы'],versions:['Версии','Проверенные обновления runtime-компонентов'],fleet:['Узлы','Реестр флота и подготовленные команды'],admins:['Администраторы','Роли и доступ к панели'],audit:['Журнал действий','Изменения, входы и операции с ключами']};
 const roleNames={owner:'Владелец',admin:'Администратор',viewer:'Наблюдатель'};
 const actionNames={'auth.login':'Вход в панель','auth.logout':'Выход','user.create':'Создан доступ','user.access':'Открыта ссылка','user.enable':'Доступ включён','user.disable':'Доступ заблокирован','user.rotate':'Ключ обновлён','user.delete':'Доступ удалён','naive.create':'Создан Naive-доступ','naive.access':'Открыта Naive-конфигурация','naive.enable':'Naive-доступ включён','naive.disable':'Naive-доступ отключён','naive.rotate':'Naive-пароль обновлён','naive.delete':'Naive-доступ удалён','naive.traffic.reset':'Сброшен Naive-счётчик','fleet.node.create':'Добавлен узел','admin.create':'Создан администратор','admin.update':'Изменён администратор','admin.delete':'Удалён администратор'};
 
@@ -59,7 +59,7 @@ async function navigate(name){
   document.querySelectorAll('[data-view]').forEach(button=>button.classList.toggle('active',button.dataset.view===name));
   const canCreate=(state.me?.role!=='viewer'&&(name==='users'||name==='naive'||name==='mieru'))||(name==='fleet'&&state.me?.role==='owner')||(name==='admins'&&state.me?.role==='owner');
   const add=document.querySelector('#add');add.hidden=!canCreate;document.querySelector('#add-label').textContent=name==='admins'?'Администратора':name==='fleet'?'Узел':name==='naive'?'Naive доступ':name==='mieru'?'Mieru доступ':'Подключение';
-  skeleton();try{if(name==='dashboard')await renderDashboard(generation);if(name==='users')await renderUsers(generation);if(name==='mieru')await renderMieru(generation);if(name==='naive')await renderNaive(generation);if(name==='fleet')await renderFleet(generation);if(name==='admins')await renderAdmins(generation);if(name==='audit')await renderAudit(generation)}catch(error){if(generation===navigationGeneration&&state.view===name)errorState(error)}
+  skeleton();try{if(name==='dashboard')await renderDashboard(generation);if(name==='users')await renderUsers(generation);if(name==='mieru')await renderMieru(generation);if(name==='naive')await renderNaive(generation);if(name==='versions')await renderVersions(generation);if(name==='fleet')await renderFleet(generation);if(name==='admins')await renderAdmins(generation);if(name==='audit')await renderAudit(generation)}catch(error){if(generation===navigationGeneration&&state.view===name)errorState(error)}
 }
 
 async function refreshUsers(generation=null){const data=await api('/api/users');if(generation!==null&&generation!==navigationGeneration)return null;state.users=data.items||[];document.querySelector('#users-count').textContent=state.users.length;return state.users}
@@ -105,6 +105,21 @@ function paintNaive(){const container=document.querySelector('#naive-list');if(!
 async function renderNaive(generation=navigationGeneration){
   const users=await refreshNaive(generation);if(generation!==navigationGeneration||state.view!=='naive'||users===null)return;const active=users.filter(x=>x.enabled).length,blocked=users.length-active,ready=state.naiveService.ready===true;
   view.innerHTML=`<div class="naive-overview"><article><span class="naive-mark">${icon('status')}</span><div><small>Сервис</small><b>${ready?'Caddy работает':'Manager недоступен'}</b><em>${esc(state.naiveService.host||'—')}</em></div><span class="status-pill ${ready?'active':'blocked'}"><i></i>${ready?'Ready':'Ошибка'}</span></article><article><small>Доступы</small><strong>${number(active)}</strong><span>${blocked?`${blocked} отключено`:'Все активны'}</span></article><article><small>Учёт</small><strong>${bytes(sumNaiveTraffic(users))}</strong><span>payload-байты закрытых CONNECT</span></article></div><div class="toolbar"><div class="search"><input id="naive-search" type="search" value="${esc(state.naiveQuery)}" placeholder="Поиск Naive-доступа" aria-label="Поиск NaiveProxy пользователей"></div><div class="filter-pills"><button class="filter-pill ${state.naiveFilter==='all'?'active':''}" data-naive-filter="all">Все · ${users.length}</button><button class="filter-pill ${state.naiveFilter==='active'?'active':''}" data-naive-filter="active">Активные</button><button class="filter-pill ${state.naiveFilter==='blocked'?'active':''}" data-naive-filter="blocked">Отключённые</button></div></div><section class="data-panel"><div class="data-head naive-grid"><span>Доступ</span><span>Статус</span><span>Трафик ↑ / ↓ / Σ</span><span class="align-right">Действия</span></div><div id="naive-list"></div></section>`;paintNaive();
+}
+
+async function renderVersions(generation=navigationGeneration){
+  const data=await api('/api/versions');if(generation!==navigationGeneration||state.view!=='versions')return;state.versions=data||{enabled:false,components:{}};
+  if(state.versions.enabled!==true){view.innerHTML='<div class="empty-state"><span>!</span><h3>Агент обновлений недоступен</h3><p>Установите и запустите host version-agent. Панель не скачивает runtime-файлы и не получает Docker socket.</p></div>';return}
+  const names={telemt:'Telemt / MTProxy',naive:'NaiveProxy / Caddy',mita:'Mieru / mita'};
+  const cards=Object.entries(state.versions.components||{}).map(([component,item])=>{const available=Array.isArray(item.available)?item.available:[],current=item.current||'не определена';return `<article class="version-card"><div class="panel-head"><div><h2>${esc(names[component]||component)}</h2><span>Текущая версия: <b>${esc(current)}</b></span></div><span class="status-pill ${current==='не определена'?'blocked':'active'}"><i></i>${current==='не определена'?'Не определена':'Установлена'}</span></div><label>Установить проверенную версию<select data-version-select="${esc(component)}"><option value="">Выберите версию</option>${available.map(entry=>`<option value="${esc(entry.version)}" ${entry.version===current?'disabled':''}>${esc(entry.version)} · ${esc(entry.kind||'artifact')}${entry.version===current?' · установлена':''}</option>`).join('')}</select></label><button class="primary version-update" data-version-update="${esc(component)}" data-current="${esc(current)}" disabled>Обновить ${esc(component)}</button><small class="version-note">Источник и SHA-256 проверяются host-agent; произвольные URL из браузера запрещены.</small></article>`}).join('');
+  view.innerHTML=`<div class="security-note">Обновления выполняются только owner-ролью через отдельный host version-agent. Перед каждой заменой он проверяет allowlist-каталог, immutable digest или SHA-256, сохраняет rollback-копию и проверяет health.</div><section class="version-grid">${cards||'<div class="empty-state"><h3>Каталог версий пуст</h3></div>'}</section>`;
+}
+
+async function versionAction(component,button){
+  const select=document.querySelector(`[data-version-select="${CSS.escape(component)}"]`),version=select?.value,current=button.dataset.current;
+  if(!version)return;
+  if(!await confirmed('Обновить runtime?',`${component}: ${current} → ${version}. Сервис будет перезапущен или перезагружен, а при ошибке агент выполнит rollback.`,`Обновить`))return;
+  try{setBusy(button,true,'Обновляем…');await api(`/api/versions/${encodeURIComponent(component)}/update`,{method:'POST',body:JSON.stringify({version,expected_current:current==='не определена'?null:current})});toast(`${component} обновлён до ${version}`);await renderVersions()}catch(error){toast(error.message,'error')}finally{setBusy(button,false)}
 }
 
 async function renderFleet(generation=navigationGeneration){
@@ -194,11 +209,13 @@ document.querySelector('#copy-naive-config').addEventListener('click',async()=>{
 document.querySelector('#naive-access-modal').addEventListener('close',()=>{document.querySelector('#naive-proxy-url').value='';document.querySelector('#naive-qr-image').removeAttribute('src');document.querySelector('#download-naive-config').removeAttribute('href');if(naiveConfigUrl)URL.revokeObjectURL(naiveConfigUrl);naiveConfigUrl='';naiveConfigText=''});
 
 document.querySelector('#view').addEventListener('input',event=>{if(event.target.id==='user-search'){state.query=event.target.value;paintUsers()}if(event.target.id==='naive-search'){state.naiveQuery=event.target.value;paintNaive()}});
+document.querySelector('#view').addEventListener('change',event=>{const component=event.target.dataset.versionSelect;if(component){const button=document.querySelector(`[data-version-update="${CSS.escape(component)}"]`);if(button)button.disabled=!event.target.value}});
 document.querySelector('#view').addEventListener('click',async event=>{
   const button=event.target.closest('button');if(!button)return;
   if(button.dataset.filter){state.filter=button.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('active',x===button));paintUsers();return}
   if(button.dataset.naiveFilter){state.naiveFilter=button.dataset.naiveFilter;document.querySelectorAll('[data-naive-filter]').forEach(x=>x.classList.toggle('active',x===button));paintNaive();return}
   if(button.dataset.action==='retry'){navigate(state.view);return}
+  if(button.dataset.versionUpdate){await versionAction(button.dataset.versionUpdate,button);return}
   if(button.dataset.mieruAction&&button.dataset.user){await mieruAction(button.dataset.mieruAction,button.dataset.user,button);return}
   if(button.dataset.naiveAction&&button.dataset.user){await naiveAction(button.dataset.naiveAction,button.dataset.user,button);return}
   if(button.dataset.action&&button.dataset.user){await userAction(button.dataset.action,button.dataset.user,button);return}

@@ -10,7 +10,7 @@ Use Python 3.12 on Ubuntu 24.04 where possible:
 
 ```sh
 python3 -m venv .venv
-.venv/bin/pip install -r panel/requirements-dev.txt
+.venv/bin/python -m pip install -r panel/requirements-dev.txt
 .venv/bin/pytest -q
 .venv/bin/ruff check .
 python3 -m unittest -v tests/test_deploy.py

@@ -1,1 +1,1 @@
-"""Proxy Control multi-protocol control plane."""
+"""Proxy Control multi-protocol control panel."""

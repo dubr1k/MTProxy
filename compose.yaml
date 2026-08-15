@@ -73,12 +73,14 @@ services:
       PANEL_COOKIE_SECURE: ${PANEL_COOKIE_SECURE:-true}
       TELEMT_API_URL: http://mtproxy:9091
       TELEMT_API_TOKEN_SOURCE: /run/secrets/telemt-api-token
+      VERSION_AGENT_SOCKET: /run/proxy-control/version-agent.sock
     secrets:
       - telemt-api-token
     ports:
       - "127.0.0.1:8787:8787/tcp"
     volumes:
       - panel-data:/data
+      - /run/proxy-control:/run/proxy-control
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=0700

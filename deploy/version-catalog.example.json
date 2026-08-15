@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "components": {
+    "telemt": [
+      {
+        "version": "3.4.25",
+        "kind": "image",
+        "image": "ghcr.io/example/telemt@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ],
+    "naive": [
+      {
+        "version": "2.11.4-custom.1",
+        "kind": "binary",
+        "url": "https://artifacts.example.com/caddy-2.11.4-custom.1",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "mita": [
+      {
+        "version": "3.35.0",
+        "kind": "binary",
+        "url": "https://artifacts.example.com/mita-3.35.0",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+    ]
+  }
+}

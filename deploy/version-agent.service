@@ -1,0 +1,34 @@
+[Unit]
+Description=Proxy Control privileged version update agent
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=-/etc/proxy-control/version-agent.env
+WorkingDirectory=/opt/proxy-control
+ExecStart=/usr/bin/python3 -m version_agent.server
+Restart=on-failure
+RestartSec=3s
+RuntimeDirectory=proxy-control
+RuntimeDirectoryMode=0770
+StateDirectory=proxy-control/version-agent
+StateDirectoryMode=0700
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/run/proxy-control /var/lib/proxy-control /opt/mtproxy-shared443/version-overrides /usr/local/bin/caddy /usr/bin/mita
+
+[Install]
+WantedBy=multi-user.target

@@ -28,6 +28,7 @@ from .fleet import CommandConflict, FleetStore, ProtocolError
 from .naive import NaiveClient, NaiveError
 from .mieru import MieruClient, MieruError
 from .telemt import TelemtClient, TelemtError
+from .versions import VersionAgentError, VersionClient
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,9 @@ class Settings:
         )
     )
     mieru_enabled: bool = os.getenv("MIERU_ENABLED", "false").lower() == "true"
+    version_agent_socket: str = os.getenv(
+        "VERSION_AGENT_SOCKET", "/run/proxy-control/version-agent.sock"
+    )
     session_cookie_secure: bool = (
         os.getenv("PANEL_COOKIE_SECURE", "true").lower() == "true"
     )
@@ -163,6 +167,15 @@ class AdminUpdate(BaseModel):
     active: bool | None = None
 
 
+class VersionUpdate(BaseModel):
+    version: str = Field(
+        strict=True, pattern=r"^[A-Za-z0-9][A-Za-z0-9._+:-]{0,63}$"
+    )
+    expected_current: str | None = Field(
+        default=None, strict=True, pattern=r"^[A-Za-z0-9][A-Za-z0-9._+:-]{0,63}$"
+    )
+
+
 class FleetNodeCreate(BaseModel):
     node_id: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$")
     display_name: str = Field(min_length=1, max_length=128)
@@ -188,7 +201,12 @@ class FleetCommandCreate(BaseModel):
 
 
 def create_app(
-    settings: Settings | None = None, *, telemt=None, naive=None, mieru=None
+    settings: Settings | None = None,
+    *,
+    telemt=None,
+    naive=None,
+    mieru=None,
+    version_client=None,
 ):
     settings = settings or Settings()
     if settings.naive_enabled and not settings.naive_public_host.strip():
@@ -206,6 +224,7 @@ def create_app(
     )
     app.state.naive = naive or NaiveClient(settings.naive_socket, settings.naive_token)
     app.state.mieru = mieru or MieruClient(settings.mieru_socket, settings.mieru_token)
+    app.state.versions = version_client or VersionClient(settings.version_agent_socket)
     app.state.settings = settings
     app.state.reveals = {}
     static = Path(__file__).parent / "static"
@@ -537,6 +556,10 @@ def create_app(
     async def mieru_error(_request, exc):
         return JSONResponse({"detail": "Mieru manager unavailable"}, exc.status_code)
 
+    @app.exception_handler(VersionAgentError)
+    async def version_agent_error(_request, exc):
+        return JSONResponse({"detail": str(exc)}, exc.status_code)
+
     @app.get("/healthz")
     async def healthz():
         return {"status": "ok"}
@@ -625,6 +648,30 @@ def create_app(
                 "mieru": settings.mieru_enabled,
             },
         }
+
+    @app.get("/api/versions")
+    async def versions(_user=Depends(current)):
+        try:
+            return await app.state.versions.list_versions()
+        except VersionAgentError:
+            return {
+                "enabled": False,
+                "components": {},
+                "reason": "version_agent_unavailable",
+            }
+
+    @app.post("/api/versions/{component}/update")
+    async def update_version(
+        component: Literal["telemt", "naive", "mita"],
+        body: VersionUpdate,
+        request: Request,
+        user=Depends(roles("owner")),
+    ):
+        result = await app.state.versions.update(
+            component, body.version, body.expected_current
+        )
+        audit(user, "runtime.version.update", component, request, {"version": body.version})
+        return result
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):

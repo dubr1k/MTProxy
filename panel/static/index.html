@@ -9,12 +9,13 @@
 </head>
 <body>
   <aside class="sidebar">
-    <div class="brand"><span class="brand-mark">P</span><span><b>Proxy Control</b><small>CONTROL PLANE</small></span></div>
+    <div class="brand"><span class="brand-mark">P</span><span><b>Proxy Control</b><small>CONTROL PANEL</small></span></div>
     <nav aria-label="Основная навигация">
       <button class="nav-item active" data-view="dashboard"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20h-6v-6h-4v6H4z"/></svg><span>Обзор</span></button>
       <button class="nav-item" data-view="users"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="3"/><circle cx="16" cy="12" r="3"/><path d="M11 12h2M3 12H1m22 0h-2"/></svg><span>MTProxy</span><span class="nav-count" id="users-count">—</span></button>
       <button class="nav-item" data-view="mieru"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12c4-7 12-7 16 0-4 7-12 7-16 0z"/><circle cx="12" cy="12" r="2"/></svg><span>Mieru</span><span class="nav-count" id="mieru-count">—</span></button>
       <button class="nav-item" data-view="naive"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.7 2.8 8.1 7 10 4.2-1.9 7-5.3 7-10V6z"/><path d="M9 12h6M12 9v6"/></svg><span>NaiveProxy</span><span class="nav-count" id="naive-count">—</span></button>
+      <button class="nav-item owner-only" data-view="versions" hidden><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><path d="m17 4 3 3-3 3"/></svg><span>Версии</span></button>
       <button class="nav-item" data-view="fleet"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="6" rx="1"/><rect x="4" y="14" width="16" height="6" rx="1"/><circle cx="8" cy="7" r="1"/><circle cx="8" cy="17" r="1"/></svg><span>Узлы</span><span class="nav-count" id="fleet-count">—</span></button>
       <button class="nav-item owner-only" data-view="admins" hidden><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.6-4 2.8-6 7-6s6.4 2 7 6"/></svg><span>Администраторы</span></button>
       <button class="nav-item audit-nav" data-view="audit" hidden><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 6h13M7 12h13M7 18h13"/><circle cx="3" cy="6" r="1"/><circle cx="3" cy="12" r="1"/><circle cx="3" cy="18" r="1"/></svg><span>Журнал</span></button>
@@ -28,7 +29,7 @@
 
   <main class="content">
     <header class="topbar">
-      <div><span class="eyebrow" id="eyebrow">CONTROL PLANE</span><h1 id="title">Обзор</h1><p id="subtitle">Состояние прокси и активные подключения</p></div>
+      <div><span class="eyebrow" id="eyebrow">CONTROL PANEL</span><h1 id="title">Обзор</h1><p id="subtitle">Состояние прокси и активные подключения</p></div>
       <div class="header-actions"><button class="icon-button" id="refresh" aria-label="Обновить" title="Обновить"><svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M19 12a7 7 0 1 0-2 5"/></svg></button><button class="primary compact" id="add" hidden><svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span id="add-label">Добавить</span></button></div>
     </header>
     <section id="view" aria-live="polite"><div class="skeleton-grid"><i></i><i></i><i></i></div></section>
@@ -39,6 +40,7 @@
     <button data-view="users"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="12" r="3"/><circle cx="16" cy="12" r="3"/><path d="M11 12h2"/></svg><small>MTProxy</small></button>
     <button data-view="mieru"><svg class="mobile-icon" viewBox="0 0 24 24"><path d="M4 12c4-7 12-7 16 0-4 7-12 7-16 0z"/></svg><small>Mieru</small></button>
     <button data-view="naive"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.7 2.8 8.1 7 10 4.2-1.9 7-5.3 7-10V6z"/><path d="M9 12h6M12 9v6"/></svg><small>Naive</small></button>
+    <button class="owner-only" data-view="versions" hidden><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><path d="m17 4 3 3-3 3"/></svg><small>Версии</small></button>
     <button data-view="fleet"><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="6"/><rect x="4" y="14" width="16" height="6"/></svg><small>Узлы</small></button>
     <button class="owner-only" data-view="admins" hidden><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3"/><path d="M5 20c.6-4 2.8-6 7-6s6.4 2 7 6"/></svg><small>Админы</small></button>
     <button class="audit-nav" data-view="audit" hidden><svg class="mobile-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h14M6 12h14M6 18h14"/></svg><small>Журнал</small></button>
