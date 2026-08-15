@@ -875,8 +875,10 @@ PY
    ```bash
    sudo install -d -m 0750 /etc/proxy-control
    sudo install -o root -g root -m 0644 deploy/version-agent.service /etc/systemd/system/version-agent.service
+   sudo install -o root -g root -m 0644 deploy/proxy-control-version-agent.tmpfiles.conf /etc/tmpfiles.d/proxy-control-version-agent.conf
    sudo install -o root -g root -m 0600 deploy/version-agent.env.example /etc/proxy-control/version-agent.env
    sudo install -o root -g root -m 0600 deploy/version-catalog.example.json /etc/proxy-control/versions.json
+   sudo systemd-tmpfiles --create /etc/tmpfiles.d/proxy-control-version-agent.conf
    ```
 
 3. Замените все example URL, image reference и SHA-256 в `/etc/proxy-control/versions.json` на реально проверенные артефакты. Для Telemt разрешены только immutable image references с `@sha256:...`; для Caddy и mita — только HTTPS без credentials/query и с lowercase SHA-256. Не добавляйте «latest», HTTP, redirect на другой host или произвольные команды.

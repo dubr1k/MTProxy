@@ -53,6 +53,10 @@ class DeployCliTests(unittest.TestCase):
         self.assertIn("  mask:\n", mask)
         self.assertIn("    init: true\n", mask)
 
+    def test_version_agent_runtime_directory_is_bootstrap_provisioned(self):
+        tmpfiles = (ROOT / "deploy/proxy-control-version-agent.tmpfiles.conf").read_text()
+        self.assertIn("d /run/proxy-control 0770 root root -", tmpfiles)
+
     @unittest.skipUnless(os.geteuid() == 0, "numeric permission behavior requires root")
     def test_naive_log_permissions_allow_caddy_write_and_manager_read_only(self):
         """Catch shared UID/GID or writable-group regressions with real kernel checks."""

@@ -21,8 +21,10 @@ Before enabling it:
 ```bash
 sudo install -d -m 0750 /etc/proxy-control
 sudo install -o root -g root -m 0644 deploy/version-agent.service /etc/systemd/system/version-agent.service
+sudo install -o root -g root -m 0644 deploy/proxy-control-version-agent.tmpfiles.conf /etc/tmpfiles.d/proxy-control-version-agent.conf
 sudo install -o root -g root -m 0600 deploy/version-agent.env.example /etc/proxy-control/version-agent.env
 sudo install -o root -g root -m 0600 deploy/version-catalog.example.json /etc/proxy-control/versions.json
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/proxy-control-version-agent.conf
 sudo systemctl daemon-reload
 ```
 

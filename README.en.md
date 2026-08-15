@@ -875,8 +875,10 @@ Before enabling this boundary:
    ```bash
    sudo install -d -m 0750 /etc/proxy-control
    sudo install -o root -g root -m 0644 deploy/version-agent.service /etc/systemd/system/version-agent.service
+   sudo install -o root -g root -m 0644 deploy/proxy-control-version-agent.tmpfiles.conf /etc/tmpfiles.d/proxy-control-version-agent.conf
    sudo install -o root -g root -m 0600 deploy/version-agent.env.example /etc/proxy-control/version-agent.env
    sudo install -o root -g root -m 0600 deploy/version-catalog.example.json /etc/proxy-control/versions.json
+   sudo systemd-tmpfiles --create /etc/tmpfiles.d/proxy-control-version-agent.conf
    ```
 
 3. Replace every example URL, image reference, and SHA-256 in `/etc/proxy-control/versions.json` with verified artifacts. Telemt accepts only immutable image references with `@sha256:...`; Caddy and mita accept only HTTPS URLs without credentials/query and lowercase SHA-256. Do not add `latest`, HTTP, redirects to another host, or arbitrary commands.
