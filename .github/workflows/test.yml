@@ -24,6 +24,8 @@ jobs:
       - name: Ruff and full tests
         run: |
           .venv/bin/ruff check .
+          # Root-only permission tests exercise the built manager image.
+          docker build -f mieru_manager/Dockerfile -t mtproxy-mieru-manager:latest .
           # Ownership, native Nginx and nftables syntax tests intentionally
           # exercise root-only kernel/filesystem contracts in the ephemeral runner.
           sudo .venv/bin/python -m pytest -q

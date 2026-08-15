@@ -67,7 +67,7 @@ class DeployCliTests(unittest.TestCase):
                     os.setgid(gid)
                     os.setuid(uid)
                 return subprocess.run(
-                    [sys.executable, "-c", script, str(access)],
+                    ["/usr/bin/python3", "-c", script, str(access)],
                     text=True,
                     capture_output=True,
                     preexec_fn=demote,

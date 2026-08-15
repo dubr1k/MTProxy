@@ -93,17 +93,22 @@ def test_mieru_overlay_supplies_pinned_host_binary_and_read_only_uds_access():
     manager = config["services"]["mieru-manager"]
     mounts = {item["target"]: item for item in manager["volumes"]}
 
-    assert mounts["/usr/bin/mita"] == {
-        "type": "bind",
-        "source": "/opt/pinned/mita",
-        "target": "/usr/bin/mita",
-        "read_only": True,
-        "bind": {"create_host_path": False},
-    }
+    assert mounts["/usr/bin/mita"]["type"] == "bind"
+    assert mounts["/usr/bin/mita"]["source"] == "/opt/pinned/mita"
+    assert mounts["/usr/bin/mita"]["target"] == "/usr/bin/mita"
+    assert mounts["/usr/bin/mita"]["read_only"] is True
+    # Compose versions differ in whether an explicit false survives JSON
+    # normalization. The source model below is the security contract.
+    assert mounts["/usr/bin/mita"].get("bind", {}) in ({}, {"create_host_path": False})
     assert mounts["/run/mita"]["read_only"] is True
     assert mounts["/run/mita"]["source"] == "/run/mita"
-    assert mounts["/run/mita"]["bind"] == {"create_host_path": False}
-    assert mounts["/var/lib/mieru-manager"]["bind"] == {"create_host_path": False}
+    assert mounts["/run/mita"].get("bind", {}) in ({}, {"create_host_path": False})
+    assert mounts["/var/lib/mieru-manager"].get("bind", {}) in (
+        {},
+        {"create_host_path": False},
+    )
+    source_model = (ROOT / "compose.mieru.yaml").read_text()
+    assert source_model.count("create_host_path: false") == 3
     assert manager["group_add"] == ["321"]
     assert manager["user"] == "10005:10005"
     assert manager["environment"]["MIERU_MITA_SHA256"] == MITA_AMD64_EXECUTABLE_SHA256
