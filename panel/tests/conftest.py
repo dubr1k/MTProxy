@@ -9,6 +9,7 @@ from panel.app import Settings, create_app
 from panel.naive import MemoryNaive
 from panel.mieru import MemoryMieru
 from panel.telemt import MemoryTelemt
+from panel.versions import VersionClient
 
 
 @pytest.fixture
@@ -44,7 +45,13 @@ async def client(tmp_path: Path, telemt: MemoryTelemt, naive: MemoryNaive, mieru
         naive_enabled=True,
         mieru_enabled=True,
     )
-    app = create_app(settings, telemt=telemt, naive=naive, mieru=mieru)
+    app = create_app(
+        settings,
+        telemt=telemt,
+        naive=naive,
+        mieru=mieru,
+        version_client=VersionClient(str(tmp_path / "missing-version-agent.sock")),
+    )
     app.state.store.create_admin("owner", "correct horse battery staple", "owner")
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(

@@ -304,7 +304,7 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert "rolling application-byte admission quota" in js
     assert 'data-quick="mieru-users"' in js
     assert 'class="quick-action mieru-quick-action"' in js
-    assert ".quick-action.mieru-quick-action{transform:translateY(4px)}" in css.text
+    assert ".quick-action.mieru-quick-action{position:relative;top:12px}" in css.text
     assert 'id="fleet-modal"' in text and 'id="create-fleet-node"' in text
     assert 'id="new-node-id"' in text and 'id="new-node-name"' in text
     assert "openFleetModal" in js and "createFleetNode" in js

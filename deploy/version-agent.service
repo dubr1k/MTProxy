@@ -28,7 +28,7 @@ RestrictNamespaces=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-ReadWritePaths=/run/proxy-control /var/lib/proxy-control /opt/mtproxy-shared443/version-overrides /usr/local/bin/caddy /usr/bin/mita
+ReadWritePaths=/run/proxy-control /var/lib/proxy-control /opt/mtproxy-shared443/version-overrides /var/syncthing/Development/proxy-control/version-overrides /usr/local/bin/caddy /usr/bin/mita
 
 [Install]
 WantedBy=multi-user.target

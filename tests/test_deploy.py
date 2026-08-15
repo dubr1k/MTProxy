@@ -47,6 +47,12 @@ class DeployCliTests(unittest.TestCase):
         self.assertIn("h1:XKxkMTgNSizEvKG6QHue6cAsFOteU2qA61w2tKkCWi0=", checker)
         self.assertTrue(os.access(ROOT / "scripts/check-naive-caddy-build.sh", os.X_OK))
 
+    def test_mask_healthcheck_has_init_reaper_for_repeated_wget_checks(self):
+        compose = (ROOT / "compose.yaml").read_text()
+        mask = compose.split("  mtproxy:", 1)[0]
+        self.assertIn("  mask:\n", mask)
+        self.assertIn("    init: true\n", mask)
+
     @unittest.skipUnless(os.geteuid() == 0, "numeric permission behavior requires root")
     def test_naive_log_permissions_allow_caddy_write_and_manager_read_only(self):
         """Catch shared UID/GID or writable-group regressions with real kernel checks."""

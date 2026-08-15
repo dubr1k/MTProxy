@@ -205,6 +205,7 @@ def test_telemt_update_persists_override_and_uses_expected_compose_files(tmp_pat
         state_path=state,
         compose_dir=compose_dir,
         compose_files=("compose.yaml",),
+        telemt_container="telemt-test",
         downloader=lambda url: BINARY,
         runner=run,
     )
@@ -217,3 +218,5 @@ def test_telemt_update_persists_override_and_uses_expected_compose_files(tmp_pat
     assert any("pull" in command for command in commands)
     assert any("up" in command and "mtproxy" in command for command in commands)
     assert any(command[:2] == ["docker", "inspect"] for command in commands)
+    inspect_commands = [command for command in commands if command[:2] == ["docker", "inspect"]]
+    assert inspect_commands and inspect_commands[-1][-1] == "telemt-test"

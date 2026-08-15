@@ -115,6 +115,7 @@ class VersionAgent:
         service_names: dict[str, str] | None = None,
         checkers: dict[str, str] | None = None,
         caddyfiles: dict[str, Path] | None = None,
+        telemt_container: str = "proxy-control-mtproxy",
         downloader: Downloader | None = None,
         runner: Runner | None = None,
         health_timeout: float = 60,
@@ -127,6 +128,7 @@ class VersionAgent:
         self.service_names = service_names or {}
         self.checkers = checkers or {}
         self.caddyfiles = caddyfiles or {}
+        self.telemt_container = telemt_container
         self.downloader = downloader or _download
         self.runner = runner or _run
         self.health_timeout = health_timeout
@@ -287,7 +289,7 @@ class VersionAgent:
             status = ""
             while time.monotonic() < deadline:
                 status = self.runner(
-                    ["docker", "inspect", "--format", "{{.State.Health.Status}}", "proxy-control-mtproxy"],
+                    ["docker", "inspect", "--format", "{{.State.Health.Status}}", self.telemt_container],
                     timeout=30,
                 ).strip()
                 if status == "healthy":
@@ -333,5 +335,6 @@ def agent_from_env() -> VersionAgent:
         service_names={key: value for key, value in (part.split("=", 1) for part in os.getenv("PROXY_CONTROL_SERVICE_NAMES", "naive=caddy-naive,mita=mita").split(",") if "=" in part)},
         checkers=paths("PROXY_CONTROL_CHECKERS", "naive=/usr/local/libexec/check-naive-caddy-build"),
         caddyfiles=paths("PROXY_CONTROL_CADDYFILES", "naive=/var/lib/naive-manager/Caddyfile"),
+        telemt_container=os.getenv("PROXY_CONTROL_TELEMT_CONTAINER", "proxy-control-mtproxy"),
         health_timeout=float(os.getenv("PROXY_CONTROL_VERSION_HEALTH_TIMEOUT", "60")),
     )
