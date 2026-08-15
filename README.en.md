@@ -1,170 +1,240 @@
-**English** | [Русский](README.md)
+**English** · [Русский](README.md)
+
+<div align="center">
 
 # Proxy Control
 
-Multi-protocol proxy control plane for Telemt/MTProto, NaiveProxy/Caddy, and Mieru, with transactional lifecycle management, accounting, a responsive panel, and outbound mTLS fleet agents.
+**One secure control plane for MTProxy, NaiveProxy, and Mieru**
 
-> **Maturity:** local and CI gates cover code, configuration rendering, and image builds. A full Ubuntu 24.04 QEMU lifecycle and production Mieru/fleet deployment remain pending. Treat this release as an operator-reviewed release candidate, not a turnkey managed service.
+Access lifecycle · one-time QR and client configs · honest accounting · transactional changes · outbound-only mTLS fleet
 
 [![CI](https://github.com/dubr1k/proxy-control/actions/workflows/test.yml/badge.svg)](https://github.com/dubr1k/proxy-control/actions/workflows/test.yml)
+[![Ubuntu 24.04](https://img.shields.io/badge/Ubuntu-24.04-E95420?logo=ubuntu&logoColor=white)](INSTALL.en.md)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](CONTRIBUTING.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## What it manages
+[Quick start](#quick-start) · [Architecture](#architecture) · [Capabilities](#capabilities) · [Guides](#guides) · [Security](SECURITY.md)
 
-- **Telemt / MTProto:** users, secrets, limits, runtime and quota counters through Telemt's authenticated private API.
-- **NaiveProxy / Caddy:** credentials, transactional Caddy reloads, access links, and durable completion-log accounting.
-- **Mieru / mita:** users, rolling quotas, lifecycle and fail-closed transactions through a separately installed GPLv3+ runtime.
-- **Control plane:** FastAPI panel with RBAC/audit plus outbound-only mTLS agents and a durable fleet command queue.
+</div>
 
-## Support status
+> [!IMPORTANT]
+> Proxy Control targets operators who understand Docker, Nginx `stream`, DNS, and backups. Core, Naive, and Mieru pass local/CI gates; Telemt, Naive, and Mieru have been validated in a live deployment. The complete QEMU lifecycle and production fleet enrollment are not yet confirmed release gates.
 
-| Area | Status | Evidence / gate |
+## What it is
+
+Proxy Control keeps three proxy protocols behind independent typed integrations and gives them a shared security model:
+
+| Integration | Runtime | Panel capabilities |
 |---|---|---|
-| Python managers, panel, installer transactions | Verified locally and in CI | Full pytest, unittest, Ruff |
-| Compose models and project images | Verified locally and in CI | Core, Naive, Mieru, agent, central ingress renders/builds |
-| Existing-host shared TCP/443 installation | Advanced/manual | Fail-closed audit/plan and external protocol probe required |
-| Ubuntu 24.04 full lifecycle in QEMU | Pending | Not a required gate yet |
-| Production Mieru and fleet enrollment | Pending | No production host or node is claimed as deployed |
+| **MTProxy** | Telemt 3.4.25 | Users, Telegram links/QR, limits, expiry, quota reset, runtime/quota counters |
+| **NaiveProxy** | pinned Caddy + forwardproxy | Users, HTTPS URL/QR/config, disable/rotate/delete, completed-CONNECT accounting |
+| **Mieru** | separately installed `mita` 3.35.x | Users, one-time `mierus://` URL/QR/config, rotation, rolling quota, lifecycle |
+| **Fleet v1** | outbound mTLS agent | Secret-free inventory, typed mutations, ordered durable command/result queue |
 
-## Quickstarts
+The FastAPI/SQLite panel provides `owner` / `admin` / `viewer` roles, Argon2id, CSRF, throttling, and credential-free audit records. Managers receive neither a Docker socket nor arbitrary command execution.
 
-Clone the proposed standalone repository name:
+## Design properties
 
-```sh
-git clone https://github.com/dubr1k/proxy-control.git
-cd proxy-control
-```
-
-Read-only discovery (complete installer supports Ubuntu 24.04):
-
-```sh
-sudo python3 scripts/proxyctl.py audit --proxy-domain proxy.example.com --panel-domain panel.example.com --json
-sudo python3 scripts/proxyctl.py plan --proxy-domain proxy.example.com --panel-domain panel.example.com \
-  --email admin@example.com --route-file /etc/nginx/stream.d/routes.conf \
-  --users owner --protocol-probe /usr/local/bin/mtproxy-respq-probe
-```
-
-Core Telemt + panel render (provide local `.env` and mode-0600 secrets first):
-
-```sh
-docker compose config
-docker compose up -d
-```
-
-All Proxy Control containers on one node belong to **one Compose stack** with the compatibility name `mtproxy`. Every Compose file declares `name: mtproxy`; overlays extend that stack instead of creating another one. Before the first `up`, persist the complete active file set in `COMPOSE_FILE` (preferably in the root-only `.env`) and use that exact set for `config`, `build`, `up`, `ps`, backup, and rollback. Never run project components under another `-p`/`COMPOSE_PROJECT_NAME`, and never use `--remove-orphans` with an incomplete overlay set.
-
-Naive override requires an explicit public hostname:
-
-```sh
-export NAIVE_PUBLIC_HOST=naive.example.com
-export COMPOSE_FILE=compose.yaml:compose.naive.yaml
-docker compose config
-docker compose up -d --build
-```
-
-Mieru requires the separately supplied GPLv3+ v3.35.0 `mita` executable. The amd64 example below obtains and extracts the exact pinned upstream package documented in [MIERU.en.md](MIERU.en.md#pinned-upstream-artifacts); use that guide's arm64 URL and both arm64 digests on arm64. Before assigning fixed IDs or public ports, read the mandatory [identity/state collision preflight](MIERU.en.md#mandatory-compose-state-provisioning) and [listener coexistence checks](MIERU.en.md#listener-coexistence), and stop on any unrelated UID/GID or port collision.
-
-```sh
-curl -fL --proto '=https' --tlsv1.2 \
-  https://github.com/enfein/mieru/releases/download/v3.35.0/mita_3.35.0_amd64.deb \
-  -o mita_3.35.0_amd64.deb
-printf '%s  %s\n' cca7a31e7be692bf10dd5c72f8862b92695a8b06e2a3abcb22ede936e74b2342 mita_3.35.0_amd64.deb | sha256sum -c -
-dpkg-deb -x mita_3.35.0_amd64.deb mita-root
-printf '%s  %s\n' 4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31 mita-root/usr/bin/mita | sha256sum -c -
-export MTPROXY_DOMAIN=proxy.example.com
-export MTPROXY_BACKEND_PORT=18445
-export MTPROXY_COVER_ROOT=/srv/proxy-control/cover
-export MTPROXY_LETSENCRYPT_ROOT=/etc/letsencrypt
-export MIERU_PUBLIC_HOST=mieru.example.com
-export MIERU_MITA_BIN="$(realpath mita-root/usr/bin/mita)"
-test -x "$MIERU_MITA_BIN"
-export MIERU_MITA_SHA256=4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31
-export MIERU_MITA_GID="$(stat -c %g /var/run/mita/mita.sock)"
-export MIERU_MANAGER_STATE_DIR=/var/lib/mieru-manager
-export MIERU_MANAGER_TOKEN_FILE=/etc/mieru-manager/token
-sudo install -d -o root -g root -m 0700 /etc/mieru-manager
-sudo sh -c 'umask 077; openssl rand -base64 48 > /etc/mieru-manager/token'
-getent passwd 10005 || true
-getent group 10005 || true
-sudo ./scripts/prepare-mieru-token.sh prepare "$MIERU_MANAGER_TOKEN_FILE"
-sudo ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
-# If Naive is already active, include compose.naive.yaml in this complete list too.
-export COMPOSE_FILE=compose.yaml:compose.mieru.yaml
-docker compose config
-docker compose up -d --build
-```
-
-Fleet preview only: append `compose.agent.yaml` and/or `compose.fleet-central.yaml` to the same `COMPOSE_FILE` after reading [FLEET.en.md](FLEET.en.md). A separate Compose project is forbidden; do not treat a render as enrollment or production validation.
+- **One public TCP/443 owner.** Host Nginx `stream` + `ssl_preread` keeps shared 443 and routes SNI to loopback listeners.
+- **One Compose stack.** Every node container uses the compatibility project name `mtproxy`; overlays never create separate projects.
+- **Bounded secret disclosure.** List APIs omit passwords, access URLs, QR codes, and reveal tokens. Mieru/Naive create and rotate responses are one-time and `Cache-Control: no-store`.
+- **Fail-closed transactions.** Config/state changes use backup, journal, validation, atomic replace, and rollback.
+- **Honest metrics.** The UI never invents traffic. Missing protocol boundaries render as `unavailable` or `degraded`.
+- **Least privilege.** Separate service identities, read-only roots, dropped capabilities, token-authenticated UDS, no Docker socket.
+- **Fleet without inbound SSH.** Nodes connect to central ingress over mTLS; identity is bound to URI SAN, serial, and fingerprint.
+- **Responsive UI.** Desktop, intermediate, and mobile layouts; QR/config dialogs do not widen the viewport.
 
 ## Architecture
 
 ```text
-Internet → host Nginx stream/SNI → loopback proxy listeners → Telemt or protocol runtime
-                                  ↘ panel TLS → loopback FastAPI + SQLite
-Panel → authenticated local Unix/private-network managers → Caddy / mita
-Node agent → outbound mTLS → central ingress → durable typed queue
+                              ┌──────────────────────────────┐
+Internet TCP/443 ───────────► │ host Nginx stream + SNI map │
+                              └──────────────┬───────────────┘
+                 ┌───────────────────────────┼───────────────────────────┐
+                 ▼                           ▼                           ▼
+        Telemt / MTProto             panel HTTPS                 adjacent SNI
+        loopback backend             loopback FastAPI            Xray / sites / etc.
+                 │                           │
+                 │                  ┌────────┼────────┐
+                 │                  ▼        ▼        ▼
+                 │               Telemt    Naive    Mieru
+                 │               private   manager  manager
+                 │               API       UDS      UDS
+                 │                          │        │
+                 │                        Caddy    host mita
+                 └───────────────────────────────────────────────────────
+
+Remote node ── outbound mTLS ──► fleet ingress ──► durable typed queue
 ```
 
-Nginx stays the public TCP/443 owner. Managers have bounded APIs and no Docker socket. See [architecture](docs/ARCHITECTURE.md).
+See [architecture](docs/ARCHITECTURE.md), [compatibility boundary](docs/COMPATIBILITY.md), and [security model](SECURITY.md).
 
-## Capability matrix
+## Quick start
 
-| Capability | Telemt | Naive | Mieru | Fleet v1 |
-|---|---|---|---|---|
-| User lifecycle | Yes | Yes | Yes | Telemt enable/disable; no secret mutation |
-| Limits / quota | Quota, rate, connections, IPs, expiry | Accounting reset only | Rolling approximate quotas | Typed Telemt limit/reset operations |
-| Accounting | Runtime + quota counters | Completed CONNECT payload | Degraded/unavailable | Secret-free inventory/results |
-| Transactional apply / rollback | Installer and runtime checks | Paired config/state journal | CAS snapshot journal | Durable command/result queue |
-| Remote lifecycle | Local panel | Local manager | Start/stop/restart | Mieru lifecycle allowlist |
+### 1. Clone
 
-## Accounting matrix
+```bash
+git clone https://github.com/dubr1k/proxy-control.git
+cd proxy-control
+```
 
-| Runtime | What can be shown | Required caveat |
+### 2. Run a read-only audit
+
+The complete installer supports Ubuntu 24.04 with an existing, unambiguous Nginx `ssl_preread` map:
+
+```bash
+sudo python3 scripts/proxyctl.py audit \
+  --proxy-domain proxy.example.com \
+  --panel-domain panel.example.com \
+  --json
+```
+
+### 3. Build a no-change plan
+
+```bash
+sudo python3 scripts/proxyctl.py plan \
+  --proxy-domain proxy.example.com \
+  --panel-domain panel.example.com \
+  --email admin@example.com \
+  --route-file /etc/nginx/stream.d/routes.conf \
+  --users owner,phone \
+  --protocol-probe /usr/local/bin/mtproxy-respq-probe \
+  --json
+```
+
+Review DNS, occupied ports, Nginx ownership, packages, and routes. Only then run `sudo ./install.sh` with the same arguments. See [INSTALL.en.md](INSTALL.en.md) and the [installer/auditor reference](INSTALLER_AUDITOR.md).
+
+### 4. Manual Compose deployment
+
+Prepare a local `.env` and mode-restricted secret files. Never copy production values into Git.
+
+```bash
+docker compose -f compose.yaml config -q
+docker compose -f compose.yaml up -d --build
+docker compose -f compose.yaml ps
+```
+
+Overlays extend the **same** `mtproxy` project:
+
+```bash
+export COMPOSE_FILE=compose.yaml:compose.naive.yaml:compose.mieru.yaml
+docker compose config -q
+docker compose up -d --build
+```
+
+Persist the exact `COMPOSE_FILE` in a root-only deployment environment and use it for `config`, `build`, `up`, `ps`, backup, and rollback. Never use `--remove-orphans` with an incomplete overlay set.
+
+## Capabilities
+
+| Capability | MTProxy | NaiveProxy | Mieru | Fleet v1 |
+|---|:---:|:---:|:---:|:---:|
+| Create / disable / enable / delete | ✓ | ✓ | ✓ | Partial |
+| Rotate credentials | ✓ | ✓ | ✓ | — |
+| QR and client config | Telegram | URL + JSON | `mierus://` + import | — |
+| Expiry / limits | ✓ | Accounting baseline | Rolling quota | Typed limits |
+| Runtime lifecycle | Telemt | Caddy reload | start/stop/restart | Mieru allowlist |
+| Durable transaction / recovery | ✓ | ✓ | ✓ | ✓ |
+| Secret-free list/audit | ✓ | ✓ | ✓ | ✓ |
+
+### Sharing a Mieru configuration
+
+When a user is **created**, the panel displays a one-time `mierus://` URL, QR code, and import command. Closing the dialog removes the credential from frontend state. Existing plaintext cannot be recovered from `hashedPassword`; **New link + QR** performs controlled rotation and invalidates the previous configuration. See [Mieru sharing](docs/MIERU_SHARING.en.md).
+
+## Accounting without false precision
+
+| Runtime | Source | Required caveat |
 |---|---|---|
-| Telemt | runtime `total_octets` and resettable quota usage | Runtime generations and abrupt termination affect persistence; not billing-grade. |
-| Naive/Caddy | completed CONNECT payload bytes persisted by collector | Appears on tunnel close; excludes TLS/IP; unfinished tunnels can be lost on process failure. |
-| Mieru/mita | quota configuration; metrics degraded/unavailable in this adapter | Approximate application-byte session-admission quota, not a hard billing cap. |
+| Telemt | runtime `total_octets` + persistent quota usage | A runtime generation may reset diagnostics; abrupt stop may lose recent quota usage |
+| Naive/Caddy | payload bytes of completed CONNECT sessions | Values appear on tunnel close and exclude TLS/IP overhead |
+| Mieru/mita | quota configuration and typed status | No safe typed per-user traffic boundary; the UI reports `unavailable` |
 
-Details: [ACCOUNTING.md](docs/ACCOUNTING.md).
+These are operational signals, not billing records. Details: [ACCOUNTING.md](docs/ACCOUNTING.md).
 
-## Security and trust matrix
+## Guides
 
-| Boundary | Exposure / trust | Failure semantics |
-|---|---|---|
-| Public listeners | Host Nginx and explicitly selected proxy ports only | SNI collision, occupied ports, or invalid Nginx config fail closed |
-| Telemt management | Authenticated API on private Compose network; panel is its client | No host-published API |
-| Naive / Mieru management | Token-authenticated Unix sockets; pinned local runtime contracts | Unknown fields, drift, invalid journals, and degraded accounting fail closed |
-| Credentials and state | Mode-restricted secrets, named volumes/bind state, SQLite/WAL | Back up as secret-bearing generations; never publish links or keys |
-| Fleet | Outbound mTLS, certificate-bound identity, typed operations | Durable replay-safe queue; no SSH, Docker socket, or arbitrary command/URL |
-| Service identities | Separate fixed/unprivileged identities, read-only roots, dropped capabilities | Preflight numeric-ID and file-mode collisions |
+### Installation and protocols
 
-Read [SECURITY.md](SECURITY.md) before deployment.
+- [Documentation map](docs/README.md)
+- [Automated installation — EN](INSTALL.en.md) · [RU](INSTALL.ru.md)
+- [Complete installer and auditor — EN](INSTALLER_AUDITOR.md) · [RU](INSTALLER_AUDITOR.ru.md)
+- [MTProto behind Nginx SNI — EN](DOCKER_DEPLOYMENT.md) · [RU](DOCKER_DEPLOYMENT.ru.md)
+- [Panel and Naive — EN](PANEL.en.md) · [RU](PANEL.ru.md)
+- [Mieru — EN](MIERU.en.md) · [RU](MIERU.ru.md)
+- [Fleet mTLS — EN](FLEET.en.md) · [RU](FLEET.ru.md)
 
-## Deployment guides
+### Operations
 
-- [Complete installer/auditor](INSTALLER_AUDITOR.md)
-- [Panel and Naive](PANEL.en.md)
-- [MTProto-specific Docker deployment](DOCKER_DEPLOYMENT.md)
-- [Mieru](MIERU.en.md)
-- [Fleet](FLEET.en.md)
+- [Operations runbook — EN](docs/OPERATIONS.en.md) · [RU](docs/OPERATIONS.ru.md)
+- [Backup and restore — EN](docs/BACKUP_RESTORE.en.md) · [RU](docs/BACKUP_RESTORE.ru.md)
+- [Upgrade and rollback](docs/UPGRADING.md)
+- [Troubleshooting — EN](docs/TROUBLESHOOTING.en.md) · [RU](docs/TROUBLESHOOTING.ru.md)
 - [Validation gates](docs/VALIDATION.md)
+- [Compatibility contracts](docs/COMPATIBILITY.md)
 
-## Upgrade, rollback, and compatibility
+## Upgrade and rollback
 
-Runtime identifiers such as `/opt/mtproxy-shared443`, Compose project `mtproxy`, existing volumes, unit filenames, installed commands, and fleet URI prefixes are compatibility contracts and are not renamed by product branding. Read [COMPATIBILITY.md](docs/COMPATIBILITY.md) and [UPGRADING.md](docs/UPGRADING.md) before changing images, binaries, routes, or state.
+Before every change:
 
-## Known limitations
+1. Record the exact source revision, image/binary digests, and full `COMPOSE_FILE`.
+2. Quiesce mutations and create a consistent backup of secrets, SQLite, volumes, manager state/journals, and Nginx ownership files.
+3. Run `docker compose config -q` and a read-only plan/audit.
+4. Upgrade one protocol boundary at a time.
+5. Verify health **and the real protocol path**.
+6. On failure, restore the complete previous generation—not one convenient file.
 
-- QEMU install → audit → repair → upgrade → uninstall → rollback validation is pending.
-- Production Mieru deployment and fleet enrollment are pending.
-- Mieru per-user metrics are deliberately degraded; fleet v1 excludes secret-bearing remote mutations.
-- Shared-443 installation requires an unambiguous existing Nginx map and an external real `resPQ` probe.
-- Counters are operational telemetry, not billing records.
+The `Proxy Control` brand does not rename migration-sensitive identifiers: `/opt/mtproxy-shared443`, Compose project `mtproxy`, volumes, unit names, installed commands, and fleet URI prefixes remain stable.
 
-## Licensing, provenance, and third-party software
+## Security
 
-Repository code is MIT under [LICENSE](LICENSE); its existing copyright text is unchanged. Telemt, Caddy/modules, Mieru/mita, legacy MTProxy sources, images, and Python packages retain their own licenses. Mieru/mita is a separately downloaded or mounted GPLv3+ process and is not bundled in this repository or its images. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Read [SECURITY.md](SECURITY.md) before production deployment.
 
-## Contributing and security
+- never publish `.env`, `secrets/`, access URLs, QR codes, tokens, certificates/private keys, databases, or unsanitized logs;
+- keep the panel app on loopback and expose it only through an operator-controlled HTTPS boundary;
+- never publish Telemt or manager APIs;
+- never mount the Docker socket into project services;
+- never update pinned Caddy/mita without provenance, digest, and rollback checks;
+- rotate the initial owner password;
+- regression-test every adjacent SNI after an Nginx change.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), and [SECURITY.md](SECURITY.md). Never include credentials, access URLs, QR codes, certificates, production hostnames, or unsanitized logs in an issue or pull request.
+Report vulnerabilities privately through GitHub Security Advisories when private reporting is enabled.
+
+## Development validation
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r panel/requirements-dev.txt
+.venv/bin/ruff check .
+.venv/bin/python -m pytest -q
+python3 -m unittest -v tests/test_deploy.py
+python3 scripts/check-doc-links.py
+git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
+git ls-files -z '*.sh' | xargs -0 -r shellcheck
+git diff --check
+```
+
+CI additionally renders every Compose combination, builds project images and the pinned Caddy artifact, verifies systemd units, and checks documentation links.
+
+## Status and limitations
+
+**Validated:**
+
+- full Python test suite and static checks;
+- Compose render/build for core, Naive, Mieru, agent, and ingress;
+- live Telemt, Naive, and Mieru protocol paths;
+- transactional recovery and secret-free API/RBAC regressions;
+- responsive desktop/mobile UI including the Mieru QR dialog.
+
+**Not yet claimed as a completed gate:**
+
+- complete QEMU install → audit → repair → upgrade → uninstall → rollback;
+- production fleet ingress/enrollment end-to-end;
+- billing-grade accounting;
+- secret-bearing remote mutations through fleet.
+
+## Licensing and provenance
+
+Repository code is released under the [MIT License](LICENSE). Telemt, Caddy/forwardproxy, Mieru/mita, legacy MTProxy sources, images, and Python packages retain their own licenses. GPLv3+ `mita` is downloaded/mounted separately and is not bundled in the MIT repository or images. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), and [CHANGELOG.md](CHANGELOG.md). Changes must preserve compatibility contracts, include regression coverage, and update RU/EN documentation together.

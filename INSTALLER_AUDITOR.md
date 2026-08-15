@@ -1,5 +1,7 @@
 # Complete Proxy Control installer and auditor (`proxyctl`)
 
+**English** · [Русский](INSTALLER_AUDITOR.ru.md)
+
 `install.sh` is a root-only wrapper around `scripts/proxyctl.py install`. The same tool provides the five lifecycle modes: `audit`, `plan`, `install`, `repair`, and `uninstall`. In this stage the complete installer deploys the Telemt/MTProto data plane and panel; NaiveProxy, Mieru, and fleet remain separately configured integrations. It is intended for Ubuntu 24.04 hosts where Nginx already owns public TCP/443 through one unambiguous `ssl_preread` map (including hosts that also run Xray/3x-ui).
 
 ## Production command

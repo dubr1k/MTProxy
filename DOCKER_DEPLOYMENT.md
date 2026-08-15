@@ -1,5 +1,7 @@
 # MTProto Docker deployment behind an existing Nginx SNI router
 
+**English** · [Русский](DOCKER_DEPLOYMENT.ru.md)
+
 This guide is specifically for the Telemt/MTProto data plane. NaiveProxy, Mieru, panel and fleet details live in their dedicated guides.
 
 ```text

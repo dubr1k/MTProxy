@@ -1,5 +1,7 @@
 # Mieru / mita v3.35 management
 
+**English** · [Русский](MIERU.ru.md)
+
 See also the product [architecture](docs/ARCHITECTURE.md), [accounting contract](docs/ACCOUNTING.md), and [upgrade procedure](docs/UPGRADING.md).
 
 Proxy Control supports exactly **mita 3.35.x** through a local, authenticated Unix-socket manager. Mita remains a separate GPLv3+ process; this adapter is MIT and contains no copied upstream source or generated stubs.
@@ -33,9 +35,9 @@ MIERU_MANAGER_STATE=/var/lib/mieru-manager
 MIERU_MITA_SHA256=4aa03abde846548692dc479359fd9d6c378c0b0e3ab22f94b2c22b1e54dcdb31
 ```
 
-The helper verifies the pinned executable SHA-256 before every invocation and accepts only mita 3.35.x at bootstrap. It invokes only fixed `/usr/bin/mita` argv commands with in-memory bounded stdout/stderr. Each invocation runs in a new process group; timeout, output-limit, exceptional, and successful completion paths kill remaining same-group descendants before returning. A malicious child can escape that boundary by double-forking and calling `setsid()`, so this containment is not a sandbox and depends on the executable remaining pinned and trusted. Complete secret-bearing JSON is inherited through an anonymous FD and never a named tempfile, command line, log, audit, or HTTP list response. Keep `/var/run/mita/mita.sock` mode 0770; do not enable `MITA_INSECURE_UDS`.
+The helper verifies the pinned executable SHA-256 before every invocation and accepts only mita 3.35.x at bootstrap. It invokes only fixed `/usr/bin/mita` argv commands with in-memory bounded stdout/stderr. Each invocation runs in a new process group; timeout, output-limit, exceptional, and successful completion paths kill remaining same-group descendants before returning. A malicious child can escape that boundary by double-forking and calling `setsid()`, so this containment is not a sandbox and depends on the executable remaining pinned and trusted. Complete secret-bearing JSON is inherited through an anonymous FD and never a named tempfile, command line, log, audit, or HTTP list response. Keep `/run/mita/mita.sock` mode 0770; do not enable `MITA_INSECURE_UDS`. Use the stable tmpfiles-created `/run/mita` directory from `deploy/mita.tmpfiles.conf`; do not use `RuntimeDirectory=mita` with a bind-mounted UDS because a restart can replace the directory inode.
 
-For Compose, combine `compose.yaml` and `compose.mieru.yaml`. Set `MIERU_MITA_BIN` to the extracted, executable-digest-verified host binary, `MIERU_MITA_SHA256` to that executable digest, and `MIERU_MITA_GID` to the numeric GID that can connect to `/var/run/mita/mita.sock`. That dynamically supplied socket GID must be a distinct nonzero group and must not reuse reserved panel/manager/Caddy/accounting identities `10001` through `10005`; the mandatory state preflight rejects those values. The binary and mita runtime directory are mounted read-only; only manager state and its API runtime directory are writable. The manager health check uses the authenticated Unix API, and the panel waits for it to become healthy.
+For Compose, combine `compose.yaml` and `compose.mieru.yaml`. Set `MIERU_MITA_BIN` to the extracted, executable-digest-verified host binary, `MIERU_MITA_SHA256` to that executable digest, and `MIERU_MITA_GID` to the numeric GID that can connect to `/run/mita/mita.sock`. That dynamically supplied socket GID must be a distinct nonzero group and must not reuse reserved panel/manager/Caddy/accounting identities `10001` through `10005`; the mandatory state preflight rejects those values. The binary and mita runtime directory are mounted read-only; only manager state and its API runtime directory are writable. The manager health check uses the authenticated Unix API, and the panel waits for it to become healthy.
 
 ### Mandatory Compose state provisioning
 
@@ -46,7 +48,7 @@ Before the first `docker compose up`, put the token beneath a trusted root-owned
 ```sh
 export MIERU_MANAGER_TOKEN_FILE=/etc/mieru-manager/token
 export MIERU_MANAGER_STATE_DIR=/var/lib/mieru-manager
-export MIERU_MITA_GID="$(stat -c %g /var/run/mita/mita.sock)"
+export MIERU_MITA_GID="$(stat -c %g /run/mita/mita.sock)"
 getent passwd 10005 || true
 getent group 10005 || true
 sudo ./scripts/prepare-mieru-token.sh prepare "$MIERU_MANAGER_TOKEN_FILE"

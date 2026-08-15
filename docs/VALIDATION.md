@@ -19,6 +19,8 @@ CI also renders core, core+Naive, core+Mieru, combined core+Naive+Mieru, agent a
 
 Validate Nginx before reload, public listener ownership, all adjacent SNI routes, authenticated manager boundaries, backups and rollback. MTProto requires Fake-TLS → Obfuscated2 → `req_pq_multi` → validated Telegram `resPQ` for every secret. Naive requires cover HTTPS, authenticated CONNECT, completed-log collection and failure tests. Mieru requires executable digest/version, UDS/state preflight, transaction recovery and TCP/UDP checks. Fleet requires negative mTLS tests, certificate binding/revocation, ordered command/result durability, and no public local management API.
 
-## Pending gates
+## Runtime evidence and pending gates
 
-A reproducible Ubuntu 24.04 QEMU install → audit → repair → upgrade → uninstall → rollback workflow is pending and is not required CI. Production Mieru deployment and fleet enrollment also remain pending until independently confirmed.
+Telemt/MTProto, NaiveProxy/Caddy and Mieru/mita have each passed live end-to-end protocol probes on an operator-controlled deployment, including manager health and panel integration. This evidence does not make host-specific credentials, names, addresses or logs public and does not replace validation on a new target host.
+
+A reproducible Ubuntu 24.04 QEMU install → audit → repair → upgrade → uninstall → rollback workflow remains pending and is not a required CI gate. Production fleet ingress/enrollment also remains pending until mTLS authorization and a durable command/result cycle are independently confirmed.

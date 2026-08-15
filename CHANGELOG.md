@@ -21,7 +21,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Validation status
 
-- Ubuntu 24.04 QEMU lifecycle and production Mieru/fleet deployment remain pending.
+- Ubuntu 24.04 QEMU lifecycle and production fleet enrollment remain pending; Telemt, NaiveProxy and Mieru have passed live operator-controlled protocol probes.
 
 ## [1.3.0] - 2026-08-11
 
