@@ -52,6 +52,7 @@ jobs:
           sudo install -d /usr/local/libexec /opt/proxy-control/venv/bin /opt/mtproxy-agent/venv/bin /opt/mtproxy-panel/venv/bin
           sudo install -m 0755 /bin/true /usr/local/libexec/check-naive-caddy-build
           sudo install -m 0755 /bin/true /usr/local/bin/caddy
+          sudo install -m 0755 /bin/true /usr/bin/mita
           sudo install -m 0755 /bin/true /opt/proxy-control/venv/bin/python
           sudo install -m 0755 /bin/true /opt/mtproxy-agent/venv/bin/python
           sudo install -m 0755 /bin/true /opt/mtproxy-panel/venv/bin/python
