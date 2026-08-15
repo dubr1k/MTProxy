@@ -24,7 +24,9 @@ jobs:
       - name: Ruff and full tests
         run: |
           .venv/bin/ruff check .
-          .venv/bin/python -m pytest -q
+          # Ownership, native Nginx and nftables syntax tests intentionally
+          # exercise root-only kernel/filesystem contracts in the ephemeral runner.
+          sudo .venv/bin/python -m pytest -q
           .venv/bin/python -m unittest -v tests/test_deploy.py
       - name: Every tracked shell script
         run: |

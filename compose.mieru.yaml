@@ -18,10 +18,24 @@ services:
       MITA_UDS_PATH: /run/mita/mita.sock
     secrets: [mieru-manager-token]
     volumes:
-      - ${MIERU_MITA_BIN:-/usr/bin/mita}:/usr/bin/mita:ro
-      - /var/run/mita:/run/mita:ro
+      - type: bind
+        source: ${MIERU_MITA_BIN:-/usr/bin/mita}
+        target: /usr/bin/mita
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /run/mita
+        target: /run/mita
+        read_only: true
+        bind:
+          create_host_path: false
       # Mandatory host preflight: sudo ./scripts/prepare-mieru-state.sh prepare "$MIERU_MANAGER_STATE_DIR"
-      - ${MIERU_MANAGER_STATE_DIR:-/var/lib/mieru-manager}:/var/lib/mieru-manager
+      - type: bind
+        source: ${MIERU_MANAGER_STATE_DIR:-/var/lib/mieru-manager}
+        target: /var/lib/mieru-manager
+        bind:
+          create_host_path: false
       - mieru-manager-run:/run/mieru-manager
     read_only: true
     tmpfs:
