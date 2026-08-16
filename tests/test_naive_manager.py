@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from naive_manager.server import ManagerHTTPServer, caddy_adapt
+from naive_manager.server import ManagerHTTPServer, QuotaEnforcer, caddy_adapt
 from naive_manager.service import (
     ACCOUNTING_BEGIN,
     ACCOUNTING_END,
@@ -97,8 +97,8 @@ def test_bootstrap_imports_existing_credentials_without_changing_them(tmp_path):
     service.bootstrap()
 
     assert service.list_users() == [
-        {"username": "old-user", "enabled": True},
-        {"username": "second", "enabled": True},
+        {"username": "old-user", "enabled": True, "quota_bytes": None, "disabled_reason": None},
+        {"username": "second", "enabled": True, "quota_bytes": None, "disabled_reason": None},
     ]
     assert service.reveal("old-user")["proxy_url"] == "https://old-user:old-password@naive.example.com"
     rendered = service.caddyfile.read_text()
@@ -316,8 +316,8 @@ def test_bootstrap_recovers_after_crash_between_initial_config_and_state_writes(
 
     assert recovered.caddyfile.read_text().count("# BEGIN NAIVE-MANAGER USERS") == 1
     assert recovered.list_users() == [
-        {"username": "old-user", "enabled": True},
-        {"username": "second", "enabled": True},
+        {"username": "old-user", "enabled": True, "quota_bytes": None, "disabled_reason": None},
+        {"username": "second", "enabled": True, "quota_bytes": None, "disabled_reason": None},
     ]
     assert not (recovered.state_file.parent / "transaction.json").exists()
 
@@ -377,7 +377,10 @@ def test_create_disable_enable_rotate_and_delete_are_transactional(tmp_path):
 
     service.set_enabled("phone", False)
     assert "basic_auth phone " not in service.caddyfile.read_text()
-    assert service.list_users()[-1] == {"username": "phone", "enabled": False}
+    assert service.list_users()[-1] == {
+        "username": "phone", "enabled": False,
+        "quota_bytes": None, "disabled_reason": "manual",
+    }
 
     service.set_enabled("phone", True)
     before = service.reveal("phone")["proxy_url"]
@@ -655,7 +658,10 @@ def test_bootstrap_commits_files_replaced_transaction_by_reloading_current_files
     recovered = manager(tmp_path, hooks)
     recovered.bootstrap()
 
-    assert recovered.list_users()[-1] == {"username": "crash-commit", "enabled": True}
+    assert recovered.list_users()[-1] == {
+        "username": "crash-commit", "enabled": True,
+        "quota_bytes": None, "disabled_reason": None,
+    }
     assert "basic_auth crash-commit new-password" in recovered.caddyfile.read_text()
     assert not transaction.exists()
     assert "crash-commit" in hooks.reload_snapshots[-1]
@@ -793,10 +799,51 @@ def test_unix_api_requires_token_and_never_lists_passwords(tmp_path):
             response = client.get("/v1/users", headers={"X-Naive-Token": "internal-token"})
             assert response.status_code == 200
             assert response.json() == [
-                {"username": "old-user", "enabled": True},
-                {"username": "second", "enabled": True},
+                {"username": "old-user", "enabled": True, "quota_bytes": None, "disabled_reason": None},
+                {"username": "second", "enabled": True, "quota_bytes": None, "disabled_reason": None},
             ]
             assert "old-password" not in response.text
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_unix_api_persists_and_removes_naive_quota_without_exposing_credentials(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    socket_path = tmp_path / "manager.sock"
+    server = ManagerHTTPServer(socket_path, service, "internal-token")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        transport = httpx.HTTPTransport(uds=str(socket_path))
+        headers = {"X-Naive-Token": "internal-token"}
+        with httpx.Client(transport=transport, base_url="http://manager") as client:
+            set_response = client.post(
+                "/v1/users/old-user/quota", json={"quota_bytes": 4096}, headers=headers,
+            )
+            assert set_response.status_code == 200
+            assert set_response.json() == {
+                "username": "old-user", "quota_bytes": 4096,
+                "enabled": True, "disabled_reason": None,
+            }
+
+            listed = client.get("/v1/users", headers=headers)
+            assert listed.status_code == 200
+            assert listed.json()[0]["quota_bytes"] == 4096
+            assert "old-password" not in listed.text
+
+            removed = client.post(
+                "/v1/users/old-user/quota", json={"quota_bytes": None}, headers=headers,
+            )
+            assert removed.status_code == 200
+            assert removed.json() == {
+                "username": "old-user", "quota_bytes": None,
+                "enabled": True, "disabled_reason": None,
+            }
+            assert service.list_users()[0]["quota_bytes"] is None
     finally:
         server.shutdown()
         server.server_close()
@@ -1026,6 +1073,82 @@ def test_authenticated_traffic_api_lists_and_resets_without_changing_credentials
     assert service.reveal("old-user")["proxy_url"] == before
 
 
+def test_health_reports_without_rewriting_config_for_an_exhausted_quota(tmp_path):
+    """Health is a read: enforcement runs on its own schedule, not on every probe."""
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    service.set_quota("old-user", 40)
+    log = tmp_path / "access.json"
+    log.write_text(json.dumps({
+        "request": {"method": "CONNECT"}, "status": 200, "user_id": "old-user",
+        "bytes_read": 40, "size": 60,
+    }) + "\n")
+    service.traffic = TrafficCollector(
+        log, tmp_path / "traffic.sqlite3", service.managed_usernames,
+    )
+    config_before = service.caddyfile.read_bytes()
+    reloads_before = hooks.reloads
+
+    assert service.health() == {"ready": True, "host": service.public_host}
+
+    assert service.caddyfile.read_bytes() == config_before
+    assert hooks.reloads == reloads_before
+    assert service.list_users()[0]["enabled"] is True
+
+    assert service.enforce_quotas() == ["old-user"]
+    assert service.list_users()[0]["enabled"] is False
+
+
+def test_quota_enforcer_survives_failures_and_backs_off_before_retrying():
+    """A failing enforcement pass must not kill the loop or spin on the manager."""
+    attempts = []
+    released = threading.Event()
+
+    class FailingManager:
+        def enforce_quotas(self):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("apply failed")
+            released.set()
+            return ["old-user"]
+
+    enforcer = QuotaEnforcer(FailingManager(), interval=0.01, max_backoff=0.05)
+    enforcer.start()
+    try:
+        assert released.wait(5)
+    finally:
+        enforcer.stop()
+        enforcer.join(5)
+    assert not enforcer.is_alive()
+    assert len(attempts) >= 2
+
+
+def test_quota_reset_keeps_access_disabled_until_explicit_enable(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    service.set_quota("old-user", 40)
+    log = tmp_path / "access.json"
+    log.write_text(json.dumps({
+        "request": {"method": "CONNECT"}, "status": 200, "user_id": "old-user",
+        "bytes_read": 12, "size": 34,
+    }) + "\n")
+    service.traffic = TrafficCollector(
+        log, tmp_path / "traffic.sqlite3",
+        lambda: {row["username"] for row in service.list_users()},
+    )
+
+    assert service.enforce_quotas() == ["old-user"]
+    assert service.list_users()[0]["disabled_reason"] == "quota"
+    service.reset_traffic("old-user")
+    assert service.list_users()[0]["enabled"] is False
+    assert service.list_users()[0]["disabled_reason"] == "quota"
+    service.set_enabled("old-user", True)
+    assert service.list_users()[0]["enabled"] is True
+    assert service.list_users()[0]["disabled_reason"] is None
+
+
 def test_health_and_traffic_report_do_not_deadlock_on_opposite_lock_timing(tmp_path):
     """Traffic collection must never call back into manager state under its lock."""
     hooks = Hooks()
@@ -1163,6 +1286,71 @@ def test_delete_serializes_with_collector_that_already_captured_old_user_snapsho
         assert database.execute(
             "SELECT username,upload_bytes,download_bytes FROM traffic_archives"
         ).fetchall() == [("old-user", 1, 2)]
+
+
+def test_quota_is_persisted_and_exhaustion_revokes_future_admission(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    log = tmp_path / "access.json"
+    log.write_text("")
+    service.traffic = TrafficCollector(log, tmp_path / "traffic.sqlite3", service.managed_usernames)
+
+    assert service.set_quota("old-user", 100) == {
+        "username": "old-user", "quota_bytes": 100,
+        "enabled": True, "disabled_reason": None,
+    }
+    assert service.list_users()[0]["quota_bytes"] == 100
+    state = json.loads(service.state_file.read_text())
+    assert state["users"][0]["quota_bytes"] == 100
+
+    log.write_text(json.dumps({
+        "request": {"method": "CONNECT"}, "status": 200, "user_id": "old-user",
+        "bytes_read": 40, "size": 60,
+    }) + "\n")
+
+    assert service.enforce_quotas() == ["old-user"]
+    listed = {row["username"]: row for row in service.list_users()}
+    assert listed["old-user"]["enabled"] is False
+    assert listed["old-user"]["disabled_reason"] == "quota"
+    assert "basic_auth old-user old-password" not in service.caddyfile.read_text()
+
+    with pytest.raises(ManagerConflict, match="quota"):
+        service.set_enabled("old-user", True)
+
+    service.set_quota("old-user", None)
+    assert service.list_users()[0]["quota_bytes"] is None
+    service.set_enabled("old-user", True)
+    assert service.list_users()[0]["enabled"] is True
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 2**63])
+def test_quota_rejects_non_positive_boolean_or_overflow_values_without_mutation(tmp_path, value):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    before = service.state_file.read_bytes()
+
+    with pytest.raises(ValueError, match="quota"):
+        service.set_quota("old-user", value)
+
+    assert service.state_file.read_bytes() == before
+
+
+def test_legacy_user_state_defaults_to_unlimited_quota(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+    service.bootstrap()
+    state = json.loads(service.state_file.read_text())
+    for row in state["users"]:
+        row.pop("quota_bytes", None)
+        row.pop("disabled_reason", None)
+    service.state_file.write_bytes(service._encode_state(state))
+
+    assert all(row["quota_bytes"] is None for row in service.list_users())
+    service.create("legacy-compatible")
+    created = next(row for row in service.list_users() if row["username"] == "legacy-compatible")
+    assert created["quota_bytes"] is None
 
 
 def test_create_serializes_with_collector_snapshot_before_new_user_record(tmp_path):

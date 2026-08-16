@@ -230,7 +230,7 @@ Containers use explicit `proxy-control-*` names. Docker Compose service names, p
 |---|---|
 | **MTProxy / Telemt** | Users, Telegram links and QR codes, limits, expiry, quota reset, service status |
 | **Panel** | Owner, administrator, and viewer roles, secret-free audit, access management |
-| **NaiveProxy / Caddy** | Users, HTTPS configurations and QR codes, enable/disable, credential rotation, deletion, completed-connection accounting |
+| **NaiveProxy / Caddy** | Users, HTTPS configurations and QR codes, enable/disable, per-user quota with admission enforcement, credential rotation, deletion, completed-connection accounting |
 | **Mieru / mita** | Users, one-time `mierus://` links and QR codes, credential rotation, rolling quotas, lifecycle management |
 | **Fleet mTLS** | Optional inventory and limited management of remote nodes over outbound connections |
 
@@ -566,7 +566,7 @@ Naive acceptance:
 6. no authorization in logs;
 7. every adjacent SNI route.
 
-Naive accounting is payload bytes from completed tunnels without TLS/IP overhead. It is not an enforceable quota or billing counter. If the manager fails, do not delete `transaction.json`, paired backups, `-wal`, or `-shm` files.
+Naive accounting is payload bytes from completed tunnels without TLS/IP overhead. A per-user quota removes credentials after the observed limit is reached, but it is not a byte-level hard cap or billing counter: an active tunnel may cause overshoot. If the manager fails, do not delete `transaction.json`, paired backups, `-wal`, or `-shm` files.
 
 ### Mieru / mita
 

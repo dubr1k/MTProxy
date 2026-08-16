@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import secrets
 import socket
 import socketserver
 import ssl
+import sys
+import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -19,6 +22,50 @@ from .traffic import (
     ACCOUNTING_RETAINED_BYTES,
     TrafficCollector,
 )
+
+LOGGER = logging.getLogger("naive_manager")
+QUOTA_INTERVAL_SECONDS = 60.0
+QUOTA_MAX_BACKOFF_SECONDS = 900.0
+CONNECTION_LOST = (BrokenPipeError, ConnectionResetError)
+
+
+class QuotaEnforcer(threading.Thread):
+    """Disable quota-exhausted users even when nobody has the panel open.
+
+    Enforcement lives here rather than in the socket accept loop: a collection
+    pass hashes the consumed log prefix and can end in a Caddy validate/reload,
+    and the control socket must stay answerable while that runs.
+    """
+
+    def __init__(
+        self,
+        manager: NaiveCredentialManager,
+        interval: float = QUOTA_INTERVAL_SECONDS,
+        max_backoff: float = QUOTA_MAX_BACKOFF_SECONDS,
+    ):
+        super().__init__(name="naive-quota-enforcer", daemon=True)
+        self.manager = manager
+        self.interval = interval
+        self.max_backoff = max_backoff
+        self._stopped = threading.Event()
+
+    def stop(self) -> None:
+        self._stopped.set()
+
+    def run(self) -> None:
+        delay = self.interval
+        while not self._stopped.wait(delay):
+            try:
+                disabled = self.manager.enforce_quotas()
+            except Exception:
+                delay = min(delay * 2, self.max_backoff)
+                LOGGER.warning(
+                    "quota enforcement failed; next attempt in %.0fs", delay, exc_info=True
+                )
+                continue
+            if disabled:
+                LOGGER.info("disabled after quota exhaustion: %s", ", ".join(sorted(disabled)))
+            delay = self.interval
 
 
 class ManagerHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -39,6 +86,11 @@ class ManagerHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServ
     def server_close(self):
         super().server_close()
         self.socket_path.unlink(missing_ok=True)
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], CONNECTION_LOST):
+            return
+        LOGGER.warning("manager request failed", exc_info=True)
 
 
 class ManagerHandler(BaseHTTPRequestHandler):
@@ -79,11 +131,18 @@ class ManagerHandler(BaseHTTPRequestHandler):
             raise ValueError("object expected")
         return value
 
-    def _dispatch(self):
-        if not self._authorized():
-            return
-        path = urlsplit(self.path).path
+    def _send_error(self, status: int, payload: dict) -> None:
+        """Report a failure, tolerating a client that already hung up."""
         try:
+            self._send(status, payload)
+        except CONNECTION_LOST:
+            self.close_connection = True
+
+    def _dispatch(self):
+        try:
+            if not self._authorized():
+                return
+            path = urlsplit(self.path).path
             if self.command == "GET" and path == "/v1/health":
                 health = self.server.manager.health()
                 return self._send(200 if health.get("ready") is True else 503, health)
@@ -92,7 +151,13 @@ class ManagerHandler(BaseHTTPRequestHandler):
             if self.command == "GET" and path == "/v1/traffic":
                 return self._send(200, self.server.manager.traffic_report())
             if self.command == "POST" and path == "/v1/users":
-                return self._send(201, self.server.manager.create(self._body().get("username", "")))
+                body = self._body()
+                return self._send(
+                    201,
+                    self.server.manager.create(
+                        body.get("username", ""), body.get("quota_bytes")
+                    ),
+                )
             prefix = "/v1/users/"
             if path.startswith(prefix):
                 tail = path[len(prefix):].split("/")
@@ -102,7 +167,7 @@ class ManagerHandler(BaseHTTPRequestHandler):
                     return self._send(204)
                 if self.command == "POST" and len(tail) == 2:
                     operation = tail[1]
-                    self._body()
+                    body = self._body()
                     if operation == "access":
                         return self._send(200, self.server.manager.reveal(username))
                     if operation == "rotate":
@@ -111,18 +176,29 @@ class ManagerHandler(BaseHTTPRequestHandler):
                         return self._send(200, self.server.manager.set_enabled(username, True))
                     if operation == "disable":
                         return self._send(200, self.server.manager.set_enabled(username, False))
+                    if operation == "quota":
+                        if "quota_bytes" not in body:
+                            raise ValueError("quota_bytes is required")
+                        return self._send(
+                            200, self.server.manager.set_quota(username, body["quota_bytes"])
+                        )
                 if self.command == "POST" and len(tail) == 3 and tail[1:] == ["traffic", "reset"]:
                     self._body()
                     return self._send(200, self.server.manager.reset_traffic(username))
             self._send(404, {"detail": "not found"})
+        except CONNECTION_LOST:
+            # The panel or the healthcheck hung up mid-response: there is no
+            # socket left to report on, and the operation already completed.
+            self.close_connection = True
         except ManagerNotFound:
-            self._send(404, {"detail": "not found"})
-        except ManagerConflict:
-            self._send(409, {"detail": "configuration conflict"})
+            self._send_error(404, {"detail": "not found"})
+        except ManagerConflict as exc:
+            self._send_error(409, {"detail": "configuration conflict", "code": exc.code})
         except (ValueError, json.JSONDecodeError):
-            self._send(422, {"detail": "invalid request"})
+            self._send_error(422, {"detail": "invalid request"})
         except Exception:
-            self._send(500, {"detail": "manager operation failed"})
+            LOGGER.warning("manager operation failed", exc_info=True)
+            self._send_error(500, {"detail": "manager operation failed"})
 
     do_GET = _dispatch
     do_POST = _dispatch
@@ -218,9 +294,15 @@ def main() -> None:
         None,
         int(os.getenv("NAIVE_SOCKET_MODE", "600"), 8),
     )
+    enforcer = QuotaEnforcer(
+        manager,
+        float(os.getenv("NAIVE_QUOTA_INTERVAL_SECONDS", QUOTA_INTERVAL_SECONDS)),
+    )
+    enforcer.start()
     try:
         server.serve_forever()
     finally:
+        enforcer.stop()
         server.server_close()
         traffic.close()
 

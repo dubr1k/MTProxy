@@ -22,6 +22,10 @@ async def test_naive_list_is_secret_free_and_viewer_is_read_only(client, login_u
             "download_bytes": 0, "total_bytes": 0,
             "upload_bytes_decimal": "0", "download_bytes_decimal": "0",
             "total_bytes_decimal": "0",
+            "disabled_reason": None, "quota_bytes": None,
+            "quota_bytes_decimal": None, "quota_used_bytes": 0,
+            "quota_used_bytes_decimal": "0", "quota_remaining_bytes": None,
+            "quota_remaining_bytes_decimal": None, "quota_exhausted": False,
             "period_start": naive.period_start, "updated_at": naive.period_start,
         }],
         "service": {"ready": True, "host": "naive.example.com"},
@@ -248,3 +252,111 @@ async def test_viewer_cannot_reset_naive_traffic(client, login_user, naive):
     )
     assert response.status_code == 403
     assert not any(call[0] == "reset_traffic" for call in naive.calls)
+
+
+async def test_naive_owner_can_set_and_remove_quota_without_changing_password(
+    client, login_user, naive,
+):
+    naive.seed("phone", "hidden", enabled=True)
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+
+    set_response = await client.post(
+        "/api/naive/users/phone/quota",
+        json={"quota_bytes": 2 * 1024 * 1024},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert set_response.status_code == 200
+    assert set_response.json() == {
+        "username": "phone", "quota_bytes": 2 * 1024 * 1024,
+        "enabled": True, "disabled_reason": None,
+    }
+    assert naive.users["phone"]["password"] == "hidden"
+    listed = (await client.get("/api/naive/users")).json()["items"][0]
+    assert listed["quota_bytes"] == 2 * 1024 * 1024
+    assert listed["quota_used_bytes"] == 0
+    assert listed["quota_remaining_bytes"] == 2 * 1024 * 1024
+
+    naive.set_traffic("phone", upload=1024 * 1024, download=1024 * 1024)
+    exhausted = (await client.get("/api/naive/users")).json()["items"][0]
+    assert exhausted["quota_exhausted"] is True
+    assert exhausted["enabled"] is False
+    assert exhausted["disabled_reason"] == "quota"
+
+    remove_response = await client.post(
+        "/api/naive/users/phone/quota",
+        json={"quota_bytes": None},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert remove_response.status_code == 200
+    # Removing the quota lifts the limit but never re-opens access on its own.
+    assert remove_response.json() == {
+        "username": "phone", "quota_bytes": None,
+        "enabled": False, "disabled_reason": "manual",
+    }
+    unlimited = (await client.get("/api/naive/users")).json()["items"][0]
+    assert unlimited["quota_bytes"] is None
+    assert unlimited["quota_exhausted"] is False
+    assert unlimited["enabled"] is False
+    assert unlimited["disabled_reason"] == "manual"
+    assert ("set_quota", "phone", 2 * 1024 * 1024) in naive.calls
+    assert ("set_quota", "phone", None) in naive.calls
+    audit = (await client.get("/api/audit")).json()["items"]
+    assert sum(row["action"] == "naive.quota" for row in audit) == 2
+
+
+async def test_enabling_an_exhausted_user_reports_the_quota_reason_not_an_outage(
+    client, login_user, naive,
+):
+    """A refused enable is an actionable state, not a manager failure."""
+    naive.seed("phone", "hidden", enabled=True, quota_bytes=1024)
+    naive.set_traffic("phone", upload=1024, download=0)
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+
+    listed = (await client.get("/api/naive/users")).json()["items"][0]
+    assert listed["enabled"] is False
+    assert listed["disabled_reason"] == "quota"
+
+    response = await client.post(
+        "/api/naive/users/phone/enable", headers={"X-CSRF-Token": csrf},
+    )
+    assert response.status_code == 409
+    assert response.json()["code"] == "quota_exhausted"
+    assert "unavailable" not in response.json()["detail"].lower()
+
+
+async def test_naive_create_accepts_quota_and_invalid_quota_never_reaches_manager(
+    client, login_user, naive,
+):
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+    created = await client.post(
+        "/api/naive/users",
+        json={"username": "limited", "quota_bytes": 1024},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert created.status_code == 201
+    assert naive.users["limited"]["quota_bytes"] == 1024
+
+    naive.calls.clear()
+    invalid = await client.post(
+        "/api/naive/users/limited/quota",
+        json={"quota_bytes": 0},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert invalid.status_code == 422
+    assert naive.calls == []
+
+
+async def test_viewer_cannot_change_naive_quota(client, login_user, naive):
+    naive.seed("phone", "hidden", enabled=True)
+    client._transport.app.state.store.create_admin("reader", "viewer correct horse battery", "viewer")
+    await login_user(client, "reader", "viewer correct horse battery")
+    response = await client.post(
+        "/api/naive/users/phone/quota",
+        json={"quota_bytes": 1024},
+        headers={"X-CSRF-Token": client.cookies["panel_csrf"]},
+    )
+    assert response.status_code == 403
+    assert not any(call[0] == "set_quota" for call in naive.calls)

@@ -78,10 +78,22 @@
   <dialog id="naive-modal" class="sheet">
     <form method="dialog" id="naive-form">
       <div class="modal-head"><div><span class="eyebrow">NAIVEPROXY</span><h2>Новый HTTPS-прокси</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
-      <p class="modal-copy">Создаст отдельную пару логин/пароль и безопасно применит её через проверку Caddy.</p>
+      <p class="modal-copy">Создаст отдельную пару логин/пароль и безопасно применит её через проверку Caddy. Пустая квота — безлимит.</p>
       <label>Имя доступа<input id="new-naive-user" pattern="[A-Za-z0-9_.\-]+" maxlength="64" autocomplete="off" placeholder="например, macbook-sergey" required><small>Латиница, цифры, точка, дефис и подчёркивание</small></label>
+      <label>Квота, MiB<input id="new-naive-quota" type="number" min="1" max="8589934591" step="1" inputmode="numeric" placeholder="без квоты"><small>Лимит payload-байтов; после достижения закрытым CONNECT доступ отключается.</small></label>
       <div class="form-error" id="naive-error" role="alert"></div>
       <footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-naive" type="button" disabled>Создать доступ</button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="naive-quota-modal" class="sheet">
+    <form method="dialog" id="naive-quota-form">
+      <div class="modal-head"><div><span class="eyebrow">NAIVEPROXY</span><h2 id="naive-quota-title">Квота доступа</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
+      <input id="naive-quota-user" type="hidden">
+      <p class="modal-copy">Учитываются payload-байты завершённых CONNECT в обоих направлениях. Пустое поле отключает квоту и возвращает безлимитный режим. При достижении лимита manager уберёт доступ из Caddy; активный туннель может завершиться с overshoot.</p>
+      <label>Квота, MiB<input id="naive-quota-mib" type="number" min="1" max="8589934591" step="1" inputmode="numeric" placeholder="без квоты"><small id="naive-quota-current"></small></label>
+      <div class="form-error" id="naive-quota-error" role="alert"></div>
+      <footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="save-naive-quota" type="button">Сохранить</button></footer>
     </form>
   </dialog>
 

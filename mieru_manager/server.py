@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import socketserver
+import sys
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from .service import ConfigConflict, MitaError, ValidationError
+
+LOGGER = logging.getLogger("mieru_manager")
+CONNECTION_LOST = (BrokenPipeError, ConnectionResetError)
 
 
 class ManagerHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
@@ -38,6 +43,11 @@ class ManagerHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServ
     def server_close(self):
         super().server_close()
         self.socket_path.unlink(missing_ok=True)
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], CONNECTION_LOST):
+            return
+        LOGGER.warning("manager request failed", exc_info=True)
 
 
 class ManagerHandler(BaseHTTPRequestHandler):
@@ -162,11 +172,21 @@ class ManagerHandler(BaseHTTPRequestHandler):
                             ),
                         )
             return self._send(404, {"detail": "not found"})
+        except CONNECTION_LOST:
+            # The client hung up mid-response; nothing left to answer on.
+            self.close_connection = True
         except ConfigConflict:
-            return self._send(409, {"detail": "configuration conflict"})
+            return self._send_error(409, {"detail": "configuration conflict"})
         except ValidationError:
-            return self._send(422, {"detail": "invalid request"})
+            return self._send_error(422, {"detail": "invalid request"})
         except MitaError:
-            return self._send(503, {"detail": "manager operation failed"})
+            return self._send_error(503, {"detail": "manager operation failed"})
+
+    def _send_error(self, status: int, payload: dict) -> None:
+        """Report a failure, tolerating a client that already hung up."""
+        try:
+            self._send(status, payload)
+        except CONNECTION_LOST:
+            self.close_connection = True
 
     do_GET = do_POST = do_DELETE = _dispatch

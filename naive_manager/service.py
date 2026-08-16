@@ -18,6 +18,7 @@ from urllib.parse import quote
 from .traffic import (
     ACCOUNTING_ROLL_KEEP,
     ACCOUNTING_ROLL_SIZE_BYTES,
+    MAX_COUNTER,
     REDACTION_SENTINEL,
     TrafficCollector,
 )
@@ -28,6 +29,7 @@ END = "# END NAIVE-MANAGER USERS"
 ACCOUNTING_BEGIN = "# BEGIN NAIVE-MANAGER ACCOUNTING"
 ACCOUNTING_END = "# END NAIVE-MANAGER ACCOUNTING"
 USERNAME = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
+DISABLED_REASONS = {None, "manual", "quota"}
 
 
 def synchronized(method):
@@ -52,7 +54,11 @@ def lifecycle_synchronized(method):
 
 
 class ManagerConflict(RuntimeError):
-    pass
+    """A refused operation. `code` names the reason for callers to act on."""
+
+    def __init__(self, message: str, code: str = "configuration_conflict"):
+        super().__init__(message)
+        self.code = code
 
 
 class ManagerNotFound(RuntimeError):
@@ -180,6 +186,8 @@ class NaiveCredentialManager:
                 "username": username,
                 "password": password,
                 "enabled": True,
+                "quota_bytes": None,
+                "disabled_reason": None,
                 "created_at": _now(),
                 "updated_at": _now(),
             }
@@ -219,6 +227,8 @@ class NaiveCredentialManager:
                 self._assert_consistent(state)
                 self.probe()
                 if traffic is not None:
+                    # Health reports; it never rewrites the managed config.
+                    # Quota enforcement runs on its own schedule.
                     traffic.collect()
                     if traffic.health().get("ready") is not True:
                         raise ManagerConflict("traffic accounting is unavailable")
@@ -229,16 +239,76 @@ class NaiveCredentialManager:
     @synchronized
     def list_users(self) -> list[dict]:
         state = self._read_state()
-        return [{"username": row["username"], "enabled": bool(row["enabled"])} for row in state["users"]]
+        return [
+            {
+                "username": row["username"],
+                "enabled": bool(row["enabled"]),
+                "quota_bytes": row["quota_bytes"],
+                "disabled_reason": row["disabled_reason"],
+            }
+            for row in state["users"]
+        ]
 
     def traffic_report(self) -> dict:
         if self.traffic is None:
             raise ManagerConflict("traffic accounting is unavailable")
         try:
-            self.traffic.collect()
-            return self.traffic.list_traffic()
+            with self.traffic.operation(), self._lock:
+                self.traffic.collect()
+                return self.traffic.list_traffic()
+        except (ManagerConflict, ManagerRecoveryError):
+            raise
         except RuntimeError as exc:
             raise ManagerConflict("traffic accounting is degraded") from exc
+
+    def enforce_quotas(self) -> list[str]:
+        """Collect completed CONNECT records and disable newly exhausted users."""
+        traffic = self.traffic
+        if traffic is None:
+            return []
+        with traffic.operation(), self._lock:
+            traffic.collect()
+            report = traffic.list_traffic()
+            return self._enforce_quotas_from_report_locked(report)
+
+    def _used_bytes_locked(self, username: str) -> int:
+        """Payload bytes recorded for a user, or 0 when accounting is unavailable."""
+        traffic = self.traffic
+        if traffic is None:
+            return 0
+        traffic.collect()
+        report = traffic.list_traffic()
+        return next(
+            (
+                row["total_bytes"]
+                for row in report.get("users", [])
+                if isinstance(row, dict)
+                and row.get("username") == username
+                and type(row.get("total_bytes")) is int
+            ),
+            0,
+        )
+
+    def _enforce_quotas_from_report_locked(self, report: dict) -> list[str]:
+        usage = {
+            row["username"]: row["total_bytes"]
+            for row in report.get("users", [])
+            if isinstance(row, dict)
+            and isinstance(row.get("username"), str)
+            and type(row.get("total_bytes")) is int
+        }
+        state = self._read_state()
+        exhausted = []
+        for row in state["users"]:
+            quota = row["quota_bytes"]
+            if row["enabled"] and quota is not None and usage.get(row["username"], 0) >= quota:
+                row["enabled"] = False
+                row["disabled_reason"] = "quota"
+                row["updated_at"] = _now()
+                exhausted.append(row["username"])
+        if exhausted:
+            self._apply(state)
+        return exhausted
 
     def reset_traffic(self, username: str) -> dict:
         traffic = self.traffic
@@ -272,8 +342,9 @@ class NaiveCredentialManager:
         }
 
     @lifecycle_synchronized
-    def create(self, username: str) -> dict:
+    def create(self, username: str, quota_bytes: int | None = None) -> dict:
         self._valid_username(username)
+        self._validate_quota(quota_bytes)
         state = self._read_state()
         if any(row["username"] == username for row in state["users"]):
             raise ManagerConflict("user already exists")
@@ -284,6 +355,8 @@ class NaiveCredentialManager:
             "username": username,
             "password": secrets.token_urlsafe(18),
             "enabled": True,
+            "quota_bytes": quota_bytes,
+            "disabled_reason": None,
             "created_at": timestamp,
             "updated_at": timestamp,
         })
@@ -303,10 +376,43 @@ class NaiveCredentialManager:
     def set_enabled(self, username: str, enabled: bool) -> dict:
         state = self._read_state()
         row = self._find(state, username)
+        if enabled and row["quota_bytes"] is not None:
+            if self._used_bytes_locked(username) >= row["quota_bytes"]:
+                raise ManagerConflict(
+                    "quota exhausted; reset traffic or remove quota first", "quota_exhausted"
+                )
         row["enabled"] = bool(enabled)
+        row["disabled_reason"] = None if enabled else "manual"
         row["updated_at"] = _now()
         self._apply(state)
-        return {"username": username, "enabled": bool(enabled)}
+        return {
+            "username": username,
+            "enabled": bool(enabled),
+            "disabled_reason": row["disabled_reason"],
+        }
+
+    @lifecycle_synchronized
+    def set_quota(self, username: str, quota_bytes: int | None) -> dict:
+        self._validate_quota(quota_bytes)
+        state = self._read_state()
+        row = self._find(state, username)
+        used = self._used_bytes_locked(username)
+        row["quota_bytes"] = quota_bytes
+        if row["enabled"] and quota_bytes is not None and used >= quota_bytes:
+            row["enabled"] = False
+            row["disabled_reason"] = "quota"
+        elif row["disabled_reason"] == "quota" and (quota_bytes is None or used < quota_bytes):
+            # The quota no longer holds this user back, but access stays off
+            # until the operator enables it: that remains a separate decision.
+            row["disabled_reason"] = "manual"
+        row["updated_at"] = _now()
+        self._apply(state)
+        return {
+            "username": username,
+            "quota_bytes": quota_bytes,
+            "enabled": row["enabled"],
+            "disabled_reason": row["disabled_reason"],
+        }
 
     @lifecycle_synchronized
     def delete(self, username: str) -> None:
@@ -377,6 +483,7 @@ class NaiveCredentialManager:
                 raise ManagerRecoveryError("rollback failed; manager requires recovery") from rollback_error
             self._clear_transaction()
             self._recovery_failed = False
+            self._prune_backups()
             raise operation_error
         self._clear_transaction()
         self._prune_backups()
@@ -429,6 +536,7 @@ class NaiveCredentialManager:
                 raise ManagerRecoveryError("rollback failed; manager requires recovery") from rollback_error
             self._clear_transaction()
             self._recovery_failed = False
+            self._prune_backups()
             raise operation_error
         self._clear_transaction()
         self._prune_backups()
@@ -467,6 +575,13 @@ class NaiveCredentialManager:
         for row in state["users"]:
             if not isinstance(row, dict):
                 raise ManagerConflict("invalid user state")
+            row.setdefault("quota_bytes", None)
+            row.setdefault("disabled_reason", None)
+            if set(row) - {
+                "username", "password", "enabled", "quota_bytes", "disabled_reason",
+                "created_at", "updated_at",
+            }:
+                raise ManagerConflict("invalid user state")
             try:
                 self._valid_username(row.get("username", ""))
             except ValueError as exc:
@@ -475,7 +590,25 @@ class NaiveCredentialManager:
                         "reserved accounting username in manager state"
                     ) from exc
                 raise ManagerConflict("invalid user state") from exc
-            if row["username"] in seen or not isinstance(row.get("password"), str) or not row["password"]:
+            if (
+                row["username"] in seen
+                or not isinstance(row.get("password"), str)
+                or not row["password"]
+                or type(row.get("enabled")) is not bool
+                or not (
+                    row["quota_bytes"] is None
+                    or (
+                        type(row["quota_bytes"]) is int
+                        and 1 <= row["quota_bytes"] <= MAX_COUNTER
+                    )
+                )
+                or row["disabled_reason"] not in DISABLED_REASONS
+                or (row["enabled"] and row["disabled_reason"] is not None)
+                or (
+                    row["disabled_reason"] == "quota"
+                    and row["quota_bytes"] is None
+                )
+            ):
                 raise ManagerConflict("invalid user state")
             seen.add(row["username"])
         retired = set()
@@ -679,6 +812,13 @@ class NaiveCredentialManager:
             raise ValueError("invalid username")
         if username == REDACTION_SENTINEL:
             raise ValueError("reserved username")
+
+    @staticmethod
+    def _validate_quota(quota_bytes: int | None) -> None:
+        if quota_bytes is not None and (
+            type(quota_bytes) is not int or not 1 <= quota_bytes <= MAX_COUNTER
+        ):
+            raise ValueError("invalid quota bytes")
 
     @staticmethod
     def _encode_state(state: dict) -> bytes:

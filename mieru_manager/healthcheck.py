@@ -21,8 +21,12 @@ def check(socket_path: Path | str, token_path: Path | str, *, timeout: float = 2
             client.settimeout(timeout)
             client.connect(str(socket_path))
             client.sendall(request)
-            response = client.recv(4096)
-        status_line = response.split(b"\r\n", 1)[0]
+            # Read to EOF: hanging up early leaves the manager writing into a
+            # closed socket, which it would report as a failed request.
+            chunks = []
+            while chunk := client.recv(4096):
+                chunks.append(chunk)
+        status_line = b"".join(chunks).split(b"\r\n", 1)[0]
         return status_line in {b"HTTP/1.0 200 OK", b"HTTP/1.1 200 OK"}
     except (OSError, UnicodeError):
         return False

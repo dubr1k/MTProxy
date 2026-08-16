@@ -125,6 +125,11 @@ class UserLimits(BaseModel):
 
 class NaiveUserCreate(BaseModel):
     username: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,64}$")
+    quota_bytes: int | None = Field(default=None, strict=True, ge=1, le=2**63 - 1)
+
+
+class NaiveQuotaUpdate(BaseModel):
+    quota_bytes: int | None = Field(default=None, strict=True, ge=1, le=2**63 - 1)
 
 
 class MieruQuota(BaseModel):
@@ -410,6 +415,13 @@ def create_app(
             "semantics": {key: semantics[key] for key in semantic_keys if type(semantics.get(key)) is bool},
         }
 
+    def safe_naive_quota(value):
+        if value is None:
+            return None
+        if type(value) is int and 1 <= value <= 2**63 - 1:
+            return value
+        raise NaiveError("Invalid NaiveProxy quota response")
+
     def quota_by_username(data):
         rows = data.get("users", []) if isinstance(data, dict) else []
         return {
@@ -548,6 +560,15 @@ def create_app(
 
     @app.exception_handler(NaiveError)
     async def naive_error(_request, exc):
+        code = getattr(exc, "code", None)
+        if code == "quota_exhausted":
+            return JSONResponse(
+                {
+                    "detail": "Quota exhausted: reset traffic or raise the quota first",
+                    "code": code,
+                },
+                exc.status_code,
+            )
         return JSONResponse(
             {"detail": "NaiveProxy manager unavailable"}, exc.status_code
         )
@@ -931,7 +952,12 @@ def create_app(
         by_username = {row["username"]: row for row in traffic["users"]}
         safe_items = [
             {
-                "username": item.get("username"), "enabled": item.get("enabled") is True,
+                "username": item.get("username"),
+                "enabled": item.get("enabled") is True,
+                "disabled_reason": item.get("disabled_reason")
+                if item.get("disabled_reason") in {"manual", "quota"}
+                else None,
+                "quota_bytes": safe_naive_quota(item.get("quota_bytes")),
                 **by_username.get(item.get("username"), {
                     "upload_bytes": 0, "download_bytes": 0, "total_bytes": 0,
                     "upload_bytes_decimal": "0", "download_bytes_decimal": "0",
@@ -940,6 +966,17 @@ def create_app(
             }
             for item in items if isinstance(item, dict) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(item.get("username", "")))
         ]
+        for item in safe_items:
+            quota = item["quota_bytes"]
+            used = item["total_bytes"]
+            item["quota_bytes_decimal"] = None if quota is None else str(quota)
+            item["quota_used_bytes"] = used
+            item["quota_used_bytes_decimal"] = str(used)
+            item["quota_remaining_bytes"] = None if quota is None else max(0, quota - used)
+            item["quota_remaining_bytes_decimal"] = (
+                None if quota is None else str(max(0, quota - used))
+            )
+            item["quota_exhausted"] = quota is not None and used >= quota
         return {
             "items": safe_items,
             "service": {"ready": health.get("ready") is True, "host": settings.naive_public_host},
@@ -954,8 +991,10 @@ def create_app(
         body: NaiveUserCreate, request: Request, user=Depends(roles("owner", "admin"))
     ):
         require_naive()
-        data = naive_reveal(await app.state.naive.create(body.username), body.username)
-        audit(user, "naive.create", body.username, request)
+        data = naive_reveal(
+            await app.state.naive.create(body.username, body.quota_bytes), body.username
+        )
+        audit(user, "naive.create", body.username, request, {"quota_bytes": body.quota_bytes})
         return {"username": body.username, "reveal_token": reveal(data, user)}
 
     @app.post("/api/naive/users/{username}/access")
@@ -966,6 +1005,31 @@ def create_app(
         data = naive_reveal(await app.state.naive.reveal(username), username)
         audit(user, "naive.access", username, request)
         return data
+
+    @app.post("/api/naive/users/{username}/quota")
+    async def naive_quota(
+        username: str,
+        body: NaiveQuotaUpdate,
+        request: Request,
+        user=Depends(roles("owner", "admin")),
+    ):
+        require_naive()
+        result = await app.state.naive.set_quota(username, body.quota_bytes)
+        if not isinstance(result, dict):
+            raise HTTPException(502, "Invalid NaiveProxy quota response")
+        quota = safe_naive_quota(result.get("quota_bytes"))
+        payload = {"username": username, "quota_bytes": quota}
+        if "enabled" in result:
+            # A manager that reports the resulting state lets the panel say
+            # whether this quota change also closed access.
+            payload["enabled"] = result.get("enabled") is True
+            payload["disabled_reason"] = (
+                result.get("disabled_reason")
+                if result.get("disabled_reason") in {"manual", "quota"}
+                else None
+            )
+        audit(user, "naive.quota", username, request, {"quota_bytes": quota})
+        return payload
 
     @app.post("/api/naive/users/{username}/{operation}")
     async def naive_operation(

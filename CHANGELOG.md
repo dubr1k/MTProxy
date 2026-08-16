@@ -6,11 +6,15 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 
 ### Added
 
+- NaiveProxy per-user traffic quotas: `quota_bytes` on create and a dedicated quota endpoint, with usage, remaining and exhaustion reported in the panel. A manager thread enforces quotas on an interval (`NAIVE_QUOTA_INTERVAL_SECONDS`, default 60 s) and transactionally removes an exhausted user's credentials from the managed Caddy block.
 - Standalone Proxy Control documentation, governance templates, screenshot policy, and third-party notices.
 - CI coverage for the complete Python suite, Ruff, all tracked shell scripts, all Compose variants, project image builds, documentation links, and provenance notices.
 
 ### Changed
 
+- Quota enforcement moved out of the manager's socket accept loop into its own thread with backoff, so a Caddy validate/reload can no longer stall the control socket. `GET /v1/health` and `GET /v1/traffic` are reads again and never rewrite the managed config.
+- Managers tolerate a client that hangs up mid-response instead of logging a traceback per probe, and their health probes read the full response before closing.
+- A refused enable now carries the reason code `quota_exhausted` through to the panel, which reports it as an actionable state instead of “manager unavailable”. Removing or raising a quota records `disabled_reason: manual` rather than leaving a stale quota block.
 - Neutral product descriptions cover Telemt/MTProto, NaiveProxy/Caddy, Mieru/mita, panel, and fleet while preserving protocol-specific and migration-sensitive MTProxy identifiers.
 - NaiveProxy now requires explicit `NAIVE_PUBLIC_HOST`; the personal fallback was removed.
 - Documentation accurately describes persistent Telemt configuration and its authenticated private API.

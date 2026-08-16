@@ -12,6 +12,22 @@ CLI = ROOT / "scripts" / "mtproxy-deploy"
 
 
 class DeployCliTests(unittest.TestCase):
+    def test_naive_quota_controls_are_present_in_static_panel_contract(self):
+        html = (ROOT / "panel/static/index.html").read_text()
+        javascript = (ROOT / "panel/static/app.js").read_text()
+        self.assertIn('id="naive-quota-modal"', html)
+        self.assertIn('id="naive-quota-mib"', html)
+        self.assertIn('data-naive-action="quota"', javascript)
+        self.assertIn("/api/naive/users/${encodeURIComponent(username)}/quota", javascript)
+        self.assertIn("quota_bytes: quota_bytes", javascript)
+        create = javascript.split("document.querySelector('#create-naive')", 1)[1].split(
+            "document.querySelector('#save-naive-quota')", 1
+        )[0]
+        self.assertIn("reportValidity()", create)
+        # Access data must be in hand before the create dialog closes, so a failed
+        # reveal still reports into a form the operator can still see.
+        self.assertLess(create.index("/api/reveal/"), create.index("#naive-modal').close()"))
+
     def test_naive_caddy_unit_and_compose_preserve_least_privilege_log_contract(self):
         unit = (ROOT / "deploy/caddy-naive.service").read_text()
         compose = (ROOT / "compose.naive.yaml").read_text()
