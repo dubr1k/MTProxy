@@ -14,10 +14,10 @@ Desktop.ini
 .gemini/
 .agent/
 
-# Local deployment secrets and logs
-secrets/users.conf
-secrets/telemt-api-token
-secrets/naive-manager-token
+# Local deployment secrets and logs. Ignore the whole directory: files added
+# here later (bootstrap passwords, manager tokens) must never need a new rule.
+secrets/*
+!secrets/.gitkeep
 .env
 *.log
 __pycache__/

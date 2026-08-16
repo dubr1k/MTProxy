@@ -51,7 +51,7 @@
     <form method="dialog" id="user-form">
       <div class="modal-head"><div><span class="eyebrow">НОВЫЙ ДОСТУП</span><h2>Добавить пользователя</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
       <p class="modal-copy">Панель безопасно сгенерирует отдельный ключ и сразу покажет ссылку и QR-код.</p>
-      <label>Имя подключения<input id="new-user" pattern="[A-Za-z0-9.\-]+" maxlength="32" autocomplete="off" placeholder="например, phone-sergey" required><small>Латиница, цифры, точка и дефис</small></label>
+      <label>Имя подключения<input id="new-user" pattern="[A-Za-z0-9_.\-]+" maxlength="32" autocomplete="off" placeholder="например, phone-sergey" required><small>Латиница, цифры, точка, дефис и подчёркивание</small></label>
       <div class="form-error" id="user-error" role="alert"></div>
       <footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-user" type="button" disabled>Создать доступ</button></footer>
     </form>
@@ -100,10 +100,10 @@
   <dialog id="mieru-modal" class="sheet">
     <form method="dialog" id="mieru-form">
       <div class="modal-head"><div><span class="eyebrow">MIERU V3.35</span><h2>Новый Mieru-доступ</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
-      <p class="modal-copy">Пароль и mierus:// ссылка показываются один раз. Квота — rolling application-byte admission quota (approximate), а не жёсткий биллинговый лимит.</p>
-      <label>Имя<input id="new-mieru-user" pattern="[A-Za-z0-9_.\-]+" maxlength="64" required></label>
-      <div class="limit-form-grid"><label>Окно, дней<input id="mieru-days" type="number" min="1" max="3650" value="30"></label><label>Квота, MiB<input id="mieru-mib" type="number" min="1" max="2147483647" value="1024"></label></div>
-      <div class="form-error" id="mieru-error"></div><footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-mieru" type="button" disabled>Создать</button></footer>
+      <p class="modal-copy">Пароль и mierus:// ссылка показываются один раз. Квота — rolling application-byte admission quota (approximate), а не жёсткий биллинговый лимит. Очистите оба поля квоты, чтобы выдать безлимитный доступ.</p>
+      <label>Имя<input id="new-mieru-user" pattern="[A-Za-z0-9_.\-]+" maxlength="64" required placeholder="например, my-mac"><small>Латиница, цифры, точка, дефис и подчёркивание</small></label>
+      <div class="limit-form-grid"><label>Окно, дней<input id="mieru-days" type="number" min="1" max="3650" step="1" inputmode="numeric" value="30" placeholder="без квоты"></label><label>Квота, MiB<input id="mieru-mib" type="number" min="1" max="2147483647" step="1" inputmode="numeric" value="1024" placeholder="без квоты"></label></div>
+      <div class="form-error" id="mieru-error" role="alert"></div><footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-mieru" type="button" disabled>Создать</button></footer>
     </form>
   </dialog>
 

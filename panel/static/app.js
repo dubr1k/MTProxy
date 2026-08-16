@@ -12,12 +12,27 @@ function qrSource(value){if(typeof value!=='string'||value.length>500000||!/^dat
 function naiveProxyUrl(value,username){try{const url=new URL(value);if(url.protocol!=='https:'||url.hostname!==state.naiveService.host||!url.password||decodeURIComponent(url.username)!==username||(!['','443'].includes(url.port))||!['','/'].includes(url.pathname)||url.search||url.hash)throw new Error();return value}catch{throw new Error('Сервис вернул некорректную NaiveProxy-конфигурацию')}}
 
 const API_REASONS={quota_exhausted:'Квота исчерпана: сбросьте трафик или увеличьте квоту'};
+// FastAPI reports validation failures as a list of objects; rendering that list
+// directly is how a form ends up showing "[object Object]".
+function problemText(body){
+  if(!body||typeof body!=='object')return '';
+  if(API_REASONS[body.code])return API_REASONS[body.code];
+  const detail=body.detail;
+  if(typeof detail==='string')return detail;
+  if(!Array.isArray(detail))return '';
+  const parts=detail.map(item=>{
+    if(!item||typeof item!=='object'||typeof item.msg!=='string')return '';
+    const field=Array.isArray(item.loc)?item.loc.filter(x=>typeof x==='string'&&x!=='body').join('.'):'';
+    return field?`${field}: ${item.msg}`:item.msg;
+  }).filter(Boolean);
+  return parts.slice(0,3).join('; ');
+}
 async function api(url,options={}){
   options.headers={...options.headers,'X-CSRF-Token':cookie('panel_csrf')||''};
   if(options.body&&!options.headers['content-type']) options.headers['content-type']='application/json';
   const response=await fetch(url,options);
   if(response.status===401){location='/login';throw new Error('Сессия завершена')}
-  if(!response.ok){let detail='Не удалось выполнить действие';try{const body=await response.json();detail=API_REASONS[body.code]||body.detail||detail}catch{}throw new Error(detail)}
+  if(!response.ok){let detail='Не удалось выполнить действие';try{detail=problemText(await response.json())||detail}catch{}throw new Error(detail)}
   return response.status===204?null:response.json();
 }
 
@@ -40,7 +55,7 @@ if(loginForm) loginForm.addEventListener('submit',async event=>{
 const view=document.querySelector('#view');
 const titles={dashboard:['Обзор','Состояние всех прокси-протоколов в одном месте'],mieru:['Mieru','Пользователи, rolling-квоты и application-byte трафик'],users:['MTProxy','Пользователи, ссылки и ключи доступа'],naive:['NaiveProxy','HTTPS-прокси, конфигурации и доступы'],versions:['Версии','Проверенные обновления runtime-компонентов'],fleet:['Узлы','Реестр флота и подготовленные команды'],admins:['Администраторы','Роли и доступ к панели'],audit:['Журнал действий','Изменения, входы и операции с ключами']};
 const roleNames={owner:'Владелец',admin:'Администратор',viewer:'Наблюдатель'};
-const actionNames={'auth.login':'Вход в панель','auth.logout':'Выход','user.create':'Создан доступ','user.access':'Открыта ссылка','user.enable':'Доступ включён','user.disable':'Доступ заблокирован','user.rotate':'Ключ обновлён','user.delete':'Доступ удалён','naive.create':'Создан Naive-доступ','naive.access':'Открыта Naive-конфигурация','naive.enable':'Naive-доступ включён','naive.disable':'Naive-доступ отключён','naive.rotate':'Naive-пароль обновлён','naive.delete':'Naive-доступ удалён','naive.quota':'Изменена Naive-квота','naive.traffic.reset':'Сброшен Naive-счётчик','fleet.node.create':'Добавлен узел','admin.create':'Создан администратор','admin.update':'Изменён администратор','admin.delete':'Удалён администратор'};
+const actionNames={'auth.login':'Вход в панель','auth.logout':'Выход','user.create':'Создан доступ','user.access':'Открыта ссылка','user.enable':'Доступ включён','user.disable':'Доступ заблокирован','user.rotate':'Ключ обновлён','user.delete':'Доступ удалён','naive.create':'Создан Naive-доступ','naive.access':'Открыта Naive-конфигурация','naive.enable':'Naive-доступ включён','naive.disable':'Naive-доступ отключён','naive.rotate':'Naive-пароль обновлён','naive.delete':'Naive-доступ удалён','naive.quota':'Изменена Naive-квота','naive.traffic.reset':'Сброшен Naive-счётчик','user.limits':'Изменены лимиты','user.reset_quota':'Сброшен счётчик квоты','runtime.version.update':'Обновлена версия компонента','mieru.create':'Создан Mieru-доступ','mieru.access':'Открыта Mieru-ссылка','mieru.quotas':'Изменены Mieru-квоты','mieru.metrics.baseline':'Обновлён baseline метрик Mieru','mieru.enable':'Mieru-доступ включён','mieru.disable':'Mieru-доступ отключён','mieru.rotate':'Mieru-ссылка обновлена','mieru.delete':'Mieru-доступ удалён','fleet.node.create':'Добавлен узел','admin.create':'Создан администратор','admin.update':'Изменён администратор','admin.delete':'Удалён администратор'};
 
 function toast(message,type='ok'){
   const node=document.createElement('div');node.className='toast '+(type==='error'?'error':'');node.textContent=message;
@@ -148,6 +163,9 @@ function optionalNumber(id,multiplier=1){const value=document.querySelector(id).
 function naiveQuotaBytes(id){const value=document.querySelector(id).value.trim();if(value==='')return null;const mib=Number(value);if(!Number.isSafeInteger(mib)||mib<1)throw new Error('Квота должна быть целым числом MiB, не меньше 1');return mib*1048576}
 function syncNaiveCreateButton(){const form=document.querySelector('#naive-form'),input=document.querySelector('#new-naive-user'),button=document.querySelector('#create-naive');button.disabled=!input.value||!form.checkValidity()}
 function syncMieruCreateButton(){const form=document.querySelector('#mieru-form'),button=document.querySelector('#create-mieru');button.disabled=!form.checkValidity()}
+// Both quota fields empty means no quota at all, which the manager stores as an
+// empty list; sending a zeroed quota instead is what the API rejects.
+function mieruQuotas(){const days=document.querySelector('#mieru-days').value.trim(),mib=document.querySelector('#mieru-mib').value.trim();if(!days&&!mib)return [];if(!days||!mib)throw new Error('Заполните и окно в днях, и квоту в MiB — либо очистите оба поля для безлимита');return [{days:Number(days),megabytes:Number(mib)}]}
 function openMieruModal(){const form=document.querySelector('#mieru-form');form.reset();document.querySelector('#mieru-error').textContent='';syncMieruCreateButton();document.querySelector('#mieru-modal').showModal()}
 function openNaiveModal(){document.querySelector('#naive-form').reset();document.querySelector('#naive-error').textContent='';syncNaiveCreateButton();document.querySelector('#naive-modal').showModal();setTimeout(()=>document.querySelector('#new-naive-user').focus(),50)}
 function openNaiveQuotaModal(user){const form=document.querySelector('#naive-quota-form'),input=document.querySelector('#naive-quota-mib');form.reset();document.querySelector('#naive-quota-user').value=user.username;document.querySelector('#naive-quota-title').textContent=`Квота · ${user.username}`;document.querySelector('#naive-quota-error').textContent='';if(user.quota_bytes_decimal!=null){try{input.value=String((BigInt(user.quota_bytes_decimal)+1048575n)/1048576n)}catch{input.value=''}}
@@ -203,7 +221,7 @@ document.querySelector('#refresh').addEventListener('click',event=>{setBusy(even
 document.querySelector('#logout').addEventListener('click',async()=>{try{await api('/api/auth/logout',{method:'POST'});location='/login'}catch(error){toast(error.message,'error')}});
 document.querySelector('#profile-button').addEventListener('click',()=>toast(`${state.me.username} · ${roleNames[state.me.role]}`));
 document.querySelector('#new-user').addEventListener('input',syncCreateButton);
-document.querySelector('#create-mieru').addEventListener('click',async event=>{const form=document.querySelector('#mieru-form'),username=document.querySelector('#new-mieru-user').value,days=Number(document.querySelector('#mieru-days').value),megabytes=Number(document.querySelector('#mieru-mib').value),error=document.querySelector('#mieru-error');error.textContent='';if(!form.reportValidity())return;try{setBusy(event.currentTarget,true);const data=await api('/api/mieru/users',{method:'POST',body:JSON.stringify({username,quotas:[{days,megabytes}],expected_revision:state.mieruService.revision})});const access=await api('/api/reveal/'+encodeURIComponent(data.reveal_token));document.querySelector('#mieru-modal').close();showMieruAccess(access,username);await renderMieru()}catch(e){error.textContent=e.message}finally{setBusy(event.currentTarget,false);syncMieruCreateButton()}});
+document.querySelector('#create-mieru').addEventListener('click',async event=>{const form=document.querySelector('#mieru-form'),username=document.querySelector('#new-mieru-user').value,error=document.querySelector('#mieru-error');error.textContent='';if(!form.reportValidity())return;try{setBusy(event.currentTarget,true);const quotas=mieruQuotas();const data=await api('/api/mieru/users',{method:'POST',body:JSON.stringify({username,quotas,expected_revision:state.mieruService.revision})});const access=await api('/api/reveal/'+encodeURIComponent(data.reveal_token));document.querySelector('#mieru-modal').close();showMieruAccess(access,username);await renderMieru()}catch(e){error.textContent=e.message}finally{setBusy(event.currentTarget,false);syncMieruCreateButton()}});
 document.querySelector('#create-fleet-node').addEventListener('click',event=>createFleetNode(event.currentTarget));
 document.querySelector('#naive-form').addEventListener('input',syncNaiveCreateButton);
 document.querySelector('#mieru-form').addEventListener('input',syncMieruCreateButton);

@@ -269,6 +269,9 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert ".row-actions{display:flex;justify-content:flex-end;gap:5px;flex-wrap:wrap}" in css.text
     js = (await client.get("/static/app.js")).text
     assert "function proxyLink" in js and "navigationGeneration" in js
+    # Every name field (MTProxy, Naive, Mieru, admin) takes the same characters,
+    # underscore included.
+    assert text.count(r'pattern="[A-Za-z0-9_.\-]+"') == 4
     assert 'value="cancel" formnovalidate' in text
     assert 'id="create-user" type="button" disabled' in text
     assert 'data-view="naive"' in text and 'id="naive-modal"' in text

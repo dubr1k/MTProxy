@@ -84,7 +84,9 @@ services:
       - "127.0.0.1:8787:8787/tcp"
     volumes:
       - panel-data:/data
-      - /run/proxy-control:/run/proxy-control
+      # Read-only: connecting to the agent socket needs no write access, and a
+      # writable mount would let the panel unlink it.
+      - /run/proxy-control:/run/proxy-control:ro
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=0700

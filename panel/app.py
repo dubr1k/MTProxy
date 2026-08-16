@@ -96,7 +96,7 @@ class UserCreate(BaseModel):
     @field_validator("username")
     @classmethod
     def valid(cls, value):
-        if not re.fullmatch(r"[A-Za-z0-9.-]+", value):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
             raise ValueError("invalid username")
         return value
 

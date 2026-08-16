@@ -28,6 +28,23 @@ class DeployCliTests(unittest.TestCase):
         # reveal still reports into a form the operator can still see.
         self.assertLess(create.index("/api/reveal/"), create.index("#naive-modal').close()"))
 
+    def test_mieru_create_sends_no_quota_instead_of_a_zeroed_one(self):
+        javascript = (ROOT / "panel/static/app.js").read_text()
+        html = (ROOT / "panel/static/index.html").read_text()
+        # Empty fields mean unlimited: the manager stores an empty quota list,
+        # while a zeroed quota is rejected as invalid.
+        self.assertIn("function mieruQuotas()", javascript)
+        self.assertIn("if(!days&&!mib)return []", javascript)
+        self.assertIn("quotas,", javascript)
+        self.assertNotIn("quotas:[{days,megabytes}]", javascript)
+        self.assertIn("безлимитный доступ", html)
+
+    def test_panel_renders_validation_errors_instead_of_object_placeholders(self):
+        javascript = (ROOT / "panel/static/app.js").read_text()
+        self.assertIn("function problemText(body)", javascript)
+        self.assertIn("Array.isArray(detail)", javascript)
+        self.assertIn("problemText(await response.json())", javascript)
+
     def test_versions_card_explains_an_empty_catalog_instead_of_an_empty_picker(self):
         javascript = (ROOT / "panel/static/app.js").read_text()
         # The installed version is never an option, so an up-to-date host would
