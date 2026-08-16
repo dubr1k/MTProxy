@@ -566,6 +566,10 @@ Naive acceptance:
 6. no authorization in logs;
 7. every adjacent SNI route.
 
+Client connections. One access works as both HTTPS (HTTP/1.1) and HTTP/2: the panel hands out `https://<user>:<pass>@<NAIVE_PUBLIC_HOST>`, and the protocol is chosen by ALPN negotiation during the TLS handshake. Client profiles that list "HTTPS" and "HTTP2" as separate options use the same URL and the same credentials, so there is no need to create an access per variant.
+
+HTTP/3 (`quic://`) is off in this deployment: the Caddy server block declares `protocols h1 h2`, and QUIC needs a public UDP port. The nginx `stream` SNI router only handles TCP and cannot parse a QUIC Initial, so HTTP/3 cannot be published through the same port 443 scheme. Enabling it requires `protocols h1 h2 h3`, a free public UDP port (443/UDP on the host may belong to another service), a Caddy listener on that port that bypasses nginx, and a `quic://<user>:<pass>@<host>:<port>` URL for the client.
+
 Naive accounting is payload bytes from completed tunnels without TLS/IP overhead. A per-user quota removes credentials after the observed limit is reached, but it is not a byte-level hard cap or billing counter: an active tunnel may cause overshoot. If the manager fails, do not delete `transaction.json`, paired backups, `-wal`, or `-shm` files.
 
 ### Mieru / mita
@@ -900,8 +904,10 @@ The UI operation is owner-only and requires the current version (`expected_curre
 - rereads the root-owned catalog and rejects versions outside the allowlist;
 - pulls the immutable Telemt image, writes `version-overrides/compose.versions.yaml`, starts only `mtproxy`, and waits for `healthy`;
 - downloads a size-limited Caddy/mita artifact, verifies SHA-256, runs checker/config validation, and atomically replaces the binary;
-- reloads or restarts only the corresponding service and verifies `is-active`;
-- keeps the previous binary/override and restores it on failure;
+- restarts only the corresponding service and verifies `is-active`: a reload would re-read the config but keep the old process on the old binary;
+- records the installed build in a root-owned pin (`/etc/proxy-control/caddy-naive.pin`) that the unit's `ExecStartPre` check reads, so the startup check cannot refuse the build just installed;
+- refuses to update a binary a container pins by digest (by default `mita` while `proxy-control-mieru-manager` exists), because the container would keep the old inode and a stale hash until it is recreated with an updated pin;
+- keeps the previous binary, pin and override and restores them on failure;
 - writes state only after health verification succeeds.
 
 If the UI reports `version agent unavailable`, do not update manually from the browser. Check the unit, socket permissions, catalog, complete Compose set, and agent logs. Never run `docker compose down -v`, delete volumes, or change 443 for a version operation. The complete protocol and rollback procedure are also documented in [UPGRADING.md](docs/UPGRADING.md).
