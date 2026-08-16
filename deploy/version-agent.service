@@ -10,6 +10,7 @@ User=root
 Group=root
 EnvironmentFile=-/etc/proxy-control/version-agent.env
 WorkingDirectory=/opt/proxy-control
+ExecStartPre=/usr/bin/chown root:10001 /run/proxy-control
 ExecStart=/usr/bin/python3 -m version_agent.server
 Restart=on-failure
 RestartSec=3s

@@ -55,7 +55,12 @@ class DeployCliTests(unittest.TestCase):
 
     def test_version_agent_runtime_directory_is_bootstrap_provisioned(self):
         tmpfiles = (ROOT / "deploy/proxy-control-version-agent.tmpfiles.conf").read_text()
-        self.assertIn("d /run/proxy-control 0770 root root -", tmpfiles)
+        self.assertIn("d /run/proxy-control 0770 root 10001 -", tmpfiles)
+        unit = (ROOT / "deploy/version-agent.service").read_text()
+        self.assertIn(
+            "ExecStartPre=/usr/bin/chown root:10001 /run/proxy-control",
+            unit,
+        )
 
     @unittest.skipUnless(os.geteuid() == 0, "numeric permission behavior requires root")
     def test_naive_log_permissions_allow_caddy_write_and_manager_read_only(self):
