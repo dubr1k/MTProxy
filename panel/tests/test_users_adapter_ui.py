@@ -284,7 +284,7 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'data-naive-action="reset-traffic"' in js
     assert "Сбросить локальный счётчик?" in js
     assert "NaiveProxy недоступен" in js
-    assert 'data-quick="naive-users"' in js
+    assert 'data-view="naive"' in text
     assert "admin-form');if(!form.reportValidity()" in js
     assert 'id="limits-modal"' in text and 'id="save-limits"' in text
     assert "mt.runtime?.traffic_octets" in js

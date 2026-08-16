@@ -28,6 +28,14 @@ class DeployCliTests(unittest.TestCase):
         # reveal still reports into a form the operator can still see.
         self.assertLess(create.index("/api/reveal/"), create.index("#naive-modal').close()"))
 
+    def test_versions_card_explains_an_empty_catalog_instead_of_an_empty_picker(self):
+        javascript = (ROOT / "panel/static/app.js").read_text()
+        # The installed version is never an option, so an up-to-date host would
+        # otherwise render a picker with nothing in it.
+        self.assertIn("entry.version!==current", javascript)
+        self.assertIn("Обновлений не обнаружено", javascript)
+        self.assertIn("в каталоге нет версий для этого компонента", javascript)
+
     def test_naive_caddy_unit_and_compose_preserve_least_privilege_log_contract(self):
         unit = (ROOT / "deploy/caddy-naive.service").read_text()
         compose = (ROOT / "compose.naive.yaml").read_text()

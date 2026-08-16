@@ -11,11 +11,10 @@ Group=root
 EnvironmentFile=-/etc/proxy-control/version-agent.env
 WorkingDirectory=/opt/proxy-control
 ExecStartPre=/usr/bin/chown root:10001 /run/proxy-control
+ExecStartPre=/usr/bin/install -d -o root -g root -m 0750 /opt/mtproxy-shared443/version-overrides
 ExecStart=/usr/bin/python3 -m version_agent.server
 Restart=on-failure
 RestartSec=3s
-RuntimeDirectory=proxy-control
-RuntimeDirectoryMode=0770
 StateDirectory=proxy-control/version-agent
 StateDirectoryMode=0700
 NoNewPrivileges=false
@@ -29,7 +28,9 @@ RestrictNamespaces=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-ReadWritePaths=/run/proxy-control /var/lib/proxy-control /opt/mtproxy-shared443/version-overrides /var/syncthing/Development/proxy-control/version-overrides /usr/local/bin/caddy /usr/bin/mita
+# Staging and atomic replacement happen in the target's directory, so the
+# directories must be writable; naming the binaries alone leaves them read-only.
+ReadWritePaths=/run/proxy-control /var/lib/proxy-control /etc/proxy-control /opt/mtproxy-shared443/version-overrides /usr/local/bin /usr/bin
 
 [Install]
 WantedBy=multi-user.target

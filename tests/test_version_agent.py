@@ -13,9 +13,18 @@ from version_agent.service import ConflictError, UpdateError, VersionAgent
 TELEMT_IMAGE = "ghcr.io/example/telemt@sha256:" + "a" * 64
 BINARY = b"verified-runtime-binary\n"
 BINARY_SHA256 = hashlib.sha256(BINARY).hexdigest()
+PINNED_CADDY = "v2.11.4 h1:XKxkMTgNSizEvKG6QHue6cAsFOteU2qA61w2tKkCWi0="
 
 
-def write_catalog(path: Path) -> None:
+def write_catalog(path: Path, *, naive_runtime_version: str | None = None) -> None:
+    naive = {
+        "version": "2.11.4-custom.1",
+        "kind": "binary",
+        "url": "https://artifacts.example.com/caddy-2.11.4-custom.1",
+        "sha256": BINARY_SHA256,
+    }
+    if naive_runtime_version:
+        naive["runtime_version"] = naive_runtime_version
     path.write_text(
         json.dumps(
             {
@@ -24,14 +33,7 @@ def write_catalog(path: Path) -> None:
                     "telemt": [
                         {"version": "3.4.25", "kind": "image", "image": TELEMT_IMAGE}
                     ],
-                    "naive": [
-                        {
-                            "version": "2.11.4-custom.1",
-                            "kind": "binary",
-                            "url": "https://artifacts.example.com/caddy-2.11.4-custom.1",
-                            "sha256": BINARY_SHA256,
-                        }
-                    ],
+                    "naive": [naive],
                     "mita": [
                         {
                             "version": "3.35.0",
@@ -125,8 +127,92 @@ def test_binary_update_uses_catalog_hash_and_persists_revision(tmp_path: Path):
     assert target.read_bytes() == BINARY
     assert target.stat().st_mode & 0o111
     assert json.loads(state.read_text())["components"]["naive"]["version"] == "2.11.4-custom.1"
-    assert any(command == ["systemctl", "reload", "caddy-naive"] for command, _ in commands)
+    # A reload keeps the running process on the old binary, so replacing it restarts.
+    assert any(command == ["systemctl", "restart", "caddy-naive"] for command, _ in commands)
+    assert not any(command[:2] == ["systemctl", "reload"] for command, _ in commands)
     assert any(env and str(env.get("CADDY_BIN", "")).endswith(".proxy-control-new") for _, env in commands)
+
+
+def test_binary_update_records_the_pin_the_unit_check_reads(tmp_path: Path):
+    """ExecStartPre runs without the agent's environment: the pin must persist."""
+    catalog = tmp_path / "catalog.json"
+    write_catalog(catalog, naive_runtime_version=PINNED_CADDY)
+    target = tmp_path / "caddy"
+    target.write_bytes(b"old")
+    target.chmod(0o755)
+    pin = tmp_path / "caddy-naive.pin"
+    pin.write_text("v2.11.3 h1:stale=\n")
+
+    agent = VersionAgent(
+        catalog_path=catalog,
+        state_path=tmp_path / "state.json",
+        binary_paths={"naive": target},
+        service_names={"naive": "caddy-naive"},
+        version_pins={"naive": pin},
+        downloader=lambda url: BINARY,
+        runner=lambda command, *, env=None, cwd=None, timeout=None: "active\n",
+    )
+
+    agent.update("naive", "2.11.4-custom.1", expected_current=None)
+
+    assert pin.read_text().strip() == PINNED_CADDY
+
+
+def test_binary_update_restores_the_previous_pin_when_the_service_fails(tmp_path: Path):
+    catalog = tmp_path / "catalog.json"
+    write_catalog(catalog, naive_runtime_version=PINNED_CADDY)
+    target = tmp_path / "caddy"
+    target.write_bytes(b"old")
+    target.chmod(0o755)
+    pin = tmp_path / "caddy-naive.pin"
+    pin.write_text("v2.11.3 h1:previous=\n")
+
+    def run(command, *, env=None, cwd=None, timeout=None):
+        if command[:2] == ["systemctl", "restart"] and target.read_bytes() == BINARY:
+            raise RuntimeError("restart failed")
+        return "active\n"
+
+    agent = VersionAgent(
+        catalog_path=catalog,
+        state_path=tmp_path / "state.json",
+        binary_paths={"naive": target},
+        service_names={"naive": "caddy-naive"},
+        version_pins={"naive": pin},
+        downloader=lambda url: BINARY,
+        runner=run,
+    )
+
+    with pytest.raises(UpdateError, match="rolled back"):
+        agent.update("naive", "2.11.4-custom.1", expected_current=None)
+
+    assert target.read_bytes() == b"old"
+    assert pin.read_text().strip() == "v2.11.3 h1:previous="
+
+
+def test_update_is_refused_while_a_container_pins_the_binary(tmp_path: Path):
+    """A digest-pinned consumer would keep the old inode and a stale hash."""
+    catalog = tmp_path / "catalog.json"
+    write_catalog(catalog)
+    target = tmp_path / "mita"
+    target.write_bytes(b"old")
+    target.chmod(0o755)
+    downloads: list[str] = []
+
+    agent = VersionAgent(
+        catalog_path=catalog,
+        state_path=tmp_path / "state.json",
+        binary_paths={"mita": target},
+        service_names={"mita": "mita"},
+        pinned_consumers={"mita": "proxy-control-mieru-manager"},
+        downloader=lambda url: downloads.append(url) or BINARY,
+        runner=lambda command, *, env=None, cwd=None, timeout=None: "container-id\n",
+    )
+
+    with pytest.raises(UpdateError, match="proxy-control-mieru-manager"):
+        agent.update("mita", "3.35.0", expected_current=None)
+
+    assert target.read_bytes() == b"old"
+    assert downloads == []
 
 
 def test_binary_update_rolls_back_when_service_reload_fails(tmp_path: Path):

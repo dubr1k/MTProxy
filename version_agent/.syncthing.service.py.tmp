@@ -207,10 +207,6 @@ class VersionAgent:
             raise UpdateError(f"{component} runtime is not configured")
         if target.is_symlink():
             raise UpdateError(f"refusing to replace symlink {target}")
-        if component in self.version_pins and not entry.runtime_version:
-            raise UpdateError(
-                f"{component} catalog entry must set runtime_version to keep the startup check in sync"
-            )
         self._assert_no_pinned_consumer(component)
         payload = self.downloader(entry.url)
         if sha256_bytes(payload) != entry.sha256:
@@ -255,7 +251,7 @@ class VersionAgent:
                 else:
                     target.unlink(missing_ok=True)
                 self._fsync_directory(target.parent)
-                self._restore_pin(component, previous_pin)
+                self._write_pin(component, previous_pin)
                 self.runner(["systemctl", "restart", service], timeout=120)
             except Exception as rollback_exc:
                 raise UpdateError(f"{component} update failed; rollback also failed") from rollback_exc
@@ -270,18 +266,12 @@ class VersionAgent:
         stale pin would refuse the new build on the next restart or reboot.
         """
         pin = self.version_pins.get(component)
-        if pin is None or not runtime_version:
-            return
-        _atomic_write(pin, (runtime_version + "\n").encode(), 0o644)
-
-    def _restore_pin(self, component: str, previous: str | None) -> None:
-        pin = self.version_pins.get(component)
         if pin is None:
             return
-        if previous is None:
-            pin.unlink(missing_ok=True)
+        if runtime_version:
+            _atomic_write(pin, (runtime_version + "\n").encode(), 0o644)
         else:
-            _atomic_write(pin, (previous + "\n").encode(), 0o644)
+            pin.unlink(missing_ok=True)
 
     def _assert_no_pinned_consumer(self, component: str) -> None:
         """Refuse an update that would leave a container pinned to the old build."""
