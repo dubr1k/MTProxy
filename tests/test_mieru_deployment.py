@@ -123,8 +123,8 @@ def test_mieru_overlay_supplies_pinned_host_binary_and_read_only_uds_access():
     ]
     panel = config["services"]["panel"]
     assert panel["depends_on"]["mieru-manager"]["condition"] == "service_healthy"
-    assert panel["group_add"] == ["10005"]
-    assert panel["environment"]["PANEL_SUPPLEMENTARY_GROUPS"] == "10005"
+    assert panel["group_add"] == ["10001", "10005"]
+    assert panel["environment"]["PANEL_SUPPLEMENTARY_GROUPS"] == "10001,10005"
     assert panel["environment"]["MIERU_MANAGER_TOKEN_SOURCE"] == "/run/secrets/mieru-manager-token"
     assert "MIERU_MANAGER_TOKEN_FILE" not in panel["environment"]
     assert config["secrets"]["mieru-manager-token"]["file"] == "/etc/mieru-manager/token"

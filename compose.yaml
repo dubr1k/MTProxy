@@ -67,6 +67,8 @@ services:
     depends_on:
       mtproxy:
         condition: service_healthy
+    group_add:
+      - "10001"
     environment:
       PANEL_DATABASE: /data/panel.sqlite3
       PANEL_ALLOWED_HOSTS: ${PANEL_ALLOWED_HOSTS:-localhost,127.0.0.1}
@@ -75,6 +77,7 @@ services:
       TELEMT_API_URL: http://mtproxy:9091
       TELEMT_API_TOKEN_SOURCE: /run/secrets/telemt-api-token
       VERSION_AGENT_SOCKET: /run/proxy-control/version-agent.sock
+      PANEL_SUPPLEMENTARY_GROUPS: "10001"
     secrets:
       - telemt-api-token
     ports:

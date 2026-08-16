@@ -114,6 +114,16 @@ def test_panel_entrypoint_sets_only_allowlisted_mieru_group(tmp_path: Path):
     assert "--init-groups" not in launch
     assert "--keep-groups" not in launch
 
+def test_panel_entrypoint_sets_agent_and_mieru_groups(tmp_path: Path):
+    result = run_entrypoint(tmp_path, "10001,10005")
+
+    assert result.returncode == 0, result.stderr
+    launch = logged_commands(result)[-1]
+    assert launch[launch.index("--groups") + 1] == "10001,10005"
+    assert "--clear-groups" not in launch
+    assert "--init-groups" not in launch
+    assert "--keep-groups" not in launch
+
 
 def test_panel_entrypoint_ignores_runtime_override_and_uses_fixed_privileged_destinations(
     tmp_path: Path,

@@ -145,6 +145,27 @@ class DeployCliTests(unittest.TestCase):
                 "<h1>Private cover</h1>\n",
             )
 
+    def test_panel_has_version_agent_socket_group(self):
+        env = {
+            **os.environ,
+            "MTPROXY_DOMAIN": "proxy.lab.test",
+            "MTPROXY_COVER_ROOT": "/tmp",
+        }
+        rendered = subprocess.run(
+            ["docker", "compose", "config", "--format", "json"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        panel = json.loads(rendered.stdout)["services"]["panel"]
+        self.assertIn("10001", {str(value) for value in panel.get("group_add", [])})
+        self.assertEqual(
+            panel["environment"]["VERSION_AGENT_SOCKET"],
+            "/run/proxy-control/version-agent.sock",
+        )
+
     def test_panel_healthcheck_sends_configured_allowed_host(self):
         env = {
             **os.environ,

@@ -3,9 +3,9 @@ set -eu
 
 case ${PANEL_SUPPLEMENTARY_GROUPS-} in
   "") set -- --clear-groups ;;
-  10005) set -- --groups 10005 ;;
+  10001|10005|10001,10005) set -- --groups "$PANEL_SUPPLEMENTARY_GROUPS" ;;
   *)
-    echo "PANEL_SUPPLEMENTARY_GROUPS must be empty or exactly 10005" >&2
+    echo "PANEL_SUPPLEMENTARY_GROUPS must be empty, 10001, 10005, or 10001,10005" >&2
     exit 64
     ;;
 esac
