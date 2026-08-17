@@ -10,6 +10,12 @@ Desktop.ini
 *.swo
 *~
 
+# Syncthing writes partial copies beside the file it is transferring; they are
+# transient artefacts of the sync, never source.
+.syncthing.*
+.stversions/
+.stfolder
+
 # Agent
 .gemini/
 .agent/
