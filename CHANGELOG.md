@@ -19,6 +19,10 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - NaiveProxy now requires explicit `NAIVE_PUBLIC_HOST`; the personal fallback was removed.
 - Documentation accurately describes persistent Telemt configuration and its authenticated private API.
 
+### Fixed
+
+- Mieru transactions no longer re-hash the blanked password mita returns for an already stored user, so creating, rotating, deleting or quota-editing an access after the first one succeeds instead of failing the readback check and rolling back with `manager operation failed`.
+
 ### Security
 
 - Documented panel/RBAC, local managers, accounting, Mieru external-process, fleet mTLS, transactional host mutation, backup, and fail-closed boundaries.

@@ -855,7 +855,10 @@ class MieruManager:
     def _expected(config: dict) -> dict:
         result = copy.deepcopy(config)
         for user in result.get("users", []):
-            if "password" in user:
+            # A readback keeps the blanked password beside the stored hash, so only a
+            # freshly supplied password is hashed here; re-hashing the empty one would
+            # replace every earlier user's credential and fail the readback check.
+            if user.get("password"):
                 raw = user["password"]
                 user["password"] = ""
                 user["hashedPassword"] = hashlib.sha256(

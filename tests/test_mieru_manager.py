@@ -250,7 +250,9 @@ class FakeMita:
     def _persist(config):
         value = json.loads(json.dumps(config))
         for user in value.get("users", []):
-            if "password" in user:
+            # mita hashes a fresh password and then keeps the blanked field in place,
+            # so a readback carries an empty password beside the stored hash.
+            if user.get("password"):
                 raw = user["password"]
                 user["password"] = ""
                 user["hashedPassword"] = hashlib.sha256(
@@ -370,6 +372,24 @@ def test_create_uses_complete_snapshot_cas_and_reveals_password_once(tmp_path):
     assert "hashedPassword" not in json.dumps(service.list_users())
     with pytest.raises(ConfigConflict, match="revision"):
         service.create_user("carol", [], expected_revision=initial)
+
+
+def test_later_transactions_keep_the_stored_hash_of_an_earlier_created_user(tmp_path):
+    mita = FakeMita()
+    service = manager(tmp_path, mita)
+    revision = service.bootstrap()["revision"]
+
+    first = service.create_user(
+        "bob", [{"days": 30, "megabytes": 1024}], expected_revision=revision
+    )
+    stored = mita.observe()["users"][1]["hashedPassword"]
+
+    second = service.create_user("carol", [], expected_revision=first["revision"])
+
+    assert second["share_url"].startswith("mierus://carol:")
+    assert mita.observe()["users"][1]["hashedPassword"] == stored
+    assert [row["username"] for row in service.list_users()] == ["alice", "bob", "carol"]
+    assert "quotas" not in mita.observe()["users"][2]
 
 
 def test_create_with_private_or_loopback_policy_forces_controlled_restart(tmp_path):
