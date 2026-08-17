@@ -79,8 +79,14 @@ async function navigate(name){
 }
 
 async function refreshUsers(generation=null){const data=await api('/api/users');if(generation!==null&&generation!==navigationGeneration)return null;state.users=data.items||[];document.querySelector('#users-count').textContent=state.users.length;return state.users}
+async function fleetCount(){try{return ((await api('/api/fleet/nodes')).items||[]).length}catch{return null}}
+function paintNavCounts(data,nodes){const protocols=data.protocols||{};const set=(id,credentials)=>{const badge=document.querySelector(id);if(badge)badge.textContent=credentials&&credentials.available!==false&&credentials.total!=null?credentials.total:'—'};set('#mieru-count',protocols.mieru?.credentials);set('#naive-count',protocols.naive?.credentials);const fleet=document.querySelector('#fleet-count');if(fleet)fleet.textContent=nodes??'—'}
 async function renderDashboard(generation=navigationGeneration){
-  const [data,users]=await Promise.all([api('/api/dashboard'),refreshUsers(generation)]);
+  const [data,users,nodes]=await Promise.all([api('/api/dashboard'),refreshUsers(generation),fleetCount()]);
+  // The counters belong to the sidebar rather than to the open view, so the
+  // overview fills every one of them instead of leaving a dash until the
+  // operator visits that section.
+  paintNavCounts(data,nodes);
   if(generation!==navigationGeneration||state.view!=='dashboard'||users===null)return;
   const mt=data.protocols?.mtproxy||{},naive=data.protocols?.naive||{available:false,status:'disabled'},mieru=data.protocols?.mieru||{available:false,status:'disabled'},mtReady=mt.ready===true,naiveReady=naive.ready===true,naiveAvailable=naive.available===true,mieruReady=mieru.ready===true,mieruAvailable=mieru.available===true,allReady=mtReady&&(!naiveAvailable||naiveReady)&&(!mieruAvailable||mieruReady);
   const system=document.querySelector('.system-mini');system.classList.toggle('degraded',!allReady);system.querySelector('b').textContent=allReady?'Прокси-сервисы работают':'Есть неполадки';system.querySelector('small').textContent=allReady?'Сводка актуальна':'Откройте обзор состояния';

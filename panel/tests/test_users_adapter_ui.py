@@ -40,6 +40,29 @@ async def test_dashboard_labels_process_runtime_traffic_separately_from_quota(cl
     assert response.json()["traffic"] == {"runtime_total_octets": 350}
 
 
+
+async def test_sidebar_counters_are_filled_by_the_overview_not_by_visiting_a_section(
+    client, login_user, telemt, naive, mieru,
+):
+    telemt.users.update({"mt": {"username": "mt", "enabled": True, "total_octets": 0}})
+    naive.seed("web", "not-returned", enabled=True)
+    mieru.users["mieru-one"] = {"username": "mieru-one", "enabled": True, "quotas": []}
+    await login_user(client)
+
+    protocols = (await client.get("/api/dashboard")).json()["protocols"]
+    assert protocols["mieru"]["credentials"]["total"] == 1
+    assert protocols["naive"]["credentials"]["total"] == 1
+    nodes = await client.get("/api/fleet/nodes")
+    assert nodes.status_code == 200 and nodes.json()["items"] == []
+
+    js = (await client.get("/static/app.js")).text
+    # The overview holds every credential total already, so the sidebar is
+    # painted from that one snapshot instead of keeping a dash until the
+    # operator opens each section.
+    assert "paintNavCounts(data,nodes)" in js and "async function fleetCount()" in js
+    for badge in ("#mieru-count", "#naive-count", "#fleet-count"):
+        assert badge in js
+
 async def test_dashboard_summarizes_both_protocols_without_naive_traffic_invention(
     client, login_user, telemt, naive,
 ):
