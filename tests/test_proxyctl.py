@@ -56,6 +56,29 @@ def test_audit_reports_existing_shared_443_without_dumping_secrets(tmp_path):
     assert "privateKey" not in json.dumps(report.to_dict())
 
 
+def test_audit_discovers_stream_conf_d_routes(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    (root / "etc/nginx/stream-conf.d").mkdir(parents=True)
+    (root / "etc/nginx/nginx.conf").write_text(
+        "events {}\nstream { include /etc/nginx/stream-conf.d/*.conf; }\n"
+    )
+    (root / "etc/nginx/stream-conf.d/routes.conf").write_text(
+        "map $ssl_preread_server_name $backend {\n"
+        "    relay.example.com 127.0.0.1:8445;\n"
+        "    default 127.0.0.1:8443;\n"
+        "}\n"
+    )
+    monkeypatch.setattr("scripts.proxyctl._listener_inventory", lambda: (set(), {}))
+
+    report = audit_host(
+        root=root,
+        listening_ports={443},
+        docker_available=True,
+        local_addresses={"127.0.0.1"},
+    )
+
+    assert report.nginx.sni_routes == {"relay.example.com": "127.0.0.1:8445"}
+
 def test_install_plan_rejects_domain_and_port_collisions(tmp_path):
     report = audit_host(root=fixture_root(tmp_path), listening_ports={443, 8445, 8787}, docker_available=True)
 

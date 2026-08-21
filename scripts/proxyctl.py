@@ -106,7 +106,12 @@ def _read_text(path: Path) -> str:
 
 def _nginx_files(root: Path) -> list[Path]:
     candidates = [_root_path(root, "/etc/nginx/nginx.conf")]
-    for directory in ("/etc/nginx/stream.d", "/etc/nginx/conf.d", "/etc/nginx/sites-enabled"):
+    for directory in (
+        "/etc/nginx/stream.d",
+        "/etc/nginx/stream-conf.d",
+        "/etc/nginx/conf.d",
+        "/etc/nginx/sites-enabled",
+    ):
         folder = _root_path(root, directory)
         if folder.is_dir():
             candidates.extend(sorted(path for path in folder.iterdir() if path.is_file()))
