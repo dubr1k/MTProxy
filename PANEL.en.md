@@ -27,6 +27,8 @@ Passwords require at least 12 characters and are stored with Argon2id. SQLite st
 
 `owner` manages administrators and users; `admin` manages users and reads audit; `viewer` is read-only. The last active owner cannot be removed or demoted. Disabling an administrator invalidates their sessions. Every mutation requires CSRF and is audited without passwords, tokens, links, or proxy secrets.
 
+`GET /api/audit` remains a read-only `items` response and supports `limit` (1–200), `before_id`, and equality filters for `actor`, `action`, and `target` (`actor` is case-insensitive). When more matching rows exist, `next_cursor` is the `before_id` value for the next page.
+
 The panel also contains a durable fleet registry and typed per-node command queue. Its Fleet view, direct mTLS pull ingress, manual CSR enrollment, and outbound node service are documented in [FLEET.en.md](FLEET.en.md).
 
 For owners and administrators, the Connections view can create, block, unblock, rotate, and remove individual proxy access records. An active Telegram link and QR code can be reopened through the explicit “QR and link” action. Every reveal is audited, while the link and secret are excluded from audit records and user-list responses.

@@ -90,6 +90,4 @@ Per-user Mieru traffic metrics are deliberately reported as degraded/unavailable
 
 ## Fleet limitation
 
-Fleet v1 allowlists secret-free Mieru inspect, metrics, and lifecycle operations. Remote user creation/rotation and full config apply are deliberately rejected because the durable command transport has no sealed payload layer. Do not persist decrypted credentials in fleet SQLite; add authenticated sealed payload encryption before enabling remote credential mutation.
-
-The node agent enables these routes only when both `MIERU_MANAGER_SOCKET` and either `MIERU_MANAGER_TOKEN` or `MIERU_MANAGER_TOKEN_FILE` are configured. Mount the manager UDS read-only into the agent and use a read-only token file. Partial configuration fails closed; no remote command can choose a socket path, HTTP path, lifecycle verb, or request body.
+Fleet v1 is Telemt-only. It does not advertise or accept Mieru inspect, metrics, lifecycle, credential, or configuration operations, and the node agent does not consume Mieru manager sockets or tokens. Operate Mieru through its authenticated manager boundary and panel APIs; do not persist decrypted credentials in fleet SQLite. A future Fleet protocol would require a separately versioned execution and reconciliation contract before any Mieru operation can be enabled.

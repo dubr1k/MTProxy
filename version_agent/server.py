@@ -108,8 +108,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(409, {"detail": str(exc)})
         except CatalogError as exc:
             self._send(422, {"detail": str(exc)})
-        except UpdateError:
-            self._send(502, {"detail": "update failed and rollback was attempted"})
+        except UpdateError as exc:
+            detail = {
+                "rollback_failed": "update failed and the previous generation could not be verified",
+                "rolled_back": "update failed and the previous generation was restored",
+            }.get(exc.state, "update failed")
+            self._send(502, {"detail": detail, "state": exc.state})
         else:
             self._send(200, result)
 

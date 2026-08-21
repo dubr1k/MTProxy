@@ -275,7 +275,7 @@ def test_runtime_install_owns_complete_stack_and_never_exposes_password(tmp_path
     assert any(call[0][0] == "/usr/local/bin/mtproxy-respq-probe" for call in runner.calls)
 
 
-def test_runtime_uninstall_removes_only_owned_runtime_and_preserves_credentials_by_default(tmp_path):
+def test_runtime_uninstall_preserves_credentials_and_named_volumes_by_default(tmp_path):
     root, route = runtime_root(tmp_path)
     original_route = route.read_text()
     runner = FakeRunner()
@@ -290,8 +290,40 @@ def test_runtime_uninstall_removes_only_owned_runtime_and_preserves_credentials_
     assert not (root / "var/lib/proxy-control/runtime.json").exists()
     assert (root / "opt/mtproxy-shared443/secrets/users.conf").read_text() == secret
     assert not (root / "etc/nginx/sites-available/proxy-control-panel.conf").exists()
-    assert any(call[0][-3:] == ("down", "--remove-orphans", "--volumes") for call in runner.calls)
+    compose = ("docker", "compose", "--project-directory", "/opt/mtproxy-shared443")
+    commands = [call[0] for call in runner.calls]
+    assert compose + ("down", "--remove-orphans") in commands
+    assert not any(command[-1:] == ("--volumes",) for command in commands)
     assert any(call[0][:3] == ("apt-get", "purge", "-y") for call in runner.calls)
+
+
+def test_runtime_uninstall_purges_named_volumes_only_with_explicit_resumable_intent(tmp_path):
+    root, _ = runtime_root(tmp_path)
+    runner = FakeRunner()
+    manager = RuntimeInstaller(plan(Path(__file__).parents[1]), root=root, runner=runner)
+    manager.install()
+    compose = ("docker", "compose", "--project-directory", "/opt/mtproxy-shared443")
+    purge_command = compose + ("down", "--remove-orphans", "--volumes")
+    runner.fail_on = purge_command
+    runner.fail_once = True
+    runner.failure = SystemExit
+
+    with pytest.raises(SystemExit, match="injected"):
+        manager.uninstall(purge_data=True)
+
+    interrupted = json.loads((root / "var/lib/proxy-control/runtime.json").read_text())
+    assert interrupted["status"] == "uninstalling"
+    assert interrupted["phase"] == "data_purging"
+    assert interrupted["purge_data"] is True
+    with pytest.raises(InstallerConflict, match="with --purge-data"):
+        manager.uninstall()
+
+    manager.uninstall(purge_data=True)
+
+    commands = [call[0] for call in runner.calls]
+    assert compose + ("down", "--remove-orphans") in commands
+    assert commands.count(purge_command) == 2
+    assert not (root / "var/lib/proxy-control/runtime.json").exists()
 
 
 def test_runtime_install_failure_rolls_back_routes_sites_compose_and_preserves_credentials(tmp_path):

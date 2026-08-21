@@ -77,6 +77,8 @@ docker compose up -d
 
 Не удаляйте volume после backup. `telemt-config` содержит credentials и API-mutated source of truth; удаление заставит entrypoint повторно импортировать исходный `users.conf`.
 
+Runtime-команда `proxyctl uninstall` по умолчанию сохраняет Compose named volumes, но сохранность на том же host не заменяет backup. `uninstall --purge-data` фиксирует отдельную crash-resumable фазу удаления томов; используйте её только после off-host копирования и проверки restore snapshot выше, а interrupted uninstall продолжайте с тем же flag.
+
 ## Naive generation
 
 Остановите panel mutations, manager и host Caddy. Сохраняйте вместе:

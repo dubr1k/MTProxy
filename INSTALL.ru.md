@@ -118,11 +118,13 @@ sudo python3 scripts/proxyctl.py repair
 
 ```bash
 sudo ./uninstall.sh
+# Destructive: удалить Compose named volumes отдельной journaled-фазой.
+sudo ./uninstall.sh --purge-data
 ```
 
-Uninstall durable-checkpoints phases, удаляет только owned routes/files/packages и сохраняет credential backup, certificates и cover roots до отдельного ownership review. Повторный запуск resume-safe.
+Uninstall durable-checkpoints phases, удаляет только owned routes/files/packages и по умолчанию сохраняет Compose named volumes, credential backup, certificates и cover roots до отдельного ownership review. Повторный запуск resume-safe; interrupted data purge нужно продолжать с `--purge-data`. Используйте этот flag только после проверки независимого backup томов.
 
-После удаления снова проверьте `nginx -t`, public listeners и соседние SNI. Не удаляйте preserved secrets/certificates, пока не подтверждено, что они больше никем не используются.
+После удаления снова проверьте `nginx -t`, public listeners и соседние SNI. Не удаляйте preserved volumes/secrets/certificates, пока не подтверждено, что они больше никем не используются.
 
 ## Отказ и прерванный SSH
 

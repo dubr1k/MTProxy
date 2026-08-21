@@ -137,4 +137,4 @@ Verifier проверяет metadata/key size, не читает secret contents
 
 ## Fleet limitation
 
-Fleet v1 допускает только secret-free Mieru inspect/metrics/lifecycle. Remote create/rotate/full apply запрещены до появления authenticated sealed payload layer. Не сохраняйте decrypted credentials в fleet SQLite.
+Fleet v1 работает только с Telemt. Он не объявляет и не принимает Mieru inspect, metrics, lifecycle, credential или configuration operations, а node agent не использует Mieru manager socket/token. Управляйте Mieru через authenticated manager boundary и panel API; не сохраняйте decrypted credentials в fleet SQLite. Для Mieru во Fleet потребуется отдельная версия execution/reconciliation contract.

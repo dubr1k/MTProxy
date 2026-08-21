@@ -73,6 +73,8 @@ docker compose up -d
 
 The `telemt-config` volume is credential-bearing and contains API-mutated source of truth. Deleting it causes the entrypoint to import the original `users.conf` again.
 
+Runtime `proxyctl uninstall` preserves Compose named volumes by default, but preservation on the same host is not a backup. `uninstall --purge-data` commits a separate crash-resumable volume-purge phase; use it only after the snapshot above has been copied off-host and restore-verified, and repeat the same flag if that uninstall is interrupted.
+
 ## Naive generation
 
 Stop panel mutations, manager, and host Caddy. Preserve together:

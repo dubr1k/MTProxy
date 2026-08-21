@@ -50,7 +50,10 @@ class Store:
               csrf_hash TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
               last_seen_at INTEGER NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS login_attempts (scope TEXT NOT NULL, happened_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS login_attempts (
+              scope TEXT NOT NULL, happened_at INTEGER NOT NULL,
+              reservation_id TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS login_attempts_scope_time ON login_attempts(scope,happened_at);
             CREATE TABLE IF NOT EXISTS audit_log (
               id INTEGER PRIMARY KEY, happened_at INTEGER NOT NULL, actor_id INTEGER,
@@ -58,6 +61,15 @@ class Store:
               detail_json TEXT NOT NULL DEFAULT '{}', ip TEXT NOT NULL
             );
             """)
+            columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(login_attempts)")
+            }
+            if "reservation_id" not in columns:
+                db.execute(
+                    "ALTER TABLE login_attempts "
+                    "ADD COLUMN reservation_id TEXT NOT NULL DEFAULT ''"
+                )
 
     def create_admin(self, username: str, password: str, role: str):
         if role not in {"owner", "admin", "viewer"} or len(password) < 12:
@@ -114,20 +126,44 @@ class Store:
             with self.connect() as db:
                 db.execute("DELETE FROM sessions WHERE token_hash=?", (self._hash(token),))
 
-    def login_limited(self, scopes: list[str], attempts: int, window: int):
-        cutoff = int(time.time()) - window
-        with self.connect() as db:
-            db.execute("DELETE FROM login_attempts WHERE happened_at<?", (cutoff,))
-            return any(db.execute("SELECT count(*) FROM login_attempts WHERE scope=?", (s,)).fetchone()[0] >= attempts for s in scopes)
-
-    def record_login_failure(self, scopes: list[str]):
+    def reserve_login_attempt(
+        self,
+        scopes: list[str],
+        attempts: int,
+        window: int,
+    ) -> str | None:
+        """Atomically reserve capacity before expensive password verification."""
+        if not scopes or attempts < 1 or window < 1:
+            raise ValueError("invalid login limiter configuration")
         now = int(time.time())
-        with self.connect() as db:
-            db.executemany("INSERT INTO login_attempts VALUES(?,?)", [(s, now) for s in scopes])
+        reservation_id = secrets.token_urlsafe(18)
+        cutoff = now - window
+        with self._lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM login_attempts WHERE happened_at<?", (cutoff,))
+            limited = any(
+                db.execute(
+                    "SELECT count(*) FROM login_attempts WHERE scope=?",
+                    (scope,),
+                ).fetchone()[0]
+                >= attempts
+                for scope in scopes
+            )
+            if limited:
+                return None
+            db.executemany(
+                "INSERT INTO login_attempts(scope,happened_at,reservation_id) "
+                "VALUES(?,?,?)",
+                [(scope, now, reservation_id) for scope in scopes],
+            )
+            return reservation_id
 
-    def clear_login_failures(self, scopes: list[str]):
-        with self.connect() as db:
-            db.executemany("DELETE FROM login_attempts WHERE scope=?", [(s,) for s in scopes])
+    def release_login_attempt(self, reservation_id: str) -> None:
+        with self._lock, self.connect() as db:
+            db.execute(
+                "DELETE FROM login_attempts WHERE reservation_id=?",
+                (reservation_id,),
+            )
 
     def admins(self):
         with self.connect() as db:
@@ -173,10 +209,40 @@ class Store:
             db.execute("INSERT INTO audit_log(happened_at,actor_id,actor_username,action,target,detail_json,ip) VALUES(?,?,?,?,?,?,?)",
                        (int(time.time()), actor.get("admin_id") or actor.get("id"), actor["username"], action, target, json.dumps(safe), ip))
 
-    def audits(self, limit=200):
+    def audits(
+        self,
+        limit: int = 200,
+        *,
+        before_id: int | None = None,
+        actor: str | None = None,
+        action: str | None = None,
+        target: str | None = None,
+    ):
+        clauses = []
+        values = []
+        if before_id is not None:
+            clauses.append("id < ?")
+            values.append(before_id)
+        if actor is not None:
+            clauses.append("actor_username = ? COLLATE NOCASE")
+            values.append(actor)
+        if action is not None:
+            clauses.append("action = ?")
+            values.append(action)
+        if target is not None:
+            clauses.append("target = ?")
+            values.append(target)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        values.append(limit)
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
-            return [{**dict(x), "detail": json.loads(x["detail_json"])} for x in rows]
+            rows = db.execute(
+                f"SELECT * FROM audit_log{where} ORDER BY id DESC LIMIT ?",
+                values,
+            )
+            return [
+                {**dict(row), "detail": json.loads(row["detail_json"])}
+                for row in rows
+            ]
 
     def dump_schema(self):
         with self.connect() as db:

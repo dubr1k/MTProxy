@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from version_agent.catalog import CatalogError, load_catalog
-from version_agent.service import ConflictError, UpdateError, VersionAgent
+from version_agent.service import (
+    ConflictError,
+    RollbackFailedError,
+    RolledBackError,
+    UpdateError,
+    VersionAgent,
+)
 
 
 TELEMT_IMAGE = "ghcr.io/example/telemt@sha256:" + "a" * 64
@@ -166,8 +173,13 @@ def test_binary_update_restores_the_previous_pin_when_the_service_fails(tmp_path
     target.chmod(0o755)
     pin = tmp_path / "caddy-naive.pin"
     pin.write_text("v2.11.3 h1:previous=\n")
+    caddyfile = tmp_path / "Caddyfile"
+    caddyfile.write_text(":443 {}\n")
+    checker = "/usr/local/libexec/check-naive-caddy-build"
+    calls: list[tuple[list[str], dict | None]] = []
 
     def run(command, *, env=None, cwd=None, timeout=None):
+        calls.append((command, env))
         if command[:2] == ["systemctl", "restart"] and target.read_bytes() == BINARY:
             raise RuntimeError("restart failed")
         return "active\n"
@@ -178,15 +190,26 @@ def test_binary_update_restores_the_previous_pin_when_the_service_fails(tmp_path
         binary_paths={"naive": target},
         service_names={"naive": "caddy-naive"},
         version_pins={"naive": pin},
+        checkers={"naive": checker},
+        caddyfiles={"naive": caddyfile},
         downloader=lambda url: BINARY,
         runner=run,
     )
 
-    with pytest.raises(UpdateError, match="rolled back"):
+    with pytest.raises(RolledBackError, match="restored and verified"):
         agent.update("naive", "2.11.4-custom.1", expected_current=None)
 
     assert target.read_bytes() == b"old"
     assert pin.read_text().strip() == "v2.11.3 h1:previous="
+    checker_calls = [env for command, env in calls if command == [checker]]
+    assert [env["EXPECTED_CADDY_VERSION"] for env in checker_calls] == [
+        PINNED_CADDY,
+        "v2.11.3 h1:previous=",
+    ]
+    assert any(
+        command[0] == str(target) and "adapt" in command
+        for command, _env in calls
+    )
 
 
 def test_update_is_refused_while_a_container_pins_the_binary(tmp_path: Path):
@@ -215,7 +238,70 @@ def test_update_is_refused_while_a_container_pins_the_binary(tmp_path: Path):
     assert downloads == []
 
 
-def test_binary_update_rolls_back_when_service_reload_fails(tmp_path: Path):
+def test_update_is_blocked_when_pinned_consumer_inspect_has_daemon_failure(tmp_path: Path):
+    catalog = tmp_path / "catalog.json"
+    write_catalog(catalog)
+    target = tmp_path / "mita"
+    target.write_bytes(b"old")
+    downloads: list[str] = []
+
+    def run(command, *, env=None, cwd=None, timeout=None):
+        raise subprocess.CalledProcessError(
+            1,
+            command,
+            stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock\n",
+        )
+
+    agent = VersionAgent(
+        catalog_path=catalog,
+        state_path=tmp_path / "state.json",
+        binary_paths={"mita": target},
+        service_names={"mita": "mita"},
+        pinned_consumers={"mita": "proxy-control-mieru-manager"},
+        downloader=lambda url: downloads.append(url) or BINARY,
+        runner=run,
+    )
+
+    with pytest.raises(UpdateError, match="cannot determine"):
+        agent.update("mita", "3.35.0", expected_current=None)
+
+    assert target.read_bytes() == b"old"
+    assert downloads == []
+
+
+def test_update_allows_exact_absent_pinned_consumer(tmp_path: Path):
+    catalog = tmp_path / "catalog.json"
+    write_catalog(catalog)
+    target = tmp_path / "mita"
+    target.write_bytes(b"old")
+    container = "proxy-control-mieru-manager"
+
+    def run(command, *, env=None, cwd=None, timeout=None):
+        if command[:2] == ["docker", "inspect"]:
+            raise subprocess.CalledProcessError(
+                1,
+                command,
+                stderr=f"Error: No such object: {container}\n",
+            )
+        return "active\n"
+
+    agent = VersionAgent(
+        catalog_path=catalog,
+        state_path=tmp_path / "state.json",
+        binary_paths={"mita": target},
+        service_names={"mita": "mita"},
+        pinned_consumers={"mita": container},
+        downloader=lambda url: BINARY,
+        runner=run,
+    )
+
+    result = agent.update("mita", "3.35.0", expected_current=None)
+
+    assert result["changed"] is True
+    assert target.read_bytes() == BINARY
+
+
+def test_binary_update_rolls_back_when_service_restart_fails(tmp_path: Path):
     catalog = tmp_path / "catalog.json"
     write_catalog(catalog)
     target = tmp_path / "mita"
@@ -244,12 +330,52 @@ def test_binary_update_rolls_back_when_service_reload_fails(tmp_path: Path):
         runner=run,
     )
 
-    with pytest.raises(UpdateError, match="rolled back"):
+    with pytest.raises(RolledBackError, match="restored and verified"):
         agent.update("mita", "3.35.0", expected_current="3.34.0")
 
     assert target.read_bytes() == b"old"
     assert json.loads(state.read_text())["components"]["mita"]["version"] == "3.34.0"
     assert calls.count(["systemctl", "restart", "mita"]) >= 2
+
+
+def test_binary_rollback_restart_is_not_success_without_health(tmp_path: Path):
+    catalog = tmp_path / "catalog.json"
+    write_catalog(catalog)
+    target = tmp_path / "mita"
+    target.write_bytes(b"old")
+    target.chmod(0o755)
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"components": {"mita": {"version": "3.34.0"}}}))
+    calls: list[list[str]] = []
+
+    def run(command, *, env=None, cwd=None, timeout=None):
+        calls.append(command)
+        if command == ["systemctl", "is-active", "mita"]:
+            raise RuntimeError("service remained unhealthy")
+        return "ok\n"
+
+    agent = VersionAgent(
+        catalog_path=catalog,
+        state_path=state,
+        binary_paths={"mita": target},
+        service_names={"mita": "mita"},
+        downloader=lambda url: BINARY,
+        runner=run,
+    )
+
+    with pytest.raises(RollbackFailedError, match="could not be verified"):
+        agent.update("mita", "3.35.0", expected_current="3.34.0")
+
+    saved = json.loads(state.read_text())["components"]["mita"]
+    assert target.read_bytes() == b"old"
+    assert saved["version"] == "3.34.0"
+    assert saved["status"] == "rollback_failed"
+    assert agent.list_versions()["components"]["mita"]["status"] == "rollback_failed"
+    assert calls.count(["systemctl", "restart", "mita"]) == 2
+    assert calls.count(["systemctl", "is-active", "mita"]) == 2
+
+    with pytest.raises(RollbackFailedError, match="operator recovery"):
+        agent.update("mita", "3.35.0", expected_current="3.34.0")
 
 
 def test_update_rejects_stale_expected_revision(tmp_path: Path):
@@ -280,9 +406,16 @@ def test_telemt_update_persists_override_and_uses_expected_compose_files(tmp_pat
     (compose_dir / "compose.yaml").write_text("name: mtproxy\nservices: {}\n", encoding="utf-8")
     commands: list[list[str]] = []
 
+    old_image = "ghcr.io/example/telemt@sha256:" + "b" * 64
+
     def run(command, *, env=None, cwd=None, timeout=None):
         commands.append(command)
-        if command[:2] == ["docker", "inspect"]:
+        if "{{.Config.Image}}" in command:
+            override = compose_dir / "version-overrides" / "compose.versions.yaml"
+            if override.exists() and TELEMT_IMAGE in override.read_text(encoding="utf-8"):
+                return TELEMT_IMAGE
+            return old_image
+        if "{{.State.Health.Status}}" in command:
             return "healthy\n"
         return "ok\n"
 
@@ -306,3 +439,50 @@ def test_telemt_update_persists_override_and_uses_expected_compose_files(tmp_pat
     assert any(command[:2] == ["docker", "inspect"] for command in commands)
     inspect_commands = [command for command in commands if command[:2] == ["docker", "inspect"]]
     assert inspect_commands and inspect_commands[-1][-1] == "telemt-test"
+
+
+def test_telemt_rollback_verifies_restored_image_and_health(tmp_path: Path):
+    catalog = tmp_path / "catalog.json"
+    write_catalog(catalog)
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"components": {"telemt": {"version": "3.4.24"}}}))
+    compose_dir = tmp_path / "deployment"
+    compose_dir.mkdir()
+    (compose_dir / "compose.yaml").write_text("name: mtproxy\nservices: {}\n", encoding="utf-8")
+    override = compose_dir / "version-overrides" / "compose.versions.yaml"
+    override.parent.mkdir()
+    old_image = "ghcr.io/example/telemt@sha256:" + "b" * 64
+    old_override = f"services:\n  mtproxy:\n    image: {old_image}\n"
+    override.write_text(old_override, encoding="utf-8")
+    running_image = old_image
+    health_reads: list[str] = []
+
+    def run(command, *, env=None, cwd=None, timeout=None):
+        nonlocal running_image
+        if command[:3] == ["docker", "compose", "--project-name"] and "up" in command:
+            configured = override.read_text(encoding="utf-8") if override.exists() else ""
+            running_image = TELEMT_IMAGE if TELEMT_IMAGE in configured else old_image
+            return "ok\n"
+        if "{{.Config.Image}}" in command:
+            return running_image
+        if "{{.State.Health.Status}}" in command:
+            health_reads.append(running_image)
+            return "unhealthy" if running_image == TELEMT_IMAGE else "healthy"
+        return "ok\n"
+
+    agent = VersionAgent(
+        catalog_path=catalog,
+        state_path=state,
+        compose_dir=compose_dir,
+        compose_files=("compose.yaml",),
+        telemt_container="telemt-test",
+        runner=run,
+        health_timeout=0,
+    )
+
+    with pytest.raises(RolledBackError, match="restored and verified"):
+        agent.update("telemt", "3.4.25", expected_current="3.4.24")
+
+    assert override.read_text(encoding="utf-8") == old_override
+    assert health_reads == [TELEMT_IMAGE, old_image]
+    assert json.loads(state.read_text())["components"]["telemt"]["version"] == "3.4.24"

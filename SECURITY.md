@@ -24,4 +24,4 @@ Treat image digest, Caddy module/build, Telemt and mita changes as security chan
 
 ## Supported status
 
-The repository test/Compose/image gates are maintained, and Telemt, NaiveProxy and Mieru have passed live operator-controlled protocol probes. Ubuntu 24.04 QEMU full lifecycle and production fleet enrollment remain pending; see [VALIDATION.md](docs/VALIDATION.md). Legacy `install_mtproxy.sh` has a different host/systemd/firewall model and must not share a listener without a specific audit.
+The repository test/Compose/image gates are maintained, and Telemt, NaiveProxy and Mieru have passed live operator-controlled protocol probes. Ubuntu 24.04 QEMU full lifecycle and production fleet enrollment remain pending; see [VALIDATION.md](docs/VALIDATION.md). Supported deployments use the Compose/Telemt path through `install.sh` or `proxyctl`; the former host/systemd MTProxy installer has been removed.

@@ -12,7 +12,6 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .mieru import MieruError
 from .fleet import ProtocolError, TypedCommand, validate_result
 
 
@@ -47,6 +46,11 @@ class AgentJournal:
                     "ALTER TABLE agent_commands ADD COLUMN operation TEXT NOT NULL "
                     "DEFAULT 'telemt.inventory.refresh'"
                 )
+            db.execute(
+                """UPDATE agent_commands SET uploaded_at=COALESCE(uploaded_at,?)
+                WHERE operation LIKE 'mieru.%'""",
+                (int(time.time()),),
+            )
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=10)
@@ -92,8 +96,7 @@ class AgentJournal:
                 "SELECT sequence,operation FROM agent_commands WHERE status='executing'"
             ).fetchall()
             for row in rows:
-                protocol = "Mieru" if row["operation"].startswith("mieru.") else "Telemt"
-                result = {"message": f"outcome requires {protocol} reconciliation"}
+                result = {"message": "outcome requires Telemt reconciliation"}
                 db.execute(
                     """UPDATE agent_commands SET status='indeterminate',result_json=?,completed_at=?
                     WHERE sequence=? AND status='executing'""",
@@ -198,57 +201,13 @@ class LocalTelemtExecutor:
         return validate_result(result)
 
 
-class LocalMieruExecutor:
-    """Typed adapter to the local authenticated Mieru manager; no caller supplied path/body."""
-
-    def __init__(self, client):
-        self.client = client
-
-    async def execute(self, item: TypedCommand) -> dict:
-        if item.operation == "mieru.inspect":
-            data = await self.client.health()
-            result = {"mieru_status": data.get("status"), "mieru_ready": data.get("ready"),
-                      "mieru_revision": data.get("revision")}
-        elif item.operation == "mieru.metrics":
-            data = await self.client.metrics()
-            result = {
-                "metrics_status": data.get("status"),
-                "metrics_stale": data.get("stale") is True,
-                "metrics_capability": data.get("capability"),
-                "metrics_reason": data.get("reason"),
-            }
-        elif item.operation in {
-            "mieru.lifecycle.start",
-            "mieru.lifecycle.stop",
-            "mieru.lifecycle.restart",
-        }:
-            try:
-                data = await self.client.lifecycle(item.operation.rsplit(".", 1)[1])
-            except MieruError as exc:
-                if exc.status_code >= 500:
-                    raise ExecutionIndeterminate(
-                        "Mieru lifecycle outcome requires reconciliation"
-                    ) from exc
-                raise ProtocolError("local Mieru manager rejected lifecycle command") from exc
-            result = {
-                "mieru_status": data.get("status"),
-                "mieru_ready": data.get("ready"),
-                "mieru_revision": data.get("revision"),
-            }
-        else:
-            raise ProtocolError("Mieru operation is not executable without sealed payload support")
-        return validate_result(result)
 
 
 class RoutingExecutor:
-    def __init__(self, *, telemt, mieru):
-        self.telemt, self.mieru = telemt, mieru
+    def __init__(self, *, telemt):
+        self.telemt = telemt
 
     async def execute(self, item: TypedCommand) -> dict:
-        if item.operation.startswith("mieru."):
-            if self.mieru is None:
-                raise ProtocolError("local Mieru manager is unavailable")
-            return await self.mieru.execute(item)
         if self.telemt is None:
             raise ProtocolError("local Telemt manager is unavailable")
         return await self.telemt.execute(item)
@@ -273,11 +232,10 @@ class NodeAgent:
         try:
             result = await self.executor.execute(item)
         except ExecutionIndeterminate:
-            protocol = "Mieru" if item.operation.startswith("mieru.") else "Telemt"
             return self.journal.finish(
                 item,
                 "indeterminate",
-                {"message": f"outcome requires {protocol} reconciliation"},
+                {"message": "outcome requires Telemt reconciliation"},
             )
         except Exception as exc:
             # Never persist exception text: third-party errors can contain headers/bodies.

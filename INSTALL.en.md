@@ -95,9 +95,11 @@ sudo python3 scripts/proxyctl.py repair
 
 ```bash
 sudo ./uninstall.sh
+# Destructive: remove Compose named volumes as a separate journaled phase.
+sudo ./uninstall.sh --purge-data
 ```
 
-Uninstall durable-checkpoints phases, removes only owned routes/files/packages, and preserves credential backup, certificates, and cover roots pending ownership review. Repeated execution resumes safely. Revalidate Nginx/listeners/adjacent SNI afterward.
+Uninstall durable-checkpoints phases, removes only owned routes/files/packages, and preserves Compose named volumes, credential backup, certificates, and cover roots by default. Repeated execution resumes safely; an interrupted data-purging uninstall must be resumed with `--purge-data`. Use that flag only after verifying an independent volume backup. Revalidate Nginx/listeners/adjacent SNI afterward.
 
 ## Interrupted SSH
 
