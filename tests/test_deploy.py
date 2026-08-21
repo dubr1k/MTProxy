@@ -207,6 +207,11 @@ class DeployCliTests(unittest.TestCase):
             "ExecStartPre=/usr/bin/chown root:10001 /run/proxy-control",
             unit,
         )
+        self.assertIn(
+            "ReadWritePaths=/run/proxy-control /var/lib/proxy-control "
+            "/etc/proxy-control /opt/mtproxy-shared443 ",
+            unit,
+        )
 
     @unittest.skipUnless(os.geteuid() == 0, "numeric permission behavior requires root")
     def test_naive_log_permissions_allow_caddy_write_and_manager_read_only(self):

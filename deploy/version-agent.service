@@ -30,7 +30,7 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 # Staging and atomic replacement happen in the target's directory, so the
 # directories must be writable; naming the binaries alone leaves them read-only.
-ReadWritePaths=/run/proxy-control /var/lib/proxy-control /etc/proxy-control /opt/mtproxy-shared443/version-overrides /usr/local/bin /usr/bin
+ReadWritePaths=/run/proxy-control /var/lib/proxy-control /etc/proxy-control /opt/mtproxy-shared443 /usr/local/bin /usr/bin
 
 [Install]
 WantedBy=multi-user.target
