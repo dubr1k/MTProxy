@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import json
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 import pytest
 import httpx
 
@@ -71,13 +70,12 @@ async def test_naive_owner_can_create_reveal_rotate_toggle_and_delete(client, lo
     assert "qr" not in native
 
     karing = reveal["clients"]["karing"]
-    assert karing["type"] == "link"
-    assert karing["import_url"].startswith("karing://install-config?")
-    assert karing["qr"]["payload"] == karing["import_url"]
-    assert karing["qr"]["image"].startswith("data:image/svg+xml;base64,")
-    karing_query = parse_qs(urlsplit(karing["import_url"]).query)
-    profile = json.loads(karing_query["url"][0])
-    assert profile == karing["config"]
+    assert karing["type"] == "config"
+    assert karing["label"] == "Karing"
+    assert karing["description"] == "sing-box outbound — подходит для Karing."
+    assert karing["filename"] == "karing-naive-ios-phone.json"
+    assert "import_url" not in karing and "qr" not in karing
+    profile = karing["config"]
     assert profile["outbounds"] == [{
         "type": "naive",
         "tag": "naive-ios-phone",
@@ -87,7 +85,6 @@ async def test_naive_owner_can_create_reveal_rotate_toggle_and_delete(client, lo
         "password": urlsplit(native["config"]["proxy"]).password,
         "tls": {"enabled": True, "server_name": "naive.example.com"},
     }]
-    assert not karing["qr"]["payload"].startswith("https://")
 
     shadowrocket = reveal["clients"]["shadowrocket"]
     assert shadowrocket == {

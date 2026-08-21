@@ -8,7 +8,6 @@ from urllib.parse import unquote, urlsplit
 from fastapi import Depends, HTTPException, Request
 
 from .naive import NaiveError
-from .reveals import karing_client
 from .schemas import NaiveQuotaUpdate, NaiveUserCreate
 from .web_context import RequestContext
 
@@ -173,11 +172,13 @@ def register_naive_routes(app, context: RequestContext) -> None:
                     "config": native_config,
                     "filename": f"naive-{username}.json",
                 },
-                "karing": karing_client(
-                    karing_config,
-                    name=f"NaiveProxy · {username}",
-                    filename=f"karing-naive-{username}.json",
-                ),
+                "karing": {
+                    "label": "Karing",
+                    "type": "config",
+                    "description": "sing-box outbound — подходит для Karing.",
+                    "config": karing_config,
+                    "filename": f"karing-naive-{username}.json",
+                },
                 "shadowrocket": {
                     "label": "Shadowrocket",
                     "type": "manual",
