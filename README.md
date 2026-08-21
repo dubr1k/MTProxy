@@ -995,6 +995,11 @@ git diff --check
 
 Полная документация по отдельным границам: [карта документации](docs/README.md), [автоматическая установка](INSTALL.ru.md), [полный установщик и аудитор](INSTALLER_AUDITOR.ru.md), [панель](PANEL.ru.md), [MTProto за Nginx](DOCKER_DEPLOYMENT.ru.md), [Mieru](MIERU.ru.md), [выдача Mieru](docs/MIERU_SHARING.ru.md), [Fleet](FLEET.ru.md), [эксплуатация](docs/OPERATIONS.ru.md), [резервное копирование](docs/BACKUP_RESTORE.ru.md), [обновление](docs/UPGRADING.ru.md), [устранение проблем](docs/TROUBLESHOOTING.ru.md), [учёт трафика](docs/ACCOUNTING.md) и [проверки](docs/VALIDATION.md).
 
+
+# Участники
+
+- [@Baggrisha](https://github.com/Baggrisha) — hardening control plane lifecycle и operator UI.
+
 # Статус и лицензия
 
 Подтверждены тесты Python, проверки качества, рендеринг Compose-конфигураций, сборка образов, панели MTProxy/NaiveProxy/Mieru и адаптивный интерфейс. Полный цикл установки и отката в QEMU, регистрация Fleet в боевой среде и бухгалтерская точность учёта трафика не заявляются как завершённые этапы выпуска.
