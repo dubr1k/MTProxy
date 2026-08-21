@@ -798,7 +798,7 @@ sudo systemctl enable --now mtproxy-fleet-ingress
 
 The unit stages the certificate and private key into a protected runtime directory; the original root-owned Certbot private-key tree remains inaccessible to the panel. Check `systemctl status mtproxy-fleet-ingress` and the mTLS connection.
 
-Allowed operations are limited to inventory, enable, disable, limit updates, quota reset, and bounded Mieru inspection/lifecycle. Remote create/rotate/reveal and secret-bearing configuration apply are rejected until an authenticated sealed-payload layer exists.
+Fleet v1 is Telemt-only: inventory refresh, enable, disable, limit updates, and quota reset are allowlisted. Mieru operations and remote create/delete/rotate/reveal or secret-bearing configuration apply are rejected.
 
 For certificate rotation, create and bind the new certificate, replace it on the node, confirm `connected`, and only then revoke the old serial:
 

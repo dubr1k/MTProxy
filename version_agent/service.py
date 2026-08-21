@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -16,12 +17,25 @@ from .catalog import CatalogEntry, CatalogError, load_catalog, sha256_bytes
 
 
 class UpdateError(RuntimeError):
-    """An approved update failed and was rolled back where possible."""
+    """An approved update failed."""
+
+    state = "update_failed"
+
+
+class RolledBackError(UpdateError):
+    """An update failed, but the previous generation was verified."""
+
+    state = "rolled_back"
+
+
+class RollbackFailedError(UpdateError):
+    """An update failed and the previous generation could not be verified."""
+
+    state = "rollback_failed"
 
 
 class ConflictError(UpdateError):
     """The runtime changed since the panel read its current revision."""
-
 
 Runner = Callable[..., str]
 Downloader = Callable[[str], bytes]
@@ -156,8 +170,10 @@ class VersionAgent:
         components = {}
         for component, entries in catalog.components.items():
             current = state.get("components", {}).get(component, {})
+            current = current if isinstance(current, dict) else {}
             components[component] = {
-                "current": current.get("version") if isinstance(current, dict) else None,
+                "current": current.get("version"),
+                "status": current.get("status", "ready"),
                 "available": [entry.public() for entry in entries],
             }
         return {"enabled": True, "components": components}
@@ -170,7 +186,12 @@ class VersionAgent:
             entry = catalog.entry(component, version)
             state = self._state()
             current_data = state.setdefault("components", {}).get(component, {})
-            current = current_data.get("version") if isinstance(current_data, dict) else None
+            current_data = current_data if isinstance(current_data, dict) else {}
+            current = current_data.get("version")
+            if current_data.get("status") == "rollback_failed":
+                raise RollbackFailedError(
+                    f"{component} has an unverified rollback; operator recovery is required"
+                )
             if expected_current is not None and current != expected_current:
                 raise ConflictError("runtime version changed; reload the versions page")
             if current == version:
@@ -180,12 +201,22 @@ class VersionAgent:
                     self._update_telemt(entry)
                 else:
                     self._update_binary(component, entry)
-            except ConflictError:
+            except RollbackFailedError:
+                failed = dict(current_data)
+                failed["status"] = "rollback_failed"
+                failed["failed_at"] = int(time.time())
+                state["components"][component] = failed
+                try:
+                    self._save_state(state)
+                except Exception as state_exc:
+                    raise RollbackFailedError(
+                        f"{component} rollback failed and the failure state could not be persisted"
+                    ) from state_exc
+                raise
+            except UpdateError:
                 raise
             except Exception as exc:
-                if isinstance(exc, UpdateError):
-                    raise
-                raise UpdateError(f"{component} update failed and was rolled back") from exc
+                raise UpdateError(f"{component} update failed") from exc
             state["components"][component] = {
                 "version": version,
                 "kind": entry.kind,
@@ -220,6 +251,7 @@ class VersionAgent:
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup = backup_dir / f"{component}.previous"
         existed = target.exists()
+        previous_sha256 = self._sha256_file(target) if existed else None
         if existed:
             shutil.copyfile(target, backup)
             os.chmod(backup, target.stat().st_mode & 0o777)
@@ -228,24 +260,15 @@ class VersionAgent:
         previous_pin = pin.read_text().strip() if pin and pin.exists() else None
         try:
             _atomic_write(stage, payload, 0o755)
-            checker = self.checkers.get(component)
-            if checker:
-                checker_env = {"CADDY_BIN": str(stage)}
-                if entry.runtime_version:
-                    checker_env["EXPECTED_CADDY_VERSION"] = entry.runtime_version
-                self.runner([str(checker)], env=checker_env)
+            self._run_binary_config_checks(component, stage, entry.runtime_version)
             os.replace(stage, target)
             self._fsync_directory(target.parent)
-            if component == "naive":
-                caddyfile = self.caddyfiles.get(component)
-                if caddyfile:
-                    self.runner(
-                        [str(target), "adapt", "--adapter", "caddyfile", "--validate", "--config", str(caddyfile)]
-                    )
+            self._assert_binary_generation(target, entry.sha256)
             # Replacing the binary needs a restart: a reload re-reads the config
             # but keeps the running process, so the old build would stay live
             # while state.json already claimed the new version.
             self._write_pin(component, entry.runtime_version)
+            self._assert_pin(component, entry.runtime_version)
             self.runner(["systemctl", "restart", service], timeout=120)
             self.runner(["systemctl", "is-active", service], timeout=30)
         except Exception as exc:
@@ -256,12 +279,59 @@ class VersionAgent:
                     target.unlink(missing_ok=True)
                 self._fsync_directory(target.parent)
                 self._restore_pin(component, previous_pin)
+                self._assert_pin(component, previous_pin)
+                if existed:
+                    self._assert_binary_generation(target, previous_sha256)
+                    self._run_binary_config_checks(component, target, previous_pin)
                 self.runner(["systemctl", "restart", service], timeout=120)
+                self.runner(["systemctl", "is-active", service], timeout=30)
             except Exception as rollback_exc:
-                raise UpdateError(f"{component} update failed; rollback also failed") from rollback_exc
-            raise UpdateError(f"{component} update failed and was rolled back") from exc
+                raise RollbackFailedError(
+                    f"{component} update failed; restored generation could not be verified"
+                ) from rollback_exc
+            raise RolledBackError(
+                f"{component} update failed; previous generation was restored and verified"
+            ) from exc
         finally:
             stage.unlink(missing_ok=True)
+
+    def _run_binary_config_checks(
+        self, component: str, binary: Path, runtime_version: str | None
+    ) -> None:
+        checker = self.checkers.get(component)
+        if checker:
+            checker_env = {"CADDY_BIN": str(binary)}
+            if runtime_version:
+                checker_env["EXPECTED_CADDY_VERSION"] = runtime_version
+            self.runner([str(checker)], env=checker_env)
+        if component == "naive":
+            caddyfile = self.caddyfiles.get(component)
+            if caddyfile:
+                self.runner(
+                    [
+                        str(binary),
+                        "adapt",
+                        "--adapter",
+                        "caddyfile",
+                        "--validate",
+                        "--config",
+                        str(caddyfile),
+                    ]
+                )
+
+    def _assert_binary_generation(self, target: Path, expected_sha256: str | None) -> None:
+        if expected_sha256 is None or not target.is_file():
+            raise UpdateError("binary generation is missing")
+        if self._sha256_file(target) != expected_sha256:
+            raise UpdateError("binary generation readback did not match")
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _write_pin(self, component: str, runtime_version: str | None) -> None:
         """Keep the unit's startup check on the version the agent just installed.
@@ -283,6 +353,14 @@ class VersionAgent:
         else:
             _atomic_write(pin, (previous + "\n").encode(), 0o644)
 
+    def _assert_pin(self, component: str, expected: str | None) -> None:
+        pin = self.version_pins.get(component)
+        if pin is None:
+            return
+        actual = pin.read_text().strip() if pin.exists() else None
+        if actual != expected:
+            raise UpdateError(f"{component} runtime pin readback did not match")
+
     def _assert_no_pinned_consumer(self, component: str) -> None:
         """Refuse an update that would leave a container pinned to the old build."""
         container = self.pinned_consumers.get(component)
@@ -290,8 +368,13 @@ class VersionAgent:
             return
         try:
             self.runner(["docker", "inspect", "--format", "{{.Id}}", container], timeout=30)
-        except Exception:
-            return
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip() if isinstance(exc.stderr, str) else ""
+            if stderr == f"Error: No such object: {container}":
+                return
+            raise UpdateError(f"cannot determine whether {container} pins {component}") from exc
+        except Exception as exc:
+            raise UpdateError(f"cannot determine whether {container} pins {component}") from exc
         raise UpdateError(
             f"{container} pins this binary by digest; update its pin and recreate it "
             f"before updating {component}"
@@ -318,45 +401,69 @@ class VersionAgent:
         if override is None:
             raise UpdateError("Telemt Compose deployment is not configured")
         previous = override.read_bytes() if override.exists() else None
+        previous_image = self._inspect_telemt_image()
         content = (
             "# Generated by proxy-control version-agent; do not edit manually.\n"
             "services:\n"
             "  mtproxy:\n"
             f"    image: {entry.image}\n"
         ).encode()
-        _atomic_write(override, content, 0o640)
         try:
+            _atomic_write(override, content, 0o640)
             self.runner(self._compose_command("pull", "mtproxy"), cwd=self.compose_dir, timeout=900)
             self.runner(
                 self._compose_command("up", "-d", "--no-deps", "mtproxy"),
                 cwd=self.compose_dir,
                 timeout=300,
             )
-            deadline = time.monotonic() + self.health_timeout
-            status = ""
-            while time.monotonic() < deadline:
-                status = self.runner(
-                    ["docker", "inspect", "--format", "{{.State.Health.Status}}", self.telemt_container],
-                    timeout=30,
-                ).strip()
-                if status == "healthy":
-                    return
-                time.sleep(1)
-            raise UpdateError(f"Telemt health did not become healthy: {status or 'unknown'}")
+            self._verify_telemt_generation(entry.image)
         except Exception as exc:
             try:
                 if previous is None:
                     override.unlink(missing_ok=True)
-                    command = self._compose_command("up", "-d", "--no-deps", "mtproxy", include_override=False)
+                    command = self._compose_command(
+                        "up", "-d", "--no-deps", "mtproxy", include_override=False
+                    )
                 else:
                     _atomic_write(override, previous, 0o640)
                     command = self._compose_command("up", "-d", "--no-deps", "mtproxy")
                 self.runner(command, cwd=self.compose_dir, timeout=300)
+                self._verify_telemt_generation(previous_image)
             except Exception as rollback_exc:
-                raise UpdateError("Telemt update failed; rollback also failed") from rollback_exc
-            if isinstance(exc, UpdateError):
-                raise UpdateError(f"{exc}; rolled back") from exc
-            raise UpdateError("Telemt update failed and was rolled back") from exc
+                raise RollbackFailedError(
+                    "Telemt update failed; restored generation could not be verified"
+                ) from rollback_exc
+            raise RolledBackError(
+                "Telemt update failed; previous generation was restored and verified"
+            ) from exc
+
+    def _inspect_telemt_image(self) -> str:
+        image = self.runner(
+            ["docker", "inspect", "--format", "{{.Config.Image}}", self.telemt_container],
+            timeout=30,
+        ).strip()
+        if not image:
+            raise UpdateError("Telemt image readback was empty")
+        return image
+
+    def _verify_telemt_generation(self, expected_image: str) -> None:
+        actual_image = self._inspect_telemt_image()
+        if actual_image != expected_image:
+            raise UpdateError("Telemt image readback did not match the selected generation")
+        deadline = time.monotonic() + self.health_timeout
+        status = ""
+        while True:
+            status = self.runner(
+                ["docker", "inspect", "--format", "{{.State.Health.Status}}", self.telemt_container],
+                timeout=30,
+            ).strip()
+            if status == "healthy":
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(1, remaining))
+        raise UpdateError(f"Telemt health did not become healthy: {status or 'unknown'}")
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:

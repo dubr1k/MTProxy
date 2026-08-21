@@ -18,6 +18,8 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - Neutral product descriptions cover Telemt/MTProto, NaiveProxy/Caddy, Mieru/mita, panel, and fleet while preserving protocol-specific and migration-sensitive MTProxy identifiers.
 - NaiveProxy now requires explicit `NAIVE_PUBLIC_HOST`; the personal fallback was removed.
 - Documentation accurately describes persistent Telemt configuration and its authenticated private API.
+- The panel backend is composed from protocol- and responsibility-specific route modules while preserving `panel.app:create_app`, existing API paths, RBAC, security headers, and one-time reveal behavior. Audit reads now support bounded cursor pagination and actor/action/target filters.
+- Fleet v1 is Telemt-only; Mieru operations and Mieru capability advertisement were removed from its models, node execution path, and documentation.
 
 ### Fixed
 
@@ -26,6 +28,8 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 ### Security
 
 - Documented panel/RBAC, local managers, accounting, Mieru external-process, fleet mTLS, transactional host mutation, backup, and fail-closed boundaries.
+- Removed the former host/systemd MTProxy install and uninstall scripts; supported deployments now use the Compose/Telemt installer path.
+- Login attempts are atomically reserved in SQLite before Argon2 verification, each request can release only its own reservation after success, and password checks have bounded concurrency, preventing concurrent or cross-account batches from bypassing the configured rate limit.
 
 ### Validation status
 

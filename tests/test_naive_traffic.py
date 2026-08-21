@@ -652,17 +652,15 @@ def test_counter_contract_includes_exact_decimal_strings(tmp_path):
 def test_panel_naive_overview_sums_decimal_strings_exactly_above_javascript_safe_integer():
     """Catch routing exact decimal accounting through JavaScript Number during aggregation."""
     script = """
-const fs = require('fs'), vm = require('vm');
-const sandbox = {
-  document: {cookie: '', querySelector: () => null, querySelectorAll: () => []},
-  location: {protocol: 'https:'}, setTimeout: () => {}, console
-};
-vm.createContext(sandbox);
-vm.runInContext(fs.readFileSync('panel/static/app.js', 'utf8'), sandbox);
-console.log(String(sandbox.sumNaiveTraffic([
-  {total_bytes_decimal: '9007199254740993'},
-  {total_bytes_decimal: '7'}
-])));
+const fs = require('fs');
+const source = fs.readFileSync('panel/static/js/common.js', 'utf8');
+const url = `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+import(url).then(({sumNaiveTraffic}) => {
+  console.log(String(sumNaiveTraffic([
+    {total_bytes_decimal: '9007199254740993'},
+    {total_bytes_decimal: '7'}
+  ])));
+});
 """
     result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 

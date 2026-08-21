@@ -142,8 +142,8 @@ python -m panel.cli --database /var/lib/mtproxy-panel/panel.sqlite3 \
 
 - CSR transfer/approval manual;
 - rate limiter per-process и сбрасывается при restart;
-- allowlisted только inventory, enable, disable, limit updates, quota reset и bounded Mieru lifecycle/inspect;
-- create/delete/rotate/reveal и secret-bearing apply исключены;
+- allowlisted только Telemt inventory refresh, enable, disable, limit updates и quota reset;
+- Mieru operations, create/delete/rotate/reveal и secret-bearing apply не объявляются и отклоняются;
 - web registry operation не заменяет PKI enrollment;
 - production ingress/enrollment end-to-end пока не заявлен как completed gate.
 

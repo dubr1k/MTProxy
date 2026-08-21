@@ -106,6 +106,18 @@
       <div class="form-error" id="mieru-error" role="alert"></div><footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-mieru" type="button" disabled>Создать</button></footer>
     </form>
   </dialog>
+  <dialog id="mieru-quota-modal" class="sheet">
+    <form method="dialog" id="mieru-quota-form">
+      <div class="modal-head"><div><span class="eyebrow">MIERU V3.35</span><h2 id="mieru-quota-title">Rolling-квоты</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
+      <input id="mieru-quota-user" type="hidden">
+      <p class="modal-copy">Квоты проверяются при открытии сессии и остаются approximate admission limit, а не hard cap. Можно задать до 16 окон; удалите все строки, чтобы выдать безлимитный доступ.</p>
+      <div id="mieru-quota-rows" class="quota-rows"></div>
+      <button class="secondary quota-add" id="add-mieru-quota" type="button">Добавить окно квоты</button>
+      <div class="form-error" id="mieru-quota-error" role="alert"></div>
+      <footer><button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="save-mieru-quota" type="button">Сохранить квоту</button></footer>
+    </form>
+  </dialog>
+
 
   <dialog id="fleet-modal" class="sheet">
     <form method="dialog" id="fleet-form">
@@ -175,6 +187,6 @@
   </dialog>
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>

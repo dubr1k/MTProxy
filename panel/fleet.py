@@ -19,18 +19,13 @@ USER_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$")
 REVISION_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 FORBIDDEN_KEYS = {"secret", "password", "token", "authorization", "link", "links", "proxy_url", "api_token", "credential"}
-INVENTORY_KEYS = {"agent_version", "telemt_version", "mieru_version", "region", "hostname", "platform", "capabilities"}
+INVENTORY_KEYS = {"agent_version", "telemt_version", "region", "hostname", "platform", "capabilities"}
 OPERATIONS = {
     "telemt.inventory.refresh",
     "telemt.user.enable",
     "telemt.user.disable",
     "telemt.user.update_limits",
     "telemt.user.reset_quota",
-    "mieru.inspect",
-    "mieru.metrics",
-    "mieru.lifecycle.start",
-    "mieru.lifecycle.stop",
-    "mieru.lifecycle.restart",
 }
 LIMIT_FIELDS = {
     "data_quota_bytes": (1, 2**63 - 1),
@@ -89,86 +84,95 @@ def validate_inventory(value: Any) -> dict:
 
 def validate_payload(operation: str, payload: Any) -> dict:
     _walk_secret_free(payload, "payload")
+    if operation not in OPERATIONS:
+        raise ProtocolError("operation is not allowlisted")
     if not isinstance(payload, dict):
         raise ProtocolError("payload must be an object")
-    if operation.startswith("mieru."):
-        if payload:
-            raise ProtocolError("payload must be empty")
-        return payload
     if operation == "telemt.inventory.refresh":
         if payload:
             raise ProtocolError("payload must be empty")
         return payload
-    allowed = {"username"} | (set(LIMIT_FIELDS) if operation == "telemt.user.update_limits" else set())
+    allowed = {"username"} | (
+        set(LIMIT_FIELDS) if operation == "telemt.user.update_limits" else set()
+    )
     if set(payload) - allowed or set(payload) < {"username"}:
         raise ProtocolError("payload fields are invalid")
-    if not isinstance(payload["username"], str) or not USER_RE.fullmatch(payload["username"]):
+    if not isinstance(payload["username"], str) or not USER_RE.fullmatch(
+        payload["username"]
+    ):
         raise ProtocolError("payload username is invalid")
     if operation == "telemt.user.update_limits":
         if set(payload) == {"username"}:
             raise ProtocolError("payload requires at least one limit")
         for key in set(payload) - {"username"}:
             value = payload[key]
-            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not LIMIT_FIELDS[key][0] <= value <= LIMIT_FIELDS[key][1]):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not LIMIT_FIELDS[key][0] <= value <= LIMIT_FIELDS[key][1]
+            ):
                 raise ProtocolError(f"payload {key} is invalid")
     return payload
 
 
-def validate_result(value: Any, operation: str | None = None, status: str | None = None) -> dict:
+def validate_result(
+    value: Any,
+    operation: str | None = None,
+    status: str | None = None,
+) -> dict:
     _walk_secret_free(value, "result")
+    if operation is not None and operation not in OPERATIONS:
+        raise ProtocolError("operation is not allowlisted")
     if not isinstance(value, dict):
         raise ProtocolError("result must be an object")
-    allowed = {"username", "enabled", "used_bytes", "telemt_revision", "inventory", "message",
-               "mieru_status", "mieru_ready", "mieru_revision", "metrics_status", "metrics_stale",
-               "metrics_capability", "metrics_reason"}
+    allowed = {
+        "username",
+        "enabled",
+        "used_bytes",
+        "telemt_revision",
+        "inventory",
+        "message",
+    }
     if set(value) - allowed:
         raise ProtocolError("result contains unsupported fields")
-    if "username" in value and (not isinstance(value["username"], str) or not USER_RE.fullmatch(value["username"])):
+    if "username" in value and (
+        not isinstance(value["username"], str)
+        or not USER_RE.fullmatch(value["username"])
+    ):
         raise ProtocolError("result username is invalid")
     if "enabled" in value and not isinstance(value["enabled"], bool):
         raise ProtocolError("result enabled is invalid")
-    if "used_bytes" in value and (isinstance(value["used_bytes"], bool) or not isinstance(value["used_bytes"], int) or value["used_bytes"] < 0):
+    if "used_bytes" in value and (
+        isinstance(value["used_bytes"], bool)
+        or not isinstance(value["used_bytes"], int)
+        or value["used_bytes"] < 0
+    ):
         raise ProtocolError("result used_bytes is invalid")
-    if "telemt_revision" in value and (not isinstance(value["telemt_revision"], str) or not REVISION_RE.fullmatch(value["telemt_revision"])):
+    if "telemt_revision" in value and (
+        not isinstance(value["telemt_revision"], str)
+        or not REVISION_RE.fullmatch(value["telemt_revision"])
+    ):
         raise ProtocolError("result telemt_revision is invalid")
     if "message" in value and value["message"] not in {
         "outcome requires Telemt reconciliation",
-        "outcome requires Mieru reconciliation",
         "command rejected (ProtocolError)",
-        "command rejected (ValueError)", "command rejected (ExecutorError)",
+        "command rejected (ValueError)",
+        "command rejected (ExecutorError)",
     }:
         raise ProtocolError("result message is invalid")
-    if "mieru_status" in value and value["mieru_status"] not in {"running", "idle", "stopped", "starting", "stopping"}:
-        raise ProtocolError("result Mieru status is invalid")
-    if "mieru_ready" in value and not isinstance(value["mieru_ready"], bool):
-        raise ProtocolError("result Mieru readiness is invalid")
-    if "mieru_revision" in value and (not isinstance(value["mieru_revision"], str) or not REVISION_RE.fullmatch(value["mieru_revision"])):
-        raise ProtocolError("result Mieru revision is invalid")
-    if "metrics_status" in value and value["metrics_status"] not in {"ready", "error"}:
-        raise ProtocolError("result metrics status is invalid")
-    if "metrics_stale" in value and not isinstance(value["metrics_stale"], bool):
-        raise ProtocolError("result metrics stale flag is invalid")
-    if "metrics_capability" in value and value["metrics_capability"] != "unavailable":
-        raise ProtocolError("result metrics capability is invalid")
-    if "metrics_reason" in value and value["metrics_reason"] != "typed_histories_unavailable":
-        raise ProtocolError("result metrics reason is invalid")
     if "inventory" in value:
         validate_inventory(value["inventory"])
     if status in {"failed", "indeterminate"} and set(value) != {"message"}:
         raise ProtocolError("failure result is invalid")
     if status == "succeeded" and operation:
-        if operation.startswith("mieru."):
-            required = (
-                {"metrics_status", "metrics_stale", "metrics_capability", "metrics_reason"}
-                if operation == "mieru.metrics"
-                else {"mieru_status", "mieru_ready", "mieru_revision"}
-            )
-            if set(value) != required:
-                raise ProtocolError("Mieru result is invalid")
-        elif operation == "telemt.inventory.refresh":
+        if operation == "telemt.inventory.refresh":
             if set(value) != {"inventory", "telemt_revision"}:
                 raise ProtocolError("inventory result is invalid")
-        elif not {"username", "telemt_revision"} <= set(value) or "inventory" in value or "message" in value:
+        elif (
+            not {"username", "telemt_revision"} <= set(value)
+            or "inventory" in value
+            or "message" in value
+        ):
             raise ProtocolError("user operation result is invalid")
     return value
 
@@ -334,7 +338,28 @@ class FleetStore:
     @staticmethod
     def _node(row) -> dict:
         value = dict(row)
-        value["inventory"] = json.loads(value.pop("inventory_json"))
+        raw_inventory = json.loads(value.pop("inventory_json"))
+        inventory = (
+            {
+                key: child
+                for key, child in raw_inventory.items()
+                if key in INVENTORY_KEYS
+            }
+            if isinstance(raw_inventory, dict)
+            else {}
+        )
+        if "capabilities" in inventory:
+            capabilities = inventory["capabilities"]
+            inventory["capabilities"] = (
+                [
+                    operation
+                    for operation in capabilities
+                    if operation in OPERATIONS
+                ]
+                if isinstance(capabilities, list)
+                else []
+            )
+        value["inventory"] = inventory
         return value
 
     def enqueue(self, node_id: str, idempotency_key: str, operation: str, payload: dict, expected_revision: str,
@@ -445,16 +470,52 @@ class FleetStore:
         now = int(time.time())
         with self._lock, self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            node = db.execute("SELECT last_result_sequence FROM fleet_nodes WHERE node_id=?", (node_id,)).fetchone()
+            node = db.execute(
+                "SELECT last_result_sequence FROM fleet_nodes WHERE node_id=?",
+                (node_id,),
+            ).fetchone()
             if not node:
                 raise KeyError(node_id)
-            row = db.execute("""SELECT * FROM fleet_commands WHERE node_id=? AND sequence=?
-                AND status IN ('queued','dispatched')""", (node_id, node["last_result_sequence"] + 1)).fetchone()
-            if not row:
-                return None
-            db.execute("UPDATE fleet_commands SET status='dispatched',dispatched_at=COALESCE(dispatched_at,?) WHERE command_id=?",
-                       (now, row["command_id"]))
-            return self._command(db.execute("SELECT * FROM fleet_commands WHERE command_id=?", (row["command_id"],)).fetchone())
+            last_result_sequence = node["last_result_sequence"]
+            while True:
+                row = db.execute(
+                    """SELECT * FROM fleet_commands WHERE node_id=? AND sequence=?
+                    AND status IN ('queued','dispatched')""",
+                    (node_id, last_result_sequence + 1),
+                ).fetchone()
+                if not row:
+                    return None
+                if row["operation"] in OPERATIONS:
+                    db.execute(
+                        """UPDATE fleet_commands
+                        SET status='dispatched',dispatched_at=COALESCE(dispatched_at,?)
+                        WHERE command_id=?""",
+                        (now, row["command_id"]),
+                    )
+                    return self._command(
+                        db.execute(
+                            "SELECT * FROM fleet_commands WHERE command_id=?",
+                            (row["command_id"],),
+                        ).fetchone()
+                    )
+                last_result_sequence = row["sequence"]
+                db.execute(
+                    """UPDATE fleet_commands
+                    SET status='failed',result_json=?,completed_at=?
+                    WHERE command_id=?""",
+                    (
+                        _canonical(
+                            {"message": "command rejected (ProtocolError)"}
+                        ),
+                        now,
+                        row["command_id"],
+                    ),
+                )
+                db.execute(
+                    """UPDATE fleet_nodes
+                    SET last_result_sequence=?,updated_at=? WHERE node_id=?""",
+                    (last_result_sequence, now, node_id),
+                )
 
     @staticmethod
     def _command(row) -> dict:

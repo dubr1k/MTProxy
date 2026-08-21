@@ -46,3 +46,47 @@ async def test_viewer_can_read_secret_free_audit(client, login_user):
     response = await client.get("/api/audit")
     assert response.status_code == 200
     assert "secret" not in str(response.json()).lower()
+
+
+async def test_audit_cursor_and_filters_are_backward_compatible(client, login_user):
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+    for username in ("alice", "bob", "carol"):
+        response = await client.post(
+            "/api/users",
+            json={"username": username},
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert response.status_code == 201
+
+    first = (
+        await client.get(
+            "/api/audit",
+            params={"limit": 2, "actor": "OWNER", "action": "user.create"},
+        )
+    ).json()
+    assert [item["target"] for item in first["items"]] == ["carol", "bob"]
+    assert first["next_cursor"] == first["items"][-1]["id"]
+
+    second = (
+        await client.get(
+            "/api/audit",
+            params={
+                "limit": 2,
+                "before_id": first["next_cursor"],
+                "actor": "owner",
+                "action": "user.create",
+            },
+        )
+    ).json()
+    assert [item["target"] for item in second["items"]] == ["alice"]
+    assert "next_cursor" not in second
+
+    targeted = (
+        await client.get(
+            "/api/audit",
+            params={"target": "alice", "action": "user.create"},
+        )
+    ).json()
+    assert len(targeted["items"]) == 1
+    assert targeted["items"][0]["actor_username"] == "owner"

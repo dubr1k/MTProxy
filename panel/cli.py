@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from .agent_transport import CertificateAuthority
-from .app import Settings
+from .settings import Settings
 from .fleet import FleetStore
 from .store import Store
 

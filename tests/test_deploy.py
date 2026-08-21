@@ -14,42 +14,42 @@ CLI = ROOT / "scripts" / "mtproxy-deploy"
 class DeployCliTests(unittest.TestCase):
     def test_naive_quota_controls_are_present_in_static_panel_contract(self):
         html = (ROOT / "panel/static/index.html").read_text()
-        javascript = (ROOT / "panel/static/app.js").read_text()
+        javascript = (ROOT / "panel/static/js/naive.js").read_text()
         self.assertIn('id="naive-quota-modal"', html)
         self.assertIn('id="naive-quota-mib"', html)
         self.assertIn('data-naive-action="quota"', javascript)
         self.assertIn("/api/naive/users/${encodeURIComponent(username)}/quota", javascript)
-        self.assertIn("quota_bytes: quota_bytes", javascript)
-        create = javascript.split("document.querySelector('#create-naive')", 1)[1].split(
-            "document.querySelector('#save-naive-quota')", 1
-        )[0]
-        self.assertIn("reportValidity()", create)
-        # Access data must be in hand before the create dialog closes, so a failed
-        # reveal still reports into a form the operator can still see.
-        self.assertLess(create.index("/api/reveal/"), create.index("#naive-modal').close()"))
+        self.assertIn('quota_bytes: naiveQuotaBytes(context, "#naive-quota-mib")', javascript)
+        self.assertIn("reportValidity()", javascript)
+        # A one-time reveal is fetched before closing the creation dialog so an
+        # error remains visible to the operator in that dialog.
+        self.assertLess(
+            javascript.index("const access = await api(`/api/reveal/"),
+            javascript.index('query("#naive-modal", root).close()'),
+        )
 
     def test_mieru_create_sends_no_quota_instead_of_a_zeroed_one(self):
-        javascript = (ROOT / "panel/static/app.js").read_text()
+        javascript = (ROOT / "panel/static/js/mieru.js").read_text()
         html = (ROOT / "panel/static/index.html").read_text()
         # Empty fields mean unlimited: the manager stores an empty quota list,
         # while a zeroed quota is rejected as invalid.
-        self.assertIn("function mieruQuotas()", javascript)
-        self.assertIn("if(!days&&!mib)return []", javascript)
-        self.assertIn("quotas,", javascript)
-        self.assertNotIn("quotas:[{days,megabytes}]", javascript)
+        self.assertIn("function createQuotas(context)", javascript)
+        self.assertIn('if (!days && !megabytes) return [];', javascript)
+        self.assertIn("quotas: createQuotas(context)", javascript)
+        self.assertNotIn("quotas: [{ days, megabytes }]", javascript)
         self.assertIn("безлимитный доступ", html)
 
     def test_panel_renders_validation_errors_instead_of_object_placeholders(self):
-        javascript = (ROOT / "panel/static/app.js").read_text()
-        self.assertIn("function problemText(body)", javascript)
-        self.assertIn("Array.isArray(detail)", javascript)
+        javascript = (ROOT / "panel/static/js/api.js").read_text()
+        self.assertIn("export function problemText(body)", javascript)
+        self.assertIn("Array.isArray(body.detail)", javascript)
         self.assertIn("problemText(await response.json())", javascript)
 
     def test_versions_card_explains_an_empty_catalog_instead_of_an_empty_picker(self):
-        javascript = (ROOT / "panel/static/app.js").read_text()
+        javascript = (ROOT / "panel/static/js/management.js").read_text()
         # The installed version is never an option, so an up-to-date host would
         # otherwise render a picker with nothing in it.
-        self.assertIn("entry.version!==current", javascript)
+        self.assertIn("entry.version !== current", javascript)
         self.assertIn("Обновлений не обнаружено", javascript)
         self.assertIn("в каталоге нет версий для этого компонента", javascript)
 

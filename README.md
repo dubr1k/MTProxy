@@ -798,7 +798,7 @@ sudo systemctl enable --now mtproxy-fleet-ingress
 
 Служба сама staging-копирует сертификат и закрытый ключ в защищённый runtime-каталог; исходная закрытая ветка Certbot остаётся недоступной панели. Проверьте `systemctl status mtproxy-fleet-ingress` и mTLS-подключение.
 
-Разрешённые операции ограничены инвентаризацией, включением, отключением, изменением лимитов, сбросом квоты и ограниченным Mieru inspect/lifecycle. Удалённые create/rotate/reveal и передача секретной конфигурации запрещены до появления защищённого зашифрованного payload-слоя.
+Fleet v1 работает только с Telemt: разрешены inventory refresh, enable, disable, изменение лимитов и сброс квоты. Mieru operations, удалённые create/delete/rotate/reveal и передача secret-bearing configuration apply отклоняются.
 
 Для ротации сертификата сначала создайте и привяжите новый сертификат, замените его на узле, подтвердите `connected` и только затем отзовите старый serial:
 

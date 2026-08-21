@@ -55,13 +55,15 @@ async def test_sidebar_counters_are_filled_by_the_overview_not_by_visiting_a_sec
     nodes = await client.get("/api/fleet/nodes")
     assert nodes.status_code == 200 and nodes.json()["items"] == []
 
-    js = (await client.get("/static/app.js")).text
+    entry = (await client.get("/static/app.js")).text
+    dashboard = (await client.get("/static/js/dashboard.js")).text
     # The overview holds every credential total already, so the sidebar is
     # painted from that one snapshot instead of keeping a dash until the
     # operator opens each section.
-    assert "paintNavCounts(data,nodes)" in js and "async function fleetCount()" in js
+    assert entry.strip() == 'import { boot } from "/static/js/main.js";\n\nboot();'
+    assert "paintNavCounts(context, data, nodes)" in dashboard and "async function fleetCount(context)" in dashboard
     for badge in ("#mieru-count", "#naive-count", "#fleet-count"):
-        assert badge in js
+        assert badge in dashboard
 
 async def test_dashboard_summarizes_both_protocols_without_naive_traffic_invention(
     client, login_user, telemt, naive,
@@ -272,6 +274,7 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert "CONTROL PANEL" in login_page.text
     assert "CONTROL " + "PLANE" not in login_page.text
     assert "mtproxy" not in login_page.text.lower()
+    assert '<script type="module" src="/static/app.js"></script>' in login_page.text
     await login_user(client)
     page = await client.get("/")
     assert page.status_code == 200
@@ -290,8 +293,14 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert "@media(max-width:1040px)" in css.text
     assert "@media(max-width:900px)" in css.text
     assert ".row-actions{display:flex;justify-content:flex-end;gap:5px;flex-wrap:wrap}" in css.text
-    js = (await client.get("/static/app.js")).text
-    assert "function proxyLink" in js and "navigationGeneration" in js
+    entry = (await client.get("/static/app.js")).text
+    modules = {
+        name: (await client.get(f"/static/js/{name}.js")).text
+        for name in ("access", "api", "audit", "common", "dashboard", "fleet", "main", "management", "mieru", "naive", "state", "users")
+    }
+    assert entry.strip() == 'import { boot } from "/static/js/main.js";\n\nboot();'
+    assert '<script type="module" src="/static/app.js"></script>' in text
+    assert "function proxyLink" in modules["access"] and "navigationGeneration" in modules["state"]
     # Every name field (MTProxy, Naive, Mieru, admin) takes the same characters,
     # underscore included.
     assert text.count(r'pattern="[A-Za-z0-9_.\-]+"') == 4
@@ -299,43 +308,55 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'id="create-user" type="button" disabled' in text
     assert 'data-view="naive"' in text and 'id="naive-modal"' in text
     assert 'id="naive-access-modal"' in text and 'id="copy-naive-url"' in text
-    assert "renderNaive" in js and "naiveAction" in js and "showNaiveAccess" in js
-    assert 'class="protocol-overview"' in js
+    assert "renderNaive" in modules["main"] and "handleNaiveAction" in modules["naive"] and "showNaiveAccess" in modules["access"]
+    assert 'class="protocol-overview"' in modules["dashboard"]
     assert (
         "↑ ${bytes(user.upload_bytes_decimal)} · ↓ ${bytes(user.download_bytes_decimal)} · "
-        "Σ ${bytes(user.total_bytes_decimal)}" in js
+        "Σ ${bytes(user.total_bytes_decimal)}" in modules["naive"]
     )
-    assert "BigInt(String(value??0))" in js
-    assert "Только закрытые CONNECT-туннели" in js
-    assert 'data-naive-action="reset-traffic"' in js
-    assert "Сбросить локальный счётчик?" in js
-    assert "NaiveProxy недоступен" in js
-    assert 'data-view="naive"' in text
-    assert "admin-form');if(!form.reportValidity()" in js
+    assert 'BigInt(String(value ?? 0))' in modules["common"]
+    assert "Только закрытые CONNECT-туннели" in modules["dashboard"]
+    assert 'data-naive-action="reset-traffic"' in modules["naive"]
+    assert "Сбросить локальный счётчик?" in modules["naive"]
+    assert "NaiveProxy недоступен" in modules["dashboard"]
+    assert "reportValidity()" in modules["management"]
     assert 'id="limits-modal"' in text and 'id="save-limits"' in text
-    assert "mt.runtime?.traffic_octets" in js
-    assert "user.quota_used_bytes" in js and "data-action=\"limits\"" in js
-    assert "/limits`" in js and "/reset-quota`" in js
-    assert "текущего runtime-поколения" in js
+    assert "mt.runtime?.traffic_octets" in modules["dashboard"]
+    assert "user.quota_used_bytes" in modules["users"] and 'data-user-action="limits"' in modules["users"]
+    assert "/limits`" in modules["users"] and "/reset-quota`" in modules["users"]
+    assert "текущего runtime-поколения" in modules["dashboard"]
     assert "Автоматического ежемесячного сброса нет" in text
     assert 'data-view="mieru"' in text and 'id="mieru-modal"' in text
     assert 'id="mieru-access-modal"' in text and 'id="mieru-qr-image"' in text
     assert 'id="copy-mieru-url"' in text and 'id="download-mieru-qr"' in text
-    assert "renderMieru" in js and "mieruAction" in js
-    assert "function syncMieruCreateButton" in js and "form.checkValidity()" in js
+    assert 'id="mieru-quota-modal"' in text and 'id="mieru-quota-rows"' in text
+    assert "renderMieru" in modules["main"] and "handleMieruAction" in modules["mieru"]
+    assert "syncMieruCreateButton" in modules["mieru"] and "form.checkValidity()" in modules["mieru"]
     assert '<button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-mieru" type="button" disabled>Создать</button>' in text
     assert ".cell b,.cell small{display:block}" in css.text
-    assert "showMieruAccess" in js and "qrSource(data.qr)" in js
-    assert "Новая ссылка + QR" in js
-    assert "rolling application-byte admission quota" in js
-    assert "Открыть Mieru" not in js
-    assert 'data-quick="mieru-users"' not in js
-    assert 'class="quick-action mieru-quick-action"' not in js
+    assert "showMieruAccess" in modules["access"] and "qrSource(data.qr)" in modules["access"]
+    assert "Новая ссылка + QR" in modules["mieru"]
+    assert "rolling application-byte admission quota" in modules["mieru"]
+    assert "/quotas" in modules["mieru"] and "expected_revision: context.state.mieruService.revision" in modules["mieru"]
+    assert "Открыть Mieru" not in modules["mieru"]
+    assert 'data-quick="mieru-users"' not in modules["mieru"]
+    assert 'class="quick-action mieru-quick-action"' not in modules["mieru"]
     assert ".quick-action.mieru-quick-action{position:relative;top:12px}" not in css.text
     assert 'id="fleet-modal"' in text and 'id="create-fleet-node"' in text
     assert 'id="new-node-id"' in text and 'id="new-node-name"' in text
-    assert "openFleetModal" in js and "createFleetNode" in js
-    assert "name==='fleet'&&state.me?.role==='owner'" in js
+    assert "FLEET_OPERATIONS" in modules["fleet"] and "fleet-command-form" in modules["fleet"]
+    assert "last_seen_at" in modules["fleet"] and "fleetCommands" in modules["state"]
+    assert "next_cursor" in modules["audit"] and "Детали и IP" in modules["audit"]
+    assert "actor" in modules["audit"] and "before_id" in modules["audit"]
+    for operation in (
+        "telemt.inventory.refresh",
+        "telemt.user.enable",
+        "telemt.user.disable",
+        "telemt.user.update_limits",
+        "telemt.user.reset_quota",
+    ):
+        assert operation in modules["fleet"]
+    assert "mieru." not in modules["fleet"]
 
 
 async def test_telemt_adapter_sends_auth_and_maps_envelope():
@@ -524,8 +545,8 @@ async def test_versions_panel_is_owner_only_and_has_runtime_update_contract(clie
     page = await client.get("/")
     assert 'data-view="versions"' in page.text
     assert 'class="nav-item owner-only" data-view="versions" hidden' in page.text
-    js = (await client.get("/static/app.js")).text
-    assert "renderVersions" in js and "versionAction" in js
-    assert "/api/versions" in js and "/update`" in js
-    assert "expected_current" in js
+    management = (await client.get("/static/js/management.js")).text
+    assert "renderVersions" in management and "versionAction" in management
+    assert "/api/versions" in management and "/update`" in management
+    assert "expected_current" in management
     assert ".version-grid" in (await client.get("/static/style.css")).text

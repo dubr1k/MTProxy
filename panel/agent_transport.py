@@ -223,14 +223,21 @@ class AgentTransportServer:
             return await self._respond(writer, 403, {"detail": "certificate not authorized"})
         if not self._rate_ok(identity[0]):
             return await self._respond(writer, 429, {"detail": "rate limit exceeded"})
-        if not self.store.authenticate_certificate(node_id, identity[1], identity[2], identity[0]):
+        authenticated = await asyncio.to_thread(
+            self.store.authenticate_certificate,
+            node_id,
+            identity[1],
+            identity[2],
+            identity[0],
+        )
+        if not authenticated:
             return await self._respond(writer, 403, {"detail": "certificate not authorized"})
         if method == "GET":
             deadline = time.monotonic() + self.poll_seconds
-            command = self.store.poll_next(node_id)
+            command = await asyncio.to_thread(self.store.poll_next, node_id)
             while command is None and time.monotonic() < deadline:
                 await asyncio.sleep(min(0.1, self.poll_seconds))
-                command = self.store.poll_next(node_id)
+                command = await asyncio.to_thread(self.store.poll_next, node_id)
             envelope = None if command is None else TypedCommand.parse({key: command[key] for key in (
                 "protocol_version", "command_id", "node_id", "sequence", "idempotency_key", "operation",
                 "expected_telemt_revision", "actor", "expires_at", "payload_sha256", "payload")}).as_dict()
@@ -241,7 +248,14 @@ class AgentTransportServer:
             value = json.loads(body)
             if not isinstance(value, dict) or set(value) != {"sequence", "status", "result"}:
                 raise ValueError
-            result = self.store.record_result(node_id, match.group(2), value["sequence"], value["status"], value["result"])
+            result = await asyncio.to_thread(
+                self.store.record_result,
+                node_id,
+                match.group(2),
+                value["sequence"],
+                value["status"],
+                value["result"],
+            )
         except (ValueError, ProtocolError):
             return await self._respond(writer, 422, {"detail": "invalid result"})
         except KeyError:

@@ -10,8 +10,7 @@ import pytest
 
 from panel.fleet import CommandConflict, FleetStore, ProtocolError, TypedCommand
 from panel.agent_service import build_executor
-from panel.mieru import MieruError
-from panel.node_agent import AgentJournal, ExecutionIndeterminate, LocalMieruExecutor, LocalTelemtExecutor, NodeAgent, RoutingExecutor
+from panel.node_agent import AgentJournal, ExecutionIndeterminate, LocalTelemtExecutor, NodeAgent, RoutingExecutor
 
 
 pytestmark = pytest.mark.anyio
@@ -42,95 +41,115 @@ def test_typed_protocol_rejects_generic_commands_and_unknown_payload_fields():
         TypedCommand.parse({**command().as_dict(), "node_id": "../../etc"})
 
 
-def test_mieru_fleet_boundary_allows_only_secret_free_inspection_and_lifecycle():
-    inspect = command(operation="mieru.inspect", payload={})
-    assert inspect.operation == "mieru.inspect"
-    restart = command(operation="mieru.lifecycle.restart", payload={})
-    assert restart.payload == {}
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "mieru.inspect",
+        "mieru.metrics",
+        "mieru.lifecycle.start",
+        "mieru.lifecycle.stop",
+        "mieru.lifecycle.restart",
+    ],
+)
+def test_fleet_v1_rejects_mieru_operations(operation):
     with pytest.raises(ProtocolError, match="operation is not allowlisted"):
-        command(operation="mieru.config.apply", payload={"config": {"portBindings": []}})
-    with pytest.raises(ProtocolError, match="operation"):
-        command(operation="mieru.user.rotate", payload={"username": "alice"})
+        command(operation=operation, payload={})
 
 
-def test_fleet_inventory_accepts_mieru_version_and_capabilities(tmp_path):
+def test_fleet_v1_rejects_mieru_inventory_advertisement(tmp_path):
     store = FleetStore(tmp_path / "fleet.sqlite3")
-    node = store.register_node("edge-01", "edge", {
-        "mieru_version": "3.35.0", "capabilities": ["mieru.inspect", "mieru.metrics", "mieru.lifecycle.restart"],
-    })
-    assert node["inventory"]["mieru_version"] == "3.35.0"
+    with pytest.raises(ProtocolError, match="unsupported fields"):
+        store.register_node(
+            "edge-01",
+            "edge",
+            {"mieru_version": "3.35.0"},
+        )
+    with pytest.raises(ProtocolError, match="capabilities"):
+        store.register_node(
+            "edge-01",
+            "edge",
+            {"capabilities": ["mieru.inspect"]},
+        )
 
 
-async def test_node_agent_routes_typed_mieru_operations_without_generic_paths():
-    class Client:
-        async def health(self): return {"status": "running", "ready": True, "revision": "mrev-1"}
-        async def metrics(self):
-            return {
-                "status": "error",
-                "stale": True,
-                "users": [],
-                "capability": "unavailable",
-                "reason": "typed_histories_unavailable",
-            }
-        async def lifecycle(self, action):
-            assert action == "restart"
-            return {"status": "running", "ready": True, "revision": "mrev-1"}
-
-    executor = RoutingExecutor(telemt=None, mieru=LocalMieruExecutor(Client()))
-    inspected = await executor.execute(command(operation="mieru.inspect", payload={}))
-    assert inspected == {"mieru_status": "running", "mieru_ready": True, "mieru_revision": "mrev-1"}
-    restarted = await executor.execute(command(operation="mieru.lifecycle.restart", payload={}))
-    assert restarted["mieru_status"] == "running"
-    metrics = await executor.execute(command(operation="mieru.metrics", payload={}))
-    assert metrics == {
-        "metrics_status": "error",
-        "metrics_stale": True,
-        "metrics_capability": "unavailable",
-        "metrics_reason": "typed_histories_unavailable",
+def test_fleet_v1_hides_and_retires_legacy_mieru_state(tmp_path):
+    store = FleetStore(tmp_path / "fleet.sqlite3")
+    store.register_node(
+        "edge-01",
+        "edge",
+        {
+            "telemt_version": "3.4.25",
+            "capabilities": ["telemt.inventory.refresh"],
+        },
+    )
+    with store.connect() as db:
+        db.execute(
+            "UPDATE fleet_nodes SET inventory_json=? WHERE node_id=?",
+            (
+                json.dumps(
+                    {
+                        "telemt_version": "3.4.25",
+                        "mieru_version": "3.35.0",
+                        "capabilities": [
+                            "telemt.inventory.refresh",
+                            "mieru.inspect",
+                        ],
+                    }
+                ),
+                "edge-01",
+            ),
+        )
+    inventory = store.node("edge-01")["inventory"]
+    assert inventory == {
+        "telemt_version": "3.4.25",
+        "capabilities": ["telemt.inventory.refresh"],
     }
 
-
-async def test_uncertain_mieru_lifecycle_is_durable_indeterminate(tmp_path):
-    class Client:
-        async def lifecycle(self, _action):
-            raise MieruError("manager unavailable")
-
-    agent = NodeAgent(
+    queued = store.enqueue(
         "edge-01",
-        AgentJournal(tmp_path / "mieru-agent.sqlite3"),
-        LocalMieruExecutor(Client()),
+        "legacy-mieru-1",
+        "telemt.inventory.refresh",
+        {},
+        "rev-1",
     )
-    result = await agent.apply(
-        command(operation="mieru.lifecycle.restart", payload={})
-    )
-    assert result["status"] == "indeterminate"
-    assert result["result"] == {"message": "outcome requires Mieru reconciliation"}
+    with store.connect() as db:
+        db.execute(
+            "UPDATE fleet_commands SET operation='mieru.inspect' WHERE command_id=?",
+            (queued["command_id"],),
+        )
+    assert store.poll_next("edge-01") is None
+    retired = store.commands("edge-01")[0]
+    assert retired["status"] == "failed"
+    assert retired["result"] == {"message": "command rejected (ProtocolError)"}
 
 
-def test_agent_service_builds_optional_mieru_routing_from_uds_token_file(
-    tmp_path, monkeypatch
-):
-    token_file = tmp_path / "mieru-token"
-    token_file.write_text("m" * 32)
+def test_node_journal_does_not_retry_removed_mieru_outbox(tmp_path):
+    path = tmp_path / "agent.sqlite3"
+    journal = AgentJournal(path)
+    with journal.connect() as db:
+        db.execute(
+            """INSERT INTO agent_commands(
+                sequence,command_id,digest,status,result_json,started_at,
+                completed_at,uploaded_at,operation
+            ) VALUES(1,'legacy-mieru','digest','failed',?,1,1,NULL,'mieru.inspect')""",
+            (json.dumps({"message": "command rejected (ProtocolError)"}),),
+        )
+
+    reopened = AgentJournal(path)
+    assert reopened.pending_outbox() == []
+
+
+def test_agent_service_builds_telemt_only_executor(monkeypatch):
     monkeypatch.setenv("TELEMT_API_TOKEN", "Bearer local-only")
+    monkeypatch.delenv("TELEMT_API_TOKEN_FILE", raising=False)
     monkeypatch.setenv("MIERU_MANAGER_SOCKET", "/run/mieru-manager/manager.sock")
-    monkeypatch.setenv("MIERU_MANAGER_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("MIERU_MANAGER_TOKEN", "m" * 32)
 
     executor = build_executor()
 
     assert isinstance(executor, RoutingExecutor)
     assert isinstance(executor.telemt, LocalTelemtExecutor)
-    assert isinstance(executor.mieru, LocalMieruExecutor)
-    assert executor.mieru.client.socket_path == "/run/mieru-manager/manager.sock"
-    assert executor.mieru.client.token == "m" * 32
-
-
-def test_agent_service_rejects_partial_mieru_configuration(monkeypatch):
-    monkeypatch.setenv("TELEMT_API_TOKEN", "Bearer local-only")
-    monkeypatch.setenv("MIERU_MANAGER_TOKEN", "m" * 32)
-    monkeypatch.delenv("MIERU_MANAGER_SOCKET", raising=False)
-    with pytest.raises(ProtocolError, match="both socket and token"):
-        build_executor()
+    assert not hasattr(executor, "mieru")
 
 
 def test_fleet_store_assigns_monotonic_sequences_and_enforces_idempotency(tmp_path):
@@ -274,16 +293,6 @@ async def test_exclusive_startup_recovery_marks_crash_residue_without_reexecutio
     assert replay["status"] == "indeterminate"
 
 
-def test_exclusive_recovery_labels_mieru_crash_with_operation_specific_reconciliation(
-    tmp_path,
-):
-    journal = AgentJournal(tmp_path / "agent.sqlite3")
-    item = command(operation="mieru.lifecycle.restart", payload={})
-    journal.begin(item)
-    assert journal.recover_interrupted() == 1
-    assert journal.pending_outbox()[0]["result"] == {
-        "message": "outcome requires Mieru reconciliation"
-    }
 
 
 async def test_local_executor_is_loopback_only_and_sends_revision_precondition():
@@ -348,7 +357,7 @@ async def test_owner_fleet_api_queues_typed_command(client, login_user):
         "mieru.lifecycle.restart",
     ],
 )
-async def test_public_fleet_schema_accepts_advertised_secret_free_mieru_commands(
+async def test_public_fleet_schema_rejects_mieru_commands(
     client, login_user, operation
 ):
     await login_user(client)
@@ -370,7 +379,7 @@ async def test_public_fleet_schema_accepts_advertised_secret_free_mieru_commands
         },
         headers={"X-CSRF-Token": csrf},
     )
-    assert response.status_code == 201, response.text
+    assert response.status_code == 422
 
 
 

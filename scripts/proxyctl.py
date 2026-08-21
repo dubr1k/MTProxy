@@ -937,8 +937,8 @@ INSTALL_PHASES = {
     "rollback_sites", "rollback_project", "rollback_packages", "rollback_complete",
 }
 UNINSTALL_PHASES = {
-    "started", "compose_down", "packages_purged", "route_removed",
-    "sites_removing", "sites_removed", "project_cleaned",
+    "started", "compose_down", "data_purging", "data_purged", "packages_purged",
+    "route_removed", "sites_removing", "sites_removed", "project_cleaned",
 }
 
 
@@ -1278,7 +1278,13 @@ class RuntimeInstaller:
             "schema", "status", "phase", "plan", "owned_packages", "managed_files",
             "managed_hashes", "project_created",
         }
-        if frozenset(state) not in {frozenset(required), frozenset(required | {"rollback_error"})}:
+        keys = frozenset(state)
+        allowed_keys = {
+            frozenset(required),
+            frozenset(required | {"rollback_error"}),
+            frozenset(required | {"purge_data"}),
+        }
+        if keys not in allowed_keys:
             raise InstallerConflict("runtime manifest schema is invalid")
         if state.get("schema") != RUNTIME_STATE_SCHEMA:
             raise InstallerConflict("runtime manifest schema is invalid")
@@ -1291,6 +1297,15 @@ class RuntimeInstaller:
             raise InstallerConflict("runtime manifest phase is invalid")
         if status not in {"installing", "rollback_failed", "active", "uninstalling"}:
             raise InstallerConflict("runtime manifest status is invalid")
+        if status == "uninstalling":
+            if "purge_data" not in state:
+                # Before data preservation became the default, every interrupted uninstall
+                # had already committed to deleting volumes.
+                state["purge_data"] = True
+            elif not isinstance(state["purge_data"], bool):
+                raise InstallerConflict("runtime uninstall data policy is invalid")
+        elif "purge_data" in state:
+            raise InstallerConflict("runtime uninstall data policy is invalid")
         if state.get("plan") != self.plan.to_dict():
             raise InstallerConflict("runtime transaction belongs to another plan")
         packages = state.get("owned_packages")
@@ -1487,7 +1502,7 @@ class RuntimeInstaller:
             with _operation_lock(self.root):
                 operation()
 
-    def uninstall(self) -> None:
+    def uninstall(self, *, purge_data: bool = False) -> None:
         with _operation_lock(self.root):
             if not self.state_path.exists():
                 return
@@ -1496,13 +1511,24 @@ class RuntimeInstaller:
                 self._rollback_runtime(state)
                 return
             if state["status"] == "active":
+                state["purge_data"] = purge_data
                 self._checkpoint(state, status="uninstalling", phase="started")
+            elif state["purge_data"] != purge_data:
+                required_flag = "with --purge-data" if state["purge_data"] else "without --purge-data"
+                raise InstallerConflict(f"retry the interrupted uninstall {required_flag}")
             phase = state["phase"]
             if phase == "started":
-                self._compose("down", "--remove-orphans", "--volumes")
+                self._compose("down", "--remove-orphans")
                 self._checkpoint(state, status="uninstalling", phase="compose_down")
                 phase = "compose_down"
-            if phase == "compose_down":
+            if phase == "compose_down" and state["purge_data"]:
+                self._checkpoint(state, status="uninstalling", phase="data_purging")
+                phase = "data_purging"
+            if phase == "data_purging":
+                self._compose("down", "--remove-orphans", "--volumes")
+                self._checkpoint(state, status="uninstalling", phase="data_purged")
+                phase = "data_purged"
+            if phase in {"compose_down", "data_purged"}:
                 _uninstall_installation_unlocked(
                     root=self.root,
                     validate=lambda: self._run("nginx", "-t"),
@@ -1612,7 +1638,15 @@ def _parser() -> argparse.ArgumentParser:
     apply.add_argument("--route-file", required=True)
     apply.add_argument("--json", action="store_true")
     sub.add_parser("repair", help="validate and restart the complete owned runtime")
-    sub.add_parser("uninstall", help="remove the complete owned runtime, preserving credentials")
+    uninstall = sub.add_parser(
+        "uninstall",
+        help="remove the complete owned runtime, preserving credentials and named volumes",
+    )
+    uninstall.add_argument(
+        "--purge-data",
+        action="store_true",
+        help="also remove Compose named volumes (destructive; repeat when resuming)",
+    )
     return parser
 
 
@@ -1623,7 +1657,10 @@ def main(argv: list[str] | None = None) -> int:
             runtime_plan = _runtime_plan_from_state(args.root)
             if runtime_plan is not None:
                 manager = RuntimeInstaller(runtime_plan, root=args.root)
-                (manager.repair if args.command == "repair" else manager.uninstall)()
+                if args.command == "repair":
+                    manager.repair()
+                else:
+                    manager.uninstall(purge_data=args.purge_data)
             else:
                 function = repair_installation if args.command == "repair" else uninstall_installation
                 function(root=args.root)

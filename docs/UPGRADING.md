@@ -30,9 +30,9 @@ sudo systemctl daemon-reload
 
 Replace every example catalog entry with an operator-verified artifact. Telemt entries must be immutable image references (`@sha256:...`). NaiveProxy/Caddy and mita entries must be HTTPS artifacts with lowercase SHA-256. The catalog is an allowlist, not a discovery mechanism; the browser cannot extend it.
 
-Configure the deployment path and the complete Compose overlay list in `/etc/proxy-control/version-agent.env`. The agent writes only the generated `version-overrides/compose.versions.yaml`, configured binary targets, and its state/backup directory. It refuses symlink targets and invalid relative Compose paths.
+Configure the deployment path and the complete Compose overlay list in `/etc/proxy-control/version-agent.env`. The agent writes only the generated `version-overrides/compose.versions.yaml`, configured binary targets, and its state/backup directory. It refuses symlink targets and invalid relative Compose paths. When a configured container pins a host binary, the preflight Docker inspect is fail-closed: only Docker's exact `No such object` result permits the update; daemon, permission, timeout, and other uncertain inspect failures block it.
 
-Record the currently installed versions in `/var/lib/proxy-control/version-agent/state.json` before the first update. The UI sends `expected_current`; a mismatch returns `409` and prevents a stale browser tab from updating a changed runtime.
+Record the currently installed versions in `/var/lib/proxy-control/version-agent/state.json` before the first update. The UI sends `expected_current`; a mismatch returns `409` and prevents a stale browser tab from updating a changed runtime. A component marked `rollback_failed` remains blocked until an operator restores and verifies the complete generation, then reconciles the root-owned state.
 
 Enable and verify the agent without changing the running stack:
 
@@ -47,13 +47,13 @@ The panel Compose service must mount `/run/proxy-control` and set `VERSION_AGENT
 
 ### Telemt
 
-The agent pulls the selected immutable image, uses the full configured Compose model plus `version-overrides/compose.versions.yaml`, recreates only `mtproxy`, and waits for `proxy-control-mtproxy` to report `healthy`. A failed pull, start, or health check restores the previous override and starts the previous image. It never calls `down -v`.
+The agent reads back the current container image, pulls the selected immutable image, uses the full configured Compose model plus `version-overrides/compose.versions.yaml`, recreates only `mtproxy`, and verifies both the selected image reference and `healthy` status. A failed pull, start, image readback, or health check restores the previous override and starts the previous image. The rollback is successful only after the previous image reference and container health pass the same gates. It never calls `down -v`.
 
 ### NaiveProxy/Caddy and Mieru/mita
 
-The agent downloads at most 256 MiB from the HTTPS host recorded in the catalog, verifies SHA-256, stages the executable with mode `0755`, runs the configured checker, and atomically replaces the target. Caddy is additionally validated against its Caddyfile and module checker; Caddy is reloaded, while mita is restarted. `systemctl is-active` is required after the operation.
+The agent downloads at most 256 MiB from the HTTPS host recorded in the catalog, verifies SHA-256, stages the executable with mode `0755`, runs the configured checker, and atomically replaces the target. Caddy is additionally validated against its Caddyfile and module checker. The version pin is read back, the service is restarted, and `systemctl is-active` is required after the operation.
 
-Any failure restores the previous binary and repeats the service health action. State is written only after success. If rollback itself fails, stop and perform the documented full-generation restore; do not keep retrying the update endpoint.
+Any failure restores the previous binary and pin, verifies the restored binary hash and pin readback, repeats the configured checker and Caddyfile validation, restarts the service, and requires `systemctl is-active`. State is written as the new version only after success. A rollback that fails any restore, config/readback, restart, or health gate is persisted and returned as `rollback_failed`; do not retry the update endpoint until an operator has restored and verified the complete previous generation.
 
 ## Verification after any update
 
