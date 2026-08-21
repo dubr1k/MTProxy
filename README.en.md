@@ -996,9 +996,6 @@ git diff --check
 Detailed boundary guides: [documentation map](docs/README.md), [automated installation](INSTALL.en.md), [complete installer and auditor](INSTALLER_AUDITOR.md), [panel](PANEL.en.md), [MTProto behind Nginx](DOCKER_DEPLOYMENT.md), [Mieru](MIERU.en.md), [Mieru sharing](docs/MIERU_SHARING.en.md), [Fleet](FLEET.en.md), [operations](docs/OPERATIONS.en.md), [backup and restore](docs/BACKUP_RESTORE.en.md), [upgrades](docs/UPGRADING.md), [troubleshooting](docs/TROUBLESHOOTING.en.md), [accounting](docs/ACCOUNTING.md), and [validation](docs/VALIDATION.md).
 
 
-# Contributors
-
-- [@Baggrisha](https://github.com/Baggrisha) — control plane lifecycle hardening and operator UI.
 
 # Status and license
 
