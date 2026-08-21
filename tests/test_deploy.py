@@ -54,6 +54,20 @@ class DeployCliTests(unittest.TestCase):
         self.assertIn("Обновлений не обнаружено", javascript)
         self.assertIn("в каталоге нет версий для этого компонента", javascript)
 
+    def test_ci_installs_caddy_adapter_before_systemd_unit_verification(self):
+        workflow = (ROOT / ".github/workflows/test.yml").read_text()
+        unit = (ROOT / "deploy/caddy-naive.service").read_text()
+        self.assertIn("ExecStartPre=+/usr/local/libexec/caddy-naive-adapt", unit)
+        self.assertIn(
+            "sudo install -m 0755 scripts/caddy-naive-adapt "
+            "/usr/local/libexec/caddy-naive-adapt",
+            workflow,
+        )
+        self.assertLess(
+            workflow.index("/usr/local/libexec/caddy-naive-adapt"),
+            workflow.index("systemd-analyze verify deploy/*.service"),
+        )
+
     def test_caddy_naive_adapter_rewrites_only_private_https_listeners(self):
         helper = ROOT / "scripts/caddy-naive-adapt"
         self.assertTrue(os.access(helper, os.X_OK))

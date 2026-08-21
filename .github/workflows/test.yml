@@ -53,6 +53,7 @@ jobs:
           grep -Fq 'github.com/caddyserver/forwardproxy@caddy2=github.com/klzgrad/forwardproxy@d62c80d3dd2c706b6b87579844d2397bddd18317' docker/Dockerfile.caddy-naive
           sudo install -d /usr/local/libexec /opt/proxy-control/venv/bin /opt/mtproxy-agent/venv/bin /opt/mtproxy-panel/venv/bin
           sudo install -m 0755 /bin/true /usr/local/libexec/check-naive-caddy-build
+          sudo install -m 0755 scripts/caddy-naive-adapt /usr/local/libexec/caddy-naive-adapt
           sudo install -m 0755 /bin/true /usr/local/bin/caddy
           sudo install -m 0755 /bin/true /usr/bin/mita
           sudo install -m 0755 /bin/true /opt/proxy-control/venv/bin/python
