@@ -1,0 +1,14 @@
+{
+  "name": "mtproxy-respq-probe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "External TDLib MTProto acceptance probe",
+  "license": "MIT",
+  "engines": {
+    "node": "22.16.0"
+  },
+  "dependencies": {
+    "prebuilt-tdlib": "0.1008066.0",
+    "tdl": "8.1.0"
+  }
+}

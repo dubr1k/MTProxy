@@ -291,6 +291,18 @@ systemctl is-active nginx docker
 
 Файл `nginx-T.txt`, вывод `ss`, списки контейнеров и журналы могут раскрывать внутреннюю топологию. Не публикуйте их и не отправляйте в открытые задачи.
 
+## Сборка внешнего MTProto acceptance probe
+
+До создания плана из этого checkout соберите зафиксированный TDLib image и установите root-only wrapper:
+
+```bash
+sudo ./probe/install.sh
+```
+
+Установленный `/usr/local/libexec/mtproxy-respq-probe` принимает только `--domain DOMAIN --secrets-file PATH`. Он монтирует переданный root-owned private file read-only по фиксированному container path; каждая user entry внутри container преобразуется в Fake-TLS MTProto secret и проверяется через TDLib `addProxy` и `pingProxy`. `probe/Dockerfile` фиксирует base image по digest, а `probe/package-lock.json` фиксирует точное Node/TDLib dependency graph.
+
+Это намеренно вне installer runtime: installer передаёт путь, а не отдельные secrets. Secrets не появляются в argv installer или Docker, shell history, logs или safe status probe. У container read-only root filesystem, bounded `/tmp` tmpfs, нет capabilities и включён `no-new-privileges`; nonzero exit для любого secret блокирует acceptance.
+
 ## 2. План автоматической установки
 
 Используйте те же параметры, что и для будущей установки:

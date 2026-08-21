@@ -291,6 +291,18 @@ systemctl is-active nginx docker
 
 `nginx-T.txt`, listener output, container inventories, and logs can disclose internal topology. Do not publish or attach them to public issues.
 
+## Build the external MTProto acceptance probe
+
+Before creating the plan, build the pinned TDLib image and install its root-only wrapper from this checkout:
+
+```bash
+sudo ./probe/install.sh
+```
+
+The installed `/usr/local/libexec/mtproxy-respq-probe` accepts only `--domain DOMAIN --secrets-file PATH`. It mounts the supplied root-owned private file read-only at a fixed container path; each user entry is converted to its Fake-TLS MTProto secret in the container, then checked through TDLib `addProxy` and `pingProxy`. `probe/Dockerfile` pins the base image by digest and `probe/package-lock.json` locks the exact Node/TDLib dependency graph.
+
+This is intentionally outside installer runtime: the installer provides a path, not individual secrets. Secrets never appear in installer or Docker argv, shell history, logs, or safe probe status. The container has a read-only root filesystem, a bounded `/tmp` tmpfs, no capabilities, and `no-new-privileges`; a nonzero exit for any secret blocks acceptance.
+
 ## 2. Plan the automated installation
 
 Use the same parameters that will be used for installation:

@@ -24,6 +24,18 @@ The complete installer deploys Telemt/MTProxy and the panel. NaiveProxy, Mieru, 
 
 Disable CDN/proxying for the raw MTProto hostname. Unhandled AAAA, NAT mismatch, ambiguous maps, and port collisions are hard stops.
 
+## Build and install the external TDLib probe
+
+From the checked-out repository, build the pinned Docker image and install the root-only hook before planning:
+
+```bash
+sudo ./probe/install.sh
+```
+
+It installs `/usr/local/libexec/mtproxy-respq-probe` with mode `0750`. The hook accepts exactly `--domain DOMAIN --secrets-file PATH`; it validates both inputs, binds the file read-only at `/run/mtproxy/users.conf`, and asks TDLib to `addProxy` then `pingProxy` once for every configured secret. The image base is pinned by digest and its Node dependencies are locked in `probe/package-lock.json`.
+
+The installer supplies only the domain and secret-file path. Individual secrets never enter its argv, the Docker command argv, shell history, or probe output. The container has a read-only root filesystem, a dedicated tmpfs for TDLib state, dropped capabilities, and no-new-privileges. Its only success output is the verified-secret count; any failed secret makes the hook fail closed.
+
 ## 1. Read-only audit
 
 ```bash

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly IMAGE="mtproxy-respq-probe:1.0.0"
+readonly CONTAINER_SECRETS_FILE="/run/mtproxy/users.conf"
+
+usage() {
+    printf 'usage: %s --domain DOMAIN --secrets-file PATH\n' "${0##*/}" >&2
+    exit 2
+}
+
+fail() {
+    printf 'probe: %s\n' "$1" >&2
+    exit 1
+}
+
+[[ $# -eq 4 && $1 == "--domain" && $3 == "--secrets-file" ]] || usage
+[[ $(id -u) -eq 0 ]] || fail "must run as root"
+
+domain=$2
+secrets_file=$4
+[[ $domain =~ ^([[:alnum:]]([[:alnum:]-]{0,61}[[:alnum:]])?\.)+[[:alpha:]]{2,63}$ ]] || usage
+[[ $domain != *..* && ${#domain} -le 253 ]] || usage
+[[ $secrets_file == /* && -f $secrets_file && ! -L $secrets_file && -r $secrets_file ]] || usage
+
+owner=$(stat -c '%u' -- "$secrets_file")
+mode=$(stat -c '%a' -- "$secrets_file")
+(( owner == 0 && (8#$mode & 8#077) == 0 )) || fail "secrets file must be root-owned and private"
+
+exec docker run --rm --network host --read-only \
+    --tmpfs /tmp:rw,noexec,nosuid,nodev,size=32m \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --mount "type=bind,src=$secrets_file,dst=$CONTAINER_SECRETS_FILE,readonly" \
+    "$IMAGE" \
+    --domain "${domain,,}" \
+    --secrets-file "$CONTAINER_SECRETS_FILE"

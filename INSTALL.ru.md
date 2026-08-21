@@ -24,6 +24,18 @@ audit → plan → install → repair → uninstall
 
 Cloud/CDN proxy для raw MTProto hostname должен быть отключён (DNS-only). Unhandled AAAA, NAT mismatch, ambiguous Nginx maps и port collisions — hard stops.
 
+## Сборка и установка внешнего TDLib-probe
+
+Из checkout репозитория до планирования соберите зафиксированный Docker image и установите root-only hook:
+
+```bash
+sudo ./probe/install.sh
+```
+
+Он устанавливает `/usr/local/libexec/mtproxy-respq-probe` с mode `0750`. Hook принимает ровно `--domain DOMAIN --secrets-file PATH`, проверяет оба значения, монтирует файл read-only в `/run/mtproxy/users.conf` и для каждого настроенного секрета вызывает в TDLib `addProxy`, затем `pingProxy`. Базовый image зафиксирован digest, а Node dependencies — в `probe/package-lock.json`.
+
+Installer передаёт только domain и путь к secrets file. Отдельные secrets не попадают в его argv, argv Docker command, shell history или output probe. У container read-only root filesystem, отдельный tmpfs для TDLib state, dropped capabilities и no-new-privileges. Успешный output содержит только число проверенных secrets; ошибка любого secret завершает hook с nonzero status.
+
 ## 1. Read-only audit
 
 ```bash
