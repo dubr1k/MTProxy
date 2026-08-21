@@ -891,6 +891,13 @@ class NaiveCredentialManager:
         first = auth_indexes[0]
         lines = [line for i, line in enumerate(lines) if i not in set(auth_indexes)]
         lines[first:first] = block
+        start, end = cls._forward_bounds(lines)
+        host_indexes = [i for i in range(start + 1, end) if re.match(r"^\s*hosts(?:\s|$)", lines[i])]
+        cover_host = f"hosts {state['host']}"
+        if not host_indexes:
+            lines[end:end] = [f"{indent}{cover_host}"]
+        elif len(host_indexes) != 1 or lines[host_indexes[0]].strip() != cover_host:
+            raise ManagerConflict("forward_proxy hosts must match the managed public host")
         route_indexes = [i for i, line in enumerate(lines) if re.match(r"^\s*route\s*\{", line)]
         if len(route_indexes) != 1:
             raise ManagerConflict("exactly one route block is required")

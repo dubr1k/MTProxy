@@ -124,6 +124,20 @@ def test_bootstrap_imports_existing_credentials_without_changing_them(tmp_path):
     assert "old-password" not in accounting
 
 
+def test_bootstrap_renders_cover_host_bypass_without_moving_proxy(tmp_path):
+    hooks = Hooks()
+    service = manager(tmp_path, hooks)
+
+    service.bootstrap()
+
+    rendered = service.caddyfile.read_text()
+    forward = rendered.split("forward_proxy {\n", 1)[1].split("        }\n", 1)[0]
+    assert forward.count("# BEGIN NAIVE-MANAGER USERS") == 1
+    assert forward.count("# END NAIVE-MANAGER USERS") == 1
+    assert "hosts naive.example.com" in forward
+    assert "upstream socks5://127.0.0.1:40000" in forward
+    assert rendered.index("forward_proxy {") < rendered.index("file_server")
+
 def test_create_rejects_exact_redaction_sentinel_without_mutation(tmp_path):
     hooks = Hooks()
     service = manager(tmp_path, hooks)
