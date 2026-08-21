@@ -10,11 +10,10 @@ Proxy Control выдаёт Mieru credentials только после **create** 
 2. Нажмите **Добавить**.
 3. Укажите username и, при необходимости, rolling quota/expiry.
 4. После создания откроется one-time dialog.
-5. Передайте пользователю один из вариантов:
-   - QR-код;
-   - `mierus://` URL;
-   - готовую команду `mieru import config 'mierus://…'`;
-   - скачанный QR image.
+5. Выберите целевой client:
+   - **Native**: скопируйте штатную `mierus://` URL или shell-safe command `mieru import config 'mierus://…'`; QR содержит ровно эту URL.
+   - **Karing**: откройте или отсканируйте `karing://install-config` deep link с полным Mieru sing-box profile либо скачайте этот JSON profile. Вариант доступен, только когда все bindings содержат точные одиночные порты.
+   - **Shadowrocket**: не предлагается. Проверенного Mieru import format нет, и Proxy Control его не придумывает.
 6. Убедитесь, что пользователь импортировал конфигурацию, затем закройте dialog.
 
 Reveal response имеет `Cache-Control: no-store`. URL и QR существуют во frontend только внутри ephemeral dialog и очищаются при закрытии.
@@ -32,20 +31,21 @@ Mita хранит `hashedPassword`; plaintext password восстановить 
 
 Предупредите пользователя, что старый config перестанет работать сразу после успешной rotation.
 
-## Импорт на клиенте
+## Матрица клиентов
 
-Используйте client version, совместимую с server `mita` 3.35.x. UI показывает готовую shell-safe import command. Не публикуйте URL в ticket, chat history с широким доступом или screenshot.
+| Client | Mieru с точными портами | Доступ с port range | QR payload |
+| --- | --- | --- | --- |
+| Official Mieru | `mierus://`, import command | Поддерживается | Показанная `mierus://` URL |
+| Karing | Полный Mieru sing-box profile, download и `karing://install-config` | Не предлагается | Karing deep link с полным profile |
+| Shadowrocket | Не предлагается; проверенного формата нет | Не предлагается | Нет |
 
-После импорта проверьте:
+Используйте official Mieru client, совместимый с server `mita` 3.35.x, либо текущий Karing build. [Официальная инструкция Mieru](https://github.com/enfein/mieru/blob/main/docs/client-install.md) определяет `mierus://`, `mieru import config` и поля Mieru outbound для sing-box. Karing документирует импорт config content и [URL scheme](https://karing.app/en/cooperation/scheme); текущий source Karing содержит Mieru outbound type.
 
-- client config содержит ожидаемый server hostname/port;
-- DNS и firewall пропускают declared TCP/UDP listeners;
-- end-to-end request проходит через Mieru;
-- old config после rotation больше не подключается.
+После импорта проверьте ожидаемые hostname/port, доступность declared TCP/UDP listeners, end-to-end transport и отказ старого config после rotation. Не публикуйте credential payload в общедоступных tickets, chats или screenshots.
 
 ## QR и безопасность
 
-QR кодирует **ровно тот же** one-time `mierus://` URL, который показан текстом. Backend формирует SVG data URI из exact URL; frontend не строит второй независимый payload.
+QR зависит от выбранного client. Для **Native** он кодирует ровно показанную `mierus://` URL. Для **Karing** — ровно показанную `karing://install-config` deep link, где параметр `url` содержит полный Mieru profile. QR никогда не подменяется raw HTTP endpoint или форматом неподдерживаемого client. Backend создаёт SVG из declared payload, а frontend отклоняет QR metadata, не совпадающую с выбранным payload.
 
 Не допускается:
 
@@ -64,7 +64,7 @@ Create, rotate и reveal доступны только авторизованн�
 
 ## Мобильный интерфейс
 
-На узких экранах QR, URL, import command и action buttons должны оставаться внутри dialog. Поддерживаемый responsive gate проверяет ширины от 320 px и отсутствие horizontal document overflow. Если страница расширяется, сравните deployed `index.html`, `app.js`, `style.css` с current source и обновите panel image.
+Client tabs прокручиваются горизонтально, а QR, payload, import command, notice о неподдерживаемом client и action buttons складываются внутри dialog на узких экранах. Responsive gates покрывают ширины от 320 px и требуют отсутствия horizontal document overflow. Выбранный client управляет и видимым payload, и QR; при закрытии dialog очищаются все варианты и отзываются сгенерированные download URLs.
 
 ## Troubleshooting
 

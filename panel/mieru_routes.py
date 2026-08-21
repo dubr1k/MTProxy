@@ -1,35 +1,102 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import re
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from fastapi import Depends, HTTPException, Request
 
 from .mieru import MieruError
-from .reveals import qr_data
+from .reveals import karing_client, qr_data
 from .schemas import MieruQuotaUpdate, MieruRevision, MieruUserCreate
 from .web_context import RequestContext
 
 
-def mieru_access(value) -> dict[str, str]:
+def mieru_access(value) -> dict:
     if not isinstance(value, str) or len(value) > 4096:
         raise HTTPException(409, "Mieru connection link unavailable")
     try:
         parts = urlsplit(value)
-    except ValueError as exc:
+        query = parse_qsl(parts.query, keep_blank_values=True)
+        authority_port = parts.port
+    except (TypeError, ValueError, UnicodeError) as exc:
         raise HTTPException(409, "Mieru connection link unavailable") from exc
+    values: dict[str, list[str]] = {}
+    for key, item in query:
+        values.setdefault(key, []).append(item)
+    ports = values.get("port", [])
+    protocols = values.get("protocol", [])
     if (
         parts.scheme != "mierus"
         or not parts.username
         or not parts.password
         or not parts.hostname
+        or authority_port is not None
         or parts.path not in ("", "/")
         or parts.fragment
+        or len(values.get("profile", [])) != 1
+        or not values["profile"][0]
+        or not ports
+        or len(ports) != len(protocols)
+        or any(protocol not in {"TCP", "UDP"} for protocol in protocols)
     ):
         raise HTTPException(409, "Mieru connection link unavailable")
-    return {"share_url": value, "qr": qr_data(value)}
+
+    username = unquote(parts.username)
+    password = unquote(parts.password)
+    native = {
+        "label": "Mieru",
+        "type": "link",
+        "share_url": value,
+        "import_command": f"mieru import config {shlex.quote(value)}",
+        "qr": {"payload": value, "image": qr_data(value)},
+    }
+    clients = {"native": native}
+    unsupported = {
+        "shadowrocket": (
+            "Проверенный формат импорта Mieru для Shadowrocket отсутствует."
+        )
+    }
+
+    exact_ports: list[int] = []
+    for port in ports:
+        if not re.fullmatch(r"[0-9]{1,5}", port):
+            break
+        number = int(port)
+        if not 1 <= number <= 65535:
+            break
+        exact_ports.append(number)
+    if len(exact_ports) == len(ports):
+        outbounds = [
+            {
+                "type": "mieru",
+                "tag": f"mieru-{protocol}-{port}",
+                "server": parts.hostname,
+                "server_port": port,
+                "transport": protocol,
+                "username": username,
+                "password": password,
+            }
+            for port, protocol in zip(exact_ports, protocols, strict=True)
+        ]
+        clients["karing"] = karing_client(
+            {"outbounds": outbounds},
+            name=f"Mieru · {values['profile'][0]}",
+            filename=f"karing-mieru-{values['profile'][0]}.json",
+        )
+    else:
+        unsupported["karing"] = (
+            "Профиль Karing доступен только для точных портов Mieru, не диапазонов."
+        )
+
+    return {
+        "service": "mieru",
+        "username": values["profile"][0],
+        "clients": clients,
+        "unsupported_clients": unsupported,
+    }
 
 
 def register_mieru_routes(app, context: RequestContext) -> None:

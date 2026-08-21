@@ -307,8 +307,9 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'value="cancel" formnovalidate' in text
     assert 'id="create-user" type="button" disabled' in text
     assert 'data-view="naive"' in text and 'id="naive-modal"' in text
-    assert 'id="naive-access-modal"' in text and 'id="copy-naive-url"' in text
-    assert "renderNaive" in modules["main"] and "handleNaiveAction" in modules["naive"] and "showNaiveAccess" in modules["access"]
+    assert 'id="naive-access-modal"' in text and 'id="naive-client-tabs"' in text
+    assert 'id="naive-payload"' in text and 'id="naive-qr-empty"' in text
+    assert "normaliseAccessPayload" in modules["access"] and "showNaiveAccess" in modules["access"]
     assert 'class="protocol-overview"' in modules["dashboard"]
     assert (
         "↑ ${bytes(user.upload_bytes_decimal)} · ↓ ${bytes(user.download_bytes_decimal)} · "
@@ -327,14 +328,16 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert "текущего runtime-поколения" in modules["dashboard"]
     assert "Автоматического ежемесячного сброса нет" in text
     assert 'data-view="mieru"' in text and 'id="mieru-modal"' in text
-    assert 'id="mieru-access-modal"' in text and 'id="mieru-qr-image"' in text
-    assert 'id="copy-mieru-url"' in text and 'id="download-mieru-qr"' in text
+    assert 'id="mieru-access-modal"' in text and 'id="mieru-client-tabs"' in text
+    assert 'id="mieru-qr-image"' in text and 'id="mieru-qr-empty"' in text
+    assert 'id="mieru-payload"' in text and 'id="download-mieru-qr"' in text
     assert 'id="mieru-quota-modal"' in text and 'id="mieru-quota-rows"' in text
     assert "renderMieru" in modules["main"] and "handleMieruAction" in modules["mieru"]
     assert "syncMieruCreateButton" in modules["mieru"] and "form.checkValidity()" in modules["mieru"]
     assert '<button class="secondary" value="cancel" formnovalidate>Отмена</button><button class="primary" id="create-mieru" type="button" disabled>Создать</button>' in text
     assert ".cell b,.cell small{display:block}" in css.text
-    assert "showMieruAccess" in modules["access"] and "qrSource(data.qr)" in modules["access"]
+    assert "showMieruAccess" in modules["access"] and "qrFor(value.qr, value.share_url)" in modules["access"]
+    assert "QR и кнопка открытия передают Karing полный профиль" in modules["access"]
     assert "Новая ссылка + QR" in modules["mieru"]
     assert "rolling application-byte admission quota" in modules["mieru"]
     assert "/quotas" in modules["mieru"] and "expected_revision: context.state.mieruService.revision" in modules["mieru"]
@@ -342,6 +345,8 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'data-quick="mieru-users"' not in modules["mieru"]
     assert 'class="quick-action mieru-quick-action"' not in modules["mieru"]
     assert ".quick-action.mieru-quick-action{position:relative;top:12px}" not in css.text
+    assert ".client-tabs" in css.text and ".qr-empty" in css.text
+    assert "@media(max-width:760px)" in css.text and ".client-tabs{overflow-x:auto" in css.text
     assert 'id="fleet-modal"' in text and 'id="create-fleet-node"' in text
     assert 'id="new-node-id"' in text and 'id="new-node-name"' in text
     assert "FLEET_OPERATIONS" in modules["fleet"] and "fleet-command-form" in modules["fleet"]

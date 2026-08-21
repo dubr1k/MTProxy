@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlsplit
 from fastapi import Depends, HTTPException, Request
 
 from .naive import NaiveError
-from .reveals import qr_data
+from .reveals import karing_client
 from .schemas import NaiveQuotaUpdate, NaiveUserCreate
 from .web_context import RequestContext
 
@@ -145,11 +145,51 @@ def register_naive_routes(app, context: RequestContext) -> None:
             valid = False
         if not valid:
             raise HTTPException(409, "NaiveProxy access unavailable")
+        password = unquote(parts.password or "")
+        native_config = {"listen": "socks://127.0.0.1:1080", "proxy": raw}
+        karing_config = {
+            "outbounds": [
+                {
+                    "type": "naive",
+                    "tag": f"naive-{username}",
+                    "server": settings.naive_public_host,
+                    "server_port": 443,
+                    "username": username,
+                    "password": password,
+                    "tls": {
+                        "enabled": True,
+                        "server_name": settings.naive_public_host,
+                    },
+                }
+            ]
+        }
         return {
+            "service": "naive",
             "username": username,
-            "proxy_url": raw,
-            "config": {"listen": "socks://127.0.0.1:1080", "proxy": raw},
-            "qr": qr_data(raw),
+            "clients": {
+                "native": {
+                    "label": "NaiveProxy",
+                    "type": "config",
+                    "config": native_config,
+                    "filename": f"naive-{username}.json",
+                },
+                "karing": karing_client(
+                    karing_config,
+                    name=f"NaiveProxy · {username}",
+                    filename=f"karing-naive-{username}.json",
+                ),
+                "shadowrocket": {
+                    "label": "Shadowrocket",
+                    "type": "manual",
+                    "fields": {
+                        "proxy_type": "HTTPS",
+                        "server": settings.naive_public_host,
+                        "port": 443,
+                        "username": username,
+                        "password": password,
+                    },
+                },
+            },
         }
 
     @app.get("/api/naive/users")

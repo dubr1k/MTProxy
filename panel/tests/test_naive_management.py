@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from urllib.parse import parse_qs, urlsplit
 import pytest
 import httpx
 
@@ -59,19 +61,59 @@ async def test_naive_owner_can_create_reveal_rotate_toggle_and_delete(client, lo
     first = await client.get("/api/reveal/" + created.json()["reveal_token"])
     assert first.status_code == 200
     assert first.headers["cache-control"] == "no-store"
-    assert first.json()["proxy_url"].startswith("https://ios-phone:")
-    assert first.json()["proxy_url"].endswith("@naive.example.com")
-    assert first.json()["config"]["proxy"] == first.json()["proxy_url"]
-    assert first.json()["config"]["listen"] == "socks://127.0.0.1:1080"
+    reveal = first.json()
+    assert set(reveal["clients"]) == {"native", "karing", "shadowrocket"}
+    native = reveal["clients"]["native"]
+    assert native["type"] == "config"
+    assert native["config"]["listen"] == "socks://127.0.0.1:1080"
+    assert native["config"]["proxy"].startswith("https://ios-phone:")
+    assert native["config"]["proxy"].endswith("@naive.example.com")
+    assert "qr" not in native
+
+    karing = reveal["clients"]["karing"]
+    assert karing["type"] == "link"
+    assert karing["import_url"].startswith("karing://install-config?")
+    assert karing["qr"]["payload"] == karing["import_url"]
+    assert karing["qr"]["image"].startswith("data:image/svg+xml;base64,")
+    karing_query = parse_qs(urlsplit(karing["import_url"]).query)
+    profile = json.loads(karing_query["url"][0])
+    assert profile == karing["config"]
+    assert profile["outbounds"] == [{
+        "type": "naive",
+        "tag": "naive-ios-phone",
+        "server": "naive.example.com",
+        "server_port": 443,
+        "username": "ios-phone",
+        "password": urlsplit(native["config"]["proxy"]).password,
+        "tls": {"enabled": True, "server_name": "naive.example.com"},
+    }]
+    assert not karing["qr"]["payload"].startswith("https://")
+
+    shadowrocket = reveal["clients"]["shadowrocket"]
+    assert shadowrocket == {
+        "label": "Shadowrocket",
+        "type": "manual",
+        "fields": {
+            "proxy_type": "HTTPS",
+            "server": "naive.example.com",
+            "port": 443,
+            "username": "ios-phone",
+            "password": urlsplit(native["config"]["proxy"]).password,
+        },
+    }
+    assert "proxy_url" not in reveal and "qr" not in reveal
 
     access = await client.post("/api/naive/users/ios-phone/access", headers={"X-CSRF-Token": csrf})
     assert access.status_code == 200
-    assert access.json()["proxy_url"] == first.json()["proxy_url"]
+    assert access.json()["clients"]["native"]["config"] == native["config"]
 
     rotated = await client.post("/api/naive/users/ios-phone/rotate", headers={"X-CSRF-Token": csrf})
     assert rotated.status_code == 200
     second = await client.get("/api/reveal/" + rotated.json()["reveal_token"])
-    assert second.json()["proxy_url"] != first.json()["proxy_url"]
+    assert (
+        second.json()["clients"]["native"]["config"]["proxy"]
+        != native["config"]["proxy"]
+    )
 
     assert (await client.post("/api/naive/users/ios-phone/disable", headers={"X-CSRF-Token": csrf})).status_code == 200
     assert (await client.get("/api/naive/users")).json()["items"][0]["enabled"] is False

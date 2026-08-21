@@ -3,12 +3,15 @@ from __future__ import annotations
 import http.client
 import json
 import threading
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from fastapi import HTTPException
 
-from mieru_manager.server import ManagerHTTPServer
 from mieru_manager.healthcheck import check as manager_healthcheck
+from mieru_manager.server import ManagerHTTPServer
 from panel.mieru import MieruClient
+from panel.mieru_routes import mieru_access
 
 
 class StubManager:
@@ -168,8 +171,35 @@ async def test_panel_mieru_owner_lifecycle_is_one_time_and_audited(
     )
     assert created.status_code == 201
     revealed = await client.get("/api/reveal/" + created.json()["reveal_token"])
-    assert revealed.json()["share_url"].startswith("mierus://phone:")
-    assert revealed.json()["qr"].startswith("data:image/svg+xml;base64,")
+    reveal = revealed.json()
+    assert set(reveal["clients"]) == {"native", "karing"}
+    native = reveal["clients"]["native"]
+    assert native["type"] == "link"
+    assert native["share_url"].startswith("mierus://phone:")
+    assert native["import_command"].startswith("mieru import config ")
+    assert native["qr"]["payload"] == native["share_url"]
+    assert native["qr"]["image"].startswith("data:image/svg+xml;base64,")
+
+    karing = reveal["clients"]["karing"]
+    assert karing["type"] == "link"
+    assert karing["import_url"].startswith("karing://install-config?")
+    assert karing["qr"]["payload"] == karing["import_url"]
+    profile = json.loads(parse_qs(urlsplit(karing["import_url"]).query)["url"][0])
+    assert profile == karing["config"]
+    native_url = urlsplit(native["share_url"])
+    assert profile["outbounds"] == [{
+        "type": "mieru",
+        "tag": "mieru-TCP-8443",
+        "server": "mieru.example.com",
+        "server_port": 8443,
+        "transport": "TCP",
+        "username": "phone",
+        "password": native_url.password,
+    }]
+    assert reveal["unsupported_clients"] == {
+        "shadowrocket": "Проверенный формат импорта Mieru для Shadowrocket отсутствует."
+    }
+    assert "share_url" not in reveal and "qr" not in reveal
     assert revealed.headers["cache-control"] == "no-store"
     assert (
         await client.get("/api/reveal/" + created.json()["reveal_token"])
@@ -184,6 +214,54 @@ async def test_panel_mieru_owner_lifecycle_is_one_time_and_audited(
     assert "share_url" not in (await client.get("/api/mieru/users")).text
     audit = str((await client.get("/api/audit")).json())
     assert "mierus://" not in audit and "mieru.create" in audit
+
+async def test_panel_mieru_rotation_returns_the_same_client_specific_matrix(
+    client, login_user,
+):
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+    created = await client.post(
+        "/api/mieru/users",
+        json={"username": "phone", "quotas": [], "expected_revision": "rev-1"},
+        headers={"X-CSRF-Token": csrf},
+    )
+    rotated = await client.post(
+        "/api/mieru/users/phone/rotate",
+        json={"expected_revision": created.json()["revision"]},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert rotated.status_code == 200
+    reveal = await client.get("/api/reveal/" + rotated.json()["reveal_token"])
+    assert set(reveal.json()["clients"]) == {"native", "karing"}
+    assert reveal.json()["clients"]["karing"]["qr"]["payload"].startswith(
+        "karing://install-config?"
+    )
+
+
+def test_mieru_range_reveal_keeps_native_link_and_does_not_fabricate_karing_endpoint():
+    reveal = mieru_access(
+        "mierus://phone:secret@mieru.example.com"
+        "?profile=phone&port=8000-8010&protocol=TCP"
+    )
+
+    assert set(reveal["clients"]) == {"native"}
+    assert reveal["clients"]["native"]["share_url"].startswith("mierus://")
+    assert reveal["unsupported_clients"]["karing"] == (
+        "Профиль Karing доступен только для точных портов Mieru, не диапазонов."
+    )
+
+
+def test_mieru_reveal_rejects_invalid_authority_port_as_a_controlled_conflict():
+    with pytest.raises(HTTPException) as caught:
+        mieru_access(
+            "mierus://phone:secret@mieru.example.com:99999"
+            "?profile=phone&port=8443&protocol=TCP"
+        )
+
+    assert caught.value.status_code == 409
+
+
 
 
 async def test_panel_preserves_unavailable_metrics_without_synthesizing_zero(

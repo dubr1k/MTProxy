@@ -106,11 +106,17 @@ For migration, first stop manager mutations and Caddy, then back up the active u
 
 Rollback is deliberately host-controlled: stop `naive-manager` and Caddy; restore the saved Caddyfile/unit/binary, manager-data snapshot, log ownership/modes, and previous service identities as one generation; run the restored build's validation; restart Caddy; and re-run cover/authenticated/SNI probes before removing the override. Never copy only `traffic.sqlite3` without its `-wal`/`-shm` files while the manager is running. A traffic reset changes only the local baseline; viewers are denied reset, and audit records the username/action without credentials or authorization headers.
 
-The UI provides an HTTPS proxy URL, QR, and ready-to-download `config.json`:
+The one-time access dialog separates formats by client:
 
-```json
-{"listen":"socks://127.0.0.1:1080","proxy":"https://USER:PASSWORD@proxy.example.com"}
-```
+- **Native** downloads or copies the official NaiveProxy `config.json`; the native client has no documented QR import, so this tab does not show a QR:
+
+  ```json
+  {"listen":"socks://127.0.0.1:1080","proxy":"https://USER:PASSWORD@proxy.example.com"}
+  ```
+- **Karing** downloads the complete sing-box JSON profile and offers a `karing://install-config` deep link. Its QR encodes that deep link with the full profile content, never the raw `https://USER:PASSWORD@HOST` endpoint.
+- **Shadowrocket** shows explicit manual fields (`HTTPS`, server, port, username, password). Proxy Control does not generate an unverified Shadowrocket URI or QR.
+
+Karing's current source accepts `karing://install-config?url=...` and imports sing-box configuration content; its current protocol editor includes Naive. See the [Karing URL-scheme contract](https://karing.app/en/cooperation/scheme), [Karing import guide](https://karing.app/en/quickstart), and [sing-box Naive outbound schema](https://sing-box.sagernet.org/configuration/outbound/naive/). All three variants contain the same credential and remain subject to the one-time reveal and `Cache-Control: no-store` rules.
 
 ## Backup
 

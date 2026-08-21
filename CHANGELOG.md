@@ -20,6 +20,7 @@ All notable changes follow [Keep a Changelog](https://keepachangelog.com/en/1.1.
 - Documentation accurately describes persistent Telemt configuration and its authenticated private API.
 - The panel backend is composed from protocol- and responsibility-specific route modules while preserving `panel.app:create_app`, existing API paths, RBAC, security headers, and one-time reveal behavior. Audit reads now support bounded cursor pagination and actor/action/target filters.
 - Fleet v1 is Telemt-only; Mieru operations and Mieru capability advertisement were removed from its models, node execution path, and documentation.
+- Naive and Mieru one-time reveals now expose client-specific Native, Karing, and verified manual variants. Karing receives a full profile through its documented deep link instead of a raw endpoint QR; unsupported Shadowrocket/Mieru and Mieru port-range combinations are reported without fabricated import formats.
 
 ### Fixed
 

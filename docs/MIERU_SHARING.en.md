@@ -10,11 +10,10 @@ Proxy Control discloses Mieru credentials only after **create** or **controlled 
 2. Select **Add**.
 3. Enter username and optional rolling quota/expiry.
 4. A one-time dialog opens after creation.
-5. Give the user one of:
-   - QR code;
-   - `mierus://` URL;
-   - generated `mieru import config 'mierus://…'` command;
-   - downloaded QR image.
+5. Select the target client:
+   - **Native**: copy the official `mierus://` URL or shell-safe `mieru import config 'mierus://…'` command; its QR contains that exact URL.
+   - **Karing**: open or scan a `karing://install-config` deep link containing a complete Mieru sing-box profile, or download that JSON profile. This variant is offered only when every binding is a single exact port.
+   - **Shadowrocket**: not offered. There is no verified Mieru import format, and Proxy Control does not fabricate one.
 6. Confirm import, then close the dialog.
 
 The reveal response carries `Cache-Control: no-store`. URL and QR exist in frontend only inside the ephemeral dialog and are cleared on close.
@@ -32,15 +31,21 @@ Select **New link + QR**. The panel:
 
 Warn the user that the old config stops working as soon as rotation succeeds.
 
-## Client import
+## Client matrix
 
-Use a client compatible with server `mita` 3.35.x. The UI provides a shell-safe import command. Never paste the URL into a broadly visible ticket/chat or screenshot.
+| Client | Exact-port Mieru access | Port-range access | QR payload |
+| --- | --- | --- | --- |
+| Official Mieru | `mierus://`, import command | Supported | The displayed `mierus://` URL |
+| Karing | Full Mieru sing-box profile, download, and `karing://install-config` | Not offered | The Karing deep link containing the full profile |
+| Shadowrocket | Not offered; no verified format | Not offered | None |
 
-After import verify expected hostname/port, declared TCP/UDP listener reachability, end-to-end transport, and rejection of the old config after rotation.
+Use an official Mieru client compatible with server `mita` 3.35.x, or a current Karing build. The [official Mieru client guide](https://github.com/enfein/mieru/blob/main/docs/client-install.md) defines `mierus://`, `mieru import config`, and the sing-box Mieru outbound fields. Karing documents configuration-content import and its [URL scheme](https://karing.app/en/cooperation/scheme); its current source lists the Mieru outbound type.
+
+After import verify expected hostname/port, declared TCP/UDP listener reachability, end-to-end transport, and rejection of the old config after rotation. Never paste any credential payload into a broadly visible ticket/chat or screenshot.
 
 ## QR security contract
 
-The QR encodes **the exact same** one-time `mierus://` URL shown as text. Backend creates an SVG data URI from the exact URL; frontend never constructs a second independent credential payload.
+The QR is client-specific. On **Native**, it encodes the exact displayed `mierus://` URL. On **Karing**, it encodes the exact displayed `karing://install-config` deep link whose `url` parameter is the full Mieru profile. A QR never substitutes a raw HTTP endpoint or an unsupported-client format. Backend creates each SVG from the declared payload, and frontend rejects QR metadata that does not match the selected payload.
 
 Never:
 
@@ -59,7 +64,7 @@ Do not search the DB or logs. Perform another **New link + QR** rotation and del
 
 ## Mobile UI
 
-QR, URL, import command, and actions must stay inside the dialog on narrow screens. Responsive gates cover widths from 320 px and require zero horizontal document overflow. If the page widens, compare deployed `index.html`, `app.js`, and `style.css` to current source, then rebuild the panel image.
+Client tabs scroll horizontally, while QR, payload, import command, unsupported-client notice, and actions stack inside the dialog on narrow screens. Responsive gates cover widths from 320 px and require zero horizontal document overflow. The selected client controls both the visible payload and QR; closing the dialog clears every variant and revokes generated download URLs.
 
 ## Troubleshooting
 

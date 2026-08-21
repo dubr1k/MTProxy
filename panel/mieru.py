@@ -153,7 +153,7 @@ class MemoryMieru:
             password = secrets.token_urlsafe(18)
             result = {
                 "username": username,
-                "share_url": f"mierus://{username}:{password}@mieru.example.com?port=8443&protocol=TCP",
+                "share_url": f"mierus://{quote(username, safe='')}:{quote(password, safe='')}@mieru.example.com?profile={quote(username)}&port=8443&protocol=TCP",
             }
         else:
             self.users[username]["enabled"] = operation == "enable"

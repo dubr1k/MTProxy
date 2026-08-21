@@ -164,24 +164,40 @@
 
   <dialog id="mieru-access-modal" class="access-dialog">
     <form method="dialog">
-      <div class="modal-head"><div><span class="eyebrow">MIERU</span><h2 id="mieru-access-title">Конфигурация Mieru</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
+      <div class="modal-head"><div><span class="eyebrow">MIERU · КЛИЕНТ</span><h2 id="mieru-access-title">Доступ Mieru</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
+      <div id="mieru-client-tabs" class="client-tabs" role="tablist" aria-label="Клиент Mieru"></div>
       <div class="access-layout">
-        <div class="qr-wrap"><img id="mieru-qr-image" alt="QR-код Mieru"><span>Ссылка содержит пароль</span></div>
-        <div class="access-details"><span class="status-pill active"><i></i> Конфигурация готова</span><p>Отсканируйте QR-код совместимым клиентом или импортируйте ссылку командой <code>mieru import config</code>.</p><label>Ссылка Mieru<div class="copy-field"><input id="mieru-share-url" readonly aria-label="Ссылка Mieru"><button id="copy-mieru-url" type="button">Копировать</button></div></label><label>Команда импорта<div class="copy-field"><input id="mieru-import-command" readonly aria-label="Команда импорта Mieru"><button id="copy-mieru-command" type="button">Копировать</button></div></label><div class="access-actions"><a class="secondary button" id="download-mieru-qr" download="mieru-access.svg">Скачать QR</a></div></div>
+        <div class="qr-wrap"><img id="mieru-qr-image" alt="" hidden><div id="mieru-qr-empty" class="qr-empty">Этот способ требует файл или ручной ввод — QR не используется.</div><span id="mieru-qr-caption">QR выбранного клиента</span></div>
+        <div class="access-details">
+          <span class="status-pill active"><i></i> Данные готовы</span>
+          <p id="mieru-client-description"></p>
+          <label><span id="mieru-payload-label">Данные подключения</span><div class="copy-field payload-field"><textarea id="mieru-payload" readonly aria-label="Данные подключения Mieru"></textarea><button id="copy-mieru-payload" type="button">Копировать</button></div></label>
+          <label id="mieru-secondary" hidden><span id="mieru-secondary-label">Дополнительные данные</span><div class="copy-field payload-field"><textarea id="mieru-secondary-payload" readonly aria-label="Дополнительные данные Mieru"></textarea><button id="copy-mieru-secondary" type="button">Копировать</button></div></label>
+          <div class="access-actions"><a class="primary button" id="open-mieru-client" hidden>Открыть</a><a class="secondary button" id="download-mieru-payload" hidden>Скачать конфигурацию</a><a class="secondary button" id="download-mieru-qr" hidden>Скачать QR ссылки</a></div>
+          <p id="mieru-unsupported" class="unsupported-client" hidden></p>
+        </div>
       </div>
-      <div class="security-note">Ссылка и QR содержат пароль и показываются только один раз. Для повторной выдачи выполните ротацию доступа.</div>
+      <div class="security-note">Все варианты содержат один и тот же пароль и показываются только один раз. Выберите клиент до закрытия окна.</div>
       <footer><button class="secondary" value="cancel" formnovalidate>Закрыть</button></footer>
     </form>
   </dialog>
 
   <dialog id="naive-access-modal" class="access-dialog">
     <form method="dialog">
-      <div class="modal-head"><div><span class="eyebrow">NAIVEPROXY</span><h2 id="naive-access-title">Доступ к HTTPS-прокси</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
+      <div class="modal-head"><div><span class="eyebrow">NAIVEPROXY · КЛИЕНТ</span><h2 id="naive-access-title">Доступ NaiveProxy</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
+      <div id="naive-client-tabs" class="client-tabs" role="tablist" aria-label="Клиент NaiveProxy"></div>
       <div class="access-layout">
-        <div class="qr-wrap"><img id="naive-qr-image" alt="QR-код NaiveProxy"><span>URL содержит пароль</span></div>
-        <div class="access-details"><span class="status-pill active"><i></i> Конфигурация готова</span><p>Скопируйте URL в NaiveProxy-клиент или скачайте готовый <code>config.json</code>.</p><p class="access-note">Один доступ покрывает и <b>HTTPS</b>, и <b>HTTP/2</b>: протокол выбирается ALPN-согласованием при подключении, поэтому отдельный доступ под каждый вариант не нужен. <b>HTTP/3</b> (<code>quic://</code>) требует отдельного QUIC-listener на UDP и здесь не включён.</p><label>HTTPS proxy URL<div class="copy-field"><input id="naive-proxy-url" readonly aria-label="NaiveProxy URL"><button id="copy-naive-url" type="button">Копировать</button></div></label><div class="access-actions"><a class="primary button" id="download-naive-config" download="naive-config.json">Скачать config.json</a><button class="secondary" id="copy-naive-config" type="button">Копировать JSON</button></div></div>
+        <div class="qr-wrap"><img id="naive-qr-image" alt="" hidden><div id="naive-qr-empty" class="qr-empty">Этот способ требует файл или ручной ввод — QR не используется.</div><span id="naive-qr-caption">QR выбранного клиента</span></div>
+        <div class="access-details">
+          <span class="status-pill active"><i></i> Данные готовы</span>
+          <p id="naive-client-description"></p>
+          <label><span id="naive-payload-label">Данные подключения</span><div class="copy-field payload-field"><textarea id="naive-payload" readonly aria-label="Данные подключения NaiveProxy"></textarea><button id="copy-naive-payload" type="button">Копировать</button></div></label>
+          <label id="naive-secondary" hidden><span id="naive-secondary-label">Дополнительные данные</span><div class="copy-field payload-field"><textarea id="naive-secondary-payload" readonly aria-label="Дополнительные данные NaiveProxy"></textarea><button id="copy-naive-secondary" type="button">Копировать</button></div></label>
+          <div class="access-actions"><a class="primary button" id="open-naive-client" hidden>Открыть</a><a class="secondary button" id="download-naive-payload" hidden>Скачать конфигурацию</a><a class="secondary button" id="download-naive-qr" hidden>Скачать QR ссылки</a></div>
+          <p id="naive-unsupported" class="unsupported-client" hidden></p>
+        </div>
       </div>
-      <div class="security-note">URL содержит пароль. Не публикуйте его и передавайте только доверенному устройству.</div>
+      <div class="security-note">config.json, ссылка Karing и ручные поля содержат один пароль. Не публикуйте их и закройте окно после передачи.</div>
       <footer><button class="secondary" value="cancel" formnovalidate>Закрыть</button></footer>
     </form>
   </dialog>

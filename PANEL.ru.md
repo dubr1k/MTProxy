@@ -110,11 +110,17 @@ Host Caddy и manager-контейнер имеют разные identity: Caddy
 
 Rollback выполняется на host: остановите `naive-manager` и Caddy; одной генерацией восстановите Caddyfile/unit/binary, snapshot manager data, ownership/modes логов и прежние service identity; провалидируйте восстановленным build; перезапустите Caddy и повторите cover/authenticated/SNI probes. Не копируйте один `traffic.sqlite3` без `-wal`/`-shm` при работающем manager. Reset меняет только локальный baseline; viewer reset запрещён, audit сохраняет только action/username без credentials и authorization headers.
 
-Клиенту выдаются HTTPS proxy URL, QR и готовый `config.json`:
+One-time dialog разделяет форматы по клиентам:
 
-```json
-{"listen":"socks://127.0.0.1:1080","proxy":"https://USER:PASSWORD@proxy.example.com"}
-```
+- **Native** скачивает или копирует штатный NaiveProxy `config.json`; документированного QR-импорта у native client нет, поэтому QR на этой вкладке отсутствует:
+
+  ```json
+  {"listen":"socks://127.0.0.1:1080","proxy":"https://USER:PASSWORD@proxy.example.com"}
+  ```
+- **Karing** скачивает полный sing-box JSON profile и открывает `karing://install-config`. QR кодирует эту deep link с содержимым полного профиля, а не raw endpoint `https://USER:PASSWORD@HOST`.
+- **Shadowrocket** показывает только проверяемые поля для ручного ввода (`HTTPS`, server, port, username, password). Proxy Control не придумывает неподтверждённую Shadowrocket URI или QR.
+
+Текущий source Karing принимает `karing://install-config?url=...`, импортирует содержимое sing-box config и содержит Naive в protocol editor. См. [Karing URL scheme](https://karing.app/en/cooperation/scheme), [инструкцию импорта Karing](https://karing.app/en/quickstart) и [схему Naive outbound в sing-box](https://sing-box.sagernet.org/configuration/outbound/naive/). Все три варианта содержат один credential и подчиняются one-time reveal и `Cache-Control: no-store`.
 
 ## Резервное копирование
 
