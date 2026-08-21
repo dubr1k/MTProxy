@@ -218,9 +218,14 @@ def _rewrite_listener(config: dict) -> dict:
         if not isinstance(server, dict) or not isinstance(server.get("listen"), list):
             continue
         server["listen"] = [
-            ":4443" if address == ":443" else address for address in server["listen"]
+            "127.0.0.1:4443" if address == "127.0.0.1:443"
+            else ":4443" if address == ":443"
+            else address
+            for address in server["listen"]
         ]
-        rewritten = rewritten or ":4443" in server["listen"]
+        rewritten = rewritten or any(
+            address in {":4443", "127.0.0.1:4443"} for address in server["listen"]
+        )
     if not rewritten:
         raise RuntimeError("Caddy configuration has no Naive listener")
     return config
