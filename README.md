@@ -499,6 +499,7 @@ Naive подключается только отдельным `compose.naive.ya
 
 - зафиксированная сборка Caddy `v2.11.4` с `http.handlers.forward_proxy`;
 - host-бинарник `/usr/local/bin/caddy`;
+- host-пакет `jq` для JSON-адаптера приватного listener;
 - пользователь Caddy `naive-caddy` с UID `10003`;
 - группа `naive-accounting` с GID `10004`;
 - manager с UID/GID `10002:101`;
@@ -556,15 +557,20 @@ NAIVE_DATA_DIR=/var/lib/naive-manager
 Выполните первоначальный импорт и установите службу:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y jq
 docker compose config -q
 docker compose run --rm --build naive-manager --bootstrap-only
 caddy adapt --adapter caddyfile --validate --config "${NAIVE_DATA_DIR}/Caddyfile"
 sudo install -o root -g root -m 0755 scripts/check-naive-caddy-build.sh /usr/local/libexec/check-naive-caddy-build
+sudo install -o root -g root -m 0755 scripts/caddy-naive-adapt /usr/local/libexec/caddy-naive-adapt
 sudo install -o root -g root -m 0644 deploy/caddy-naive.service /etc/systemd/system/caddy-naive.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now caddy-naive
 docker compose up -d --build
 ```
+
+Root-only адаптер копирует управляемый manager Caddyfile в `/run/caddy-naive`, преобразует его в защищённый JSON и меняет только точные listener `:443` и `127.0.0.1:443` на порт `4443`. Caddy запускается и перезагружает этот JSON, поэтому не конкурирует с Nginx за TCP/443. Остальные адреса и порты остаются без изменений.
 
 `naive-manager` использует только локальный Caddy Admin API и Unix-сокет, не получает Docker socket и может читать завершённые логи, но не создавать, обрезать, переименовывать или дописывать их. Не публикуйте Caddy Admin API.
 

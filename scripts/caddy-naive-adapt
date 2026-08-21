@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 077
+
+source_caddyfile=${NAIVE_CADDYFILE:-/var/lib/naive-manager/Caddyfile}
+runtime_dir=${CADDY_NAIVE_RUNTIME_DIR:-/run/caddy-naive}
+caddy_bin=${CADDY_BIN:-/usr/local/bin/caddy}
+jq_bin=${JQ_BIN:-jq}
+owner=${CADDY_NAIVE_OWNER:-10003}
+group=${CADDY_NAIVE_GROUP:-10004}
+
+stage_uid=$(id -u)
+stage_gid=$(id -g)
+caddyfile_tmp=
+config_tmp=
+
+/usr/bin/install -d -o "$stage_uid" -g "$stage_gid" -m 0700 "$runtime_dir"
+
+cleanup() {
+    local status=$?
+    trap - EXIT
+    [[ -z "$caddyfile_tmp" ]] || rm -f -- "$caddyfile_tmp"
+    [[ -z "$config_tmp" ]] || rm -f -- "$config_tmp"
+    if ! chown "$owner:$group" "$runtime_dir"; then
+        status=1
+    fi
+    if ! chmod 0700 "$runtime_dir"; then
+        status=1
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+
+caddyfile_tmp=$(mktemp "${runtime_dir}.Caddyfile.XXXXXX")
+config_tmp=$(mktemp "${runtime_dir}.config.json.XXXXXX")
+/usr/bin/install -o "$stage_uid" -g "$stage_gid" -m 0400 \
+    "$source_caddyfile" "$caddyfile_tmp"
+"$caddy_bin" adapt --adapter caddyfile --config "$caddyfile_tmp" \
+    | "$jq_bin" '(.apps.http.servers[].listen) |= map(if . == ":443" then ":4443" elif . == "127.0.0.1:443" then "127.0.0.1:4443" else . end)' \
+    > "$config_tmp"
+chown "$owner:$group" "$caddyfile_tmp" "$config_tmp"
+chmod 0400 "$caddyfile_tmp" "$config_tmp"
+
+if [[ -d "$runtime_dir/Caddyfile" || -d "$runtime_dir/config.json" ]]; then
+    printf 'refusing to replace a runtime directory\n' >&2
+    exit 1
+fi
+mv -f -- "$caddyfile_tmp" "$runtime_dir/Caddyfile"
+caddyfile_tmp=
+mv -f -- "$config_tmp" "$runtime_dir/config.json"
+config_tmp=

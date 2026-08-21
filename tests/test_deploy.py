@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -53,6 +54,104 @@ class DeployCliTests(unittest.TestCase):
         self.assertIn("Обновлений не обнаружено", javascript)
         self.assertIn("в каталоге нет версий для этого компонента", javascript)
 
+    def test_caddy_naive_adapter_rewrites_only_private_https_listeners(self):
+        helper = ROOT / "scripts/caddy-naive-adapt"
+        self.assertTrue(os.access(helper, os.X_OK))
+        jq = shutil.which("jq")
+        self.assertIsNotNone(jq, "jq is required by caddy-naive-adapt")
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source.Caddyfile"
+            source.write_text(":443 {}\n")
+            runtime = root / "run"
+            runtime.mkdir()
+            victim = root / "must-not-change"
+            victim.write_text("protected\n")
+            (runtime / "config.json").symlink_to(victim)
+            fake_caddy = root / "caddy"
+            adapted = {
+                "apps": {
+                    "http": {
+                        "servers": {
+                            "naive": {
+                                "listen": [
+                                    ":443",
+                                    "127.0.0.1:443",
+                                    "0.0.0.0:443",
+                                    "[::]:443",
+                                    ":4443",
+                                    "127.0.0.1:8443",
+                                ]
+                            },
+                            "admin": {"listen": ["127.0.0.1:2019"]},
+                        }
+                    }
+                },
+                "unchanged": ":443",
+            }
+            fake_caddy.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json\n"
+                f"print({json.dumps(json.dumps(adapted))})\n"
+            )
+            fake_caddy.chmod(0o755)
+            env = os.environ | {
+                "NAIVE_CADDYFILE": str(source),
+                "CADDY_NAIVE_RUNTIME_DIR": str(runtime),
+                "CADDY_BIN": str(fake_caddy),
+                "JQ_BIN": jq,
+                "CADDY_NAIVE_OWNER": str(os.getuid()),
+                "CADDY_NAIVE_GROUP": str(os.getgid()),
+            }
+
+            completed = subprocess.run(
+                [str(helper)],
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual((runtime / "Caddyfile").read_text(), source.read_text())
+            self.assertEqual(victim.read_text(), "protected\n")
+            self.assertFalse((runtime / "config.json").is_symlink())
+            config = json.loads((runtime / "config.json").read_text())
+            self.assertEqual(
+                config["apps"]["http"]["servers"]["naive"]["listen"],
+                [
+                    ":4443",
+                    "127.0.0.1:4443",
+                    "0.0.0.0:443",
+                    "[::]:443",
+                    ":4443",
+                    "127.0.0.1:8443",
+                ],
+            )
+            self.assertEqual(
+                config["apps"]["http"]["servers"]["admin"]["listen"],
+                ["127.0.0.1:2019"],
+            )
+            self.assertEqual(config["unchanged"], ":443")
+            self.assertEqual((runtime / "Caddyfile").stat().st_mode & 0o777, 0o400)
+            self.assertEqual((runtime / "config.json").stat().st_mode & 0o777, 0o400)
+            for path in (runtime / "Caddyfile", runtime / "config.json"):
+                self.assertEqual(path.stat().st_uid, os.getuid())
+                self.assertEqual(path.stat().st_gid, os.getgid())
+
+            config_before = (runtime / "config.json").read_bytes()
+            fake_caddy.write_text("#!/bin/sh\nexit 1\n")
+            failed = subprocess.run(
+                [str(helper)],
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual((runtime / "config.json").read_bytes(), config_before)
+            self.assertEqual(list(root.glob("run.config.json.*")), [])
+            self.assertEqual(list(root.glob("run.Caddyfile.*")), [])
+
     def test_naive_caddy_unit_and_compose_preserve_least_privilege_log_contract(self):
         unit = (ROOT / "deploy/caddy-naive.service").read_text()
         compose = (ROOT / "compose.naive.yaml").read_text()
@@ -65,17 +164,23 @@ class DeployCliTests(unittest.TestCase):
         self.assertIn("RuntimeDirectoryMode=0700", unit)
         self.assertIn("ProtectProc=invisible", unit)
         self.assertIn("ProcSubset=pid", unit)
+        self.assertIn("ExecStartPre=+/usr/local/libexec/caddy-naive-adapt", unit)
         self.assertIn(
-            "ExecStartPre=+/usr/bin/install -o 10003 -g 10004 -m 0400 "
-            "/var/lib/naive-manager/Caddyfile /run/caddy-naive/Caddyfile",
+            "ExecStart=/usr/local/bin/caddy run --environ "
+            "--config /run/caddy-naive/config.json",
             unit,
         )
+        self.assertIn("ExecReload=+/usr/local/libexec/caddy-naive-adapt", unit)
         self.assertIn(
-            "ExecReload=+/usr/bin/install -o 10003 -g 10004 -m 0400 "
-            "/var/lib/naive-manager/Caddyfile /run/caddy-naive/Caddyfile",
+            "ExecReload=/usr/local/bin/caddy reload "
+            "--config /run/caddy-naive/config.json --force",
             unit,
         )
-        self.assertIn("--config /run/caddy-naive/Caddyfile", unit)
+        self.assertNotIn(
+            "/usr/bin/install -o 10003 -g 10004 -m 0400 "
+            "/var/lib/naive-manager/Caddyfile",
+            unit,
+        )
         self.assertIn("ReadWritePaths=/var/log/naive-proxy /run/caddy-naive", unit)
         self.assertIn("InaccessiblePaths=/var/lib/naive-manager", unit)
         self.assertNotIn("User=root", unit)
