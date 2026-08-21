@@ -168,12 +168,8 @@ class NaiveCredentialManager:
             _assert_regular(self.state_file)
             state = self._read_state()
             text = self.caddyfile.read_text()
-            cover_host_present = self._cover_host_present(text, state["host"])
             if ACCOUNTING_BEGIN not in text and ACCOUNTING_END not in text:
                 self._migrate_accounting(state, text)
-                text = self.caddyfile.read_text()
-            if not cover_host_present:
-                self._migrate_cover_host(state, text)
             else:
                 self._assert_consistent(state)
             self._archive_tombstones(state)
@@ -493,29 +489,12 @@ class NaiveCredentialManager:
         self._prune_backups()
 
     def _migrate_accounting(self, state: dict, text: str) -> None:
-        self._assert_migration_credentials(state, text)
-        self._validate_config(self.caddyfile)
-        rendered = self._render_accounting_migration(text)
-        self._commit_config_migration(rendered, "accounting_migration")
-
-    def _migrate_cover_host(self, state: dict, text: str) -> None:
-        self._assert_migration_credentials(state, text)
-        self._assert_accounting_config(text)
-        self._validate_config(self.caddyfile)
-        rendered = self._render_cover_host_migration(text, state["host"])
-        self._commit_config_migration(rendered, "cover_host_migration")
-
-    def _assert_migration_credentials(self, state: dict, text: str) -> None:
         actual = self._managed_credentials(text)
-        expected = [
-            (row["username"], row["password"])
-            for row in state["users"]
-            if row["enabled"]
-        ]
+        expected = [(row["username"], row["password"]) for row in state["users"] if row["enabled"]]
         if actual != expected:
             raise ManagerConflict("managed Caddy credentials changed outside manager")
-
-    def _commit_config_migration(self, rendered: str, operation: str) -> None:
+        self._validate_config(self.caddyfile)
+        rendered = self._render_accounting_migration(text)
         config_before = self.caddyfile.read_bytes()
         state_before = self.state_file.read_bytes()
         _durable_mkdir(self.backup_dir)
@@ -529,7 +508,7 @@ class NaiveCredentialManager:
             "phase": "prepared",
             "config_backup": config_backup.name,
             "state_backup": state_backup.name,
-            "operation": operation,
+            "operation": "accounting_migration",
         }
         self._write_transaction(transaction)
         try:
@@ -674,16 +653,13 @@ class NaiveCredentialManager:
         base_keys = {"version", "phase", "config_backup", "state_backup"}
         operation = transaction.get("operation")
         if operation is not None:
-            if operation not in {"accounting_migration", "cover_host_migration"}:
+            if operation != "accounting_migration":
                 raise ManagerRecoveryError("invalid transaction journal")
             base_keys.add("operation")
         phase = transaction["phase"]
         if phase == "bootstrap_prepared":
             allowed_keys = base_keys | {"state_existed"}
-            valid_shape = (
-                operation is None
-                and transaction.get("state_existed") is False
-            )
+            valid_shape = transaction.get("state_existed") is False
         elif phase == "recovery_failed":
             recovery_from = transaction.get("recovery_from")
             valid_origins = {"bootstrap_prepared", "prepared", "files_replaced", "rollback_pending"}
@@ -691,11 +667,7 @@ class NaiveCredentialManager:
             valid_shape = recovery_from in valid_origins
             if recovery_from == "bootstrap_prepared":
                 allowed_keys.add("state_existed")
-                valid_shape = (
-                    valid_shape
-                    and operation is None
-                    and transaction.get("state_existed") is False
-                )
+                valid_shape = valid_shape and transaction.get("state_existed") is False
         else:
             allowed_keys = base_keys
             valid_shape = True
@@ -746,7 +718,7 @@ class NaiveCredentialManager:
             self.reload()
             self.probe()
 
-        def activate_pre_migration() -> None:
+        def activate_pre_accounting() -> None:
             state = self._read_state()
             text = self.caddyfile.read_text()
             actual = self._managed_credentials(text)
@@ -766,11 +738,9 @@ class NaiveCredentialManager:
                 self._clear_transaction()
                 self._recovery_failed = False
                 return
-            if transaction.get("operation") in {
-                "accounting_migration", "cover_host_migration",
-            }:
+            if transaction.get("operation") == "accounting_migration":
                 restore_backups()
-                activate_pre_migration()
+                activate_pre_accounting()
             elif original_phase in {"prepared", "rollback_pending", "recovery_failed"}:
                 restore_backups()
                 activate_current()
@@ -789,8 +759,6 @@ class NaiveCredentialManager:
     def _assert_consistent(self, state: dict) -> None:
         text = self.caddyfile.read_text()
         self._assert_accounting_config(text)
-        if not self._cover_host_present(text, state["host"]):
-            raise ManagerConflict("forward_proxy hosts must match the managed public host")
         actual = self._managed_credentials(text)
         expected = [(row["username"], row["password"]) for row in state["users"] if row["enabled"]]
         if actual != expected:
@@ -910,23 +878,6 @@ class NaiveCredentialManager:
         return credentials
 
     @classmethod
-    def _cover_host_present(cls, text: str, public_host: str) -> bool:
-        lines = text.splitlines()
-        start, end = cls._forward_bounds(lines)
-        host_indexes = [
-            index
-            for index in range(start + 1, end)
-            if re.match(r"^\s*hosts(?:\s|$)", lines[index])
-        ]
-        if not host_indexes:
-            return False
-        directive = lines[host_indexes[0]].split("#", 1)[0].split()
-        if len(host_indexes) != 1 or directive != ["hosts", public_host]:
-            raise ManagerConflict("forward_proxy hosts must match the managed public host")
-        return True
-
-
-    @classmethod
     def _render_initial(cls, text: str, state: dict) -> str:
         lines = text.splitlines()
         if any(line.strip() in {BEGIN, END, ACCOUNTING_BEGIN, ACCOUNTING_END} for line in lines):
@@ -975,17 +926,6 @@ class NaiveCredentialManager:
         route_index = route_indexes[0]
         indent = re.match(r"^(\s*)", lines[route_index]).group(1)
         lines[route_index:route_index] = cls._accounting_lines(indent)
-        return "\n".join(lines) + "\n"
-
-    @classmethod
-    def _render_cover_host_migration(cls, text: str, public_host: str) -> str:
-        if cls._cover_host_present(text, public_host):
-            return text
-        lines = text.splitlines()
-        _forward_start, forward_end = cls._forward_bounds(lines)
-        managed_start, _managed_end = cls._managed_bounds(lines)
-        indent = re.match(r"^(\s*)", lines[managed_start]).group(1)
-        lines[forward_end:forward_end] = [f"{indent}hosts {public_host}"]
         return "\n".join(lines) + "\n"
 
     @staticmethod
