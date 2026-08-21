@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import select
 import shutil
 import socket
 import struct
@@ -125,26 +124,27 @@ def _render_at_phone_viewport(page: Path, profile: Path) -> dict[str, Any]:
             "about:blank",
         ],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
+        stderr=subprocess.DEVNULL,
     )
-    assert process.stderr is not None
     try:
-        deadline = time.monotonic() + 10
-        browser_url = None
+        deadline = time.monotonic() + 20
+        active_port = profile / "DevToolsActivePort"
+        port = None
         while time.monotonic() < deadline:
-            readable, _, _ = select.select([process.stderr], [], [], 0.25)
-            if readable:
-                line = process.stderr.readline()
-                if "DevTools listening on " in line:
-                    browser_url = line.split("DevTools listening on ", 1)[1].strip()
+            try:
+                lines = active_port.read_text().splitlines()
+                candidate = int(lines[0])
+                if len(lines) >= 2 and lines[1].startswith("/devtools/browser/"):
+                    port = candidate
                     break
+            except (FileNotFoundError, IndexError, OSError, ValueError):
+                pass
             if process.poll() is not None:
                 raise RuntimeError(f"Chromium exited before DevTools was ready: {process.returncode}")
-        if browser_url is None:
+            time.sleep(0.05)
+        if port is None:
             raise RuntimeError("Chromium DevTools endpoint did not become ready")
-        parsed = urllib.parse.urlsplit(browser_url)
-        targets = json.load(urllib.request.urlopen(f"http://{parsed.netloc}/json/list", timeout=5))
+        targets = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5))
         target_url = next(target["webSocketDebuggerUrl"] for target in targets if target["type"] == "page")
         devtools = DevTools(target_url)
         try:
