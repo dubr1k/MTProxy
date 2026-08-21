@@ -209,8 +209,27 @@ def command_validate(path: Path) -> dict:
     return caddy_adapt(path)
 
 
+def _rewrite_listener(config: dict) -> dict:
+    servers = config.get("apps", {}).get("http", {}).get("servers", {})
+    if not isinstance(servers, dict):
+        raise RuntimeError("Caddy returned an invalid HTTP configuration")
+    rewritten = False
+    for server in servers.values():
+        if not isinstance(server, dict) or not isinstance(server.get("listen"), list):
+            continue
+        server["listen"] = [
+            ":4443" if address == ":443" else address for address in server["listen"]
+        ]
+        rewritten = rewritten or ":4443" in server["listen"]
+    if not rewritten:
+        raise RuntimeError("Caddy configuration has no Naive listener")
+    return config
+
+
 def command_reload() -> None:
-    config = caddy_adapt(Path(os.getenv("NAIVE_CADDYFILE", "/data/Caddyfile")))
+    config = _rewrite_listener(
+        caddy_adapt(Path(os.getenv("NAIVE_CADDYFILE", "/data/Caddyfile")))
+    )
     request = urllib.request.Request(
         "http://127.0.0.1:2019/load", data=json.dumps(config, separators=(",", ":")).encode(), method="POST",
         headers={"Content-Type": "application/json", "Cache-Control": "must-revalidate"},
@@ -218,7 +237,6 @@ def command_reload() -> None:
     with urllib.request.urlopen(request, timeout=20) as response:
         if response.status not in {200, 204}:
             raise RuntimeError("Caddy reload failed")
-
 
 def caddy_adapt(path: Path) -> dict:
     request = urllib.request.Request(
