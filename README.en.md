@@ -510,7 +510,7 @@ Build and verify the pinned binary:
 
 ```bash
 docker build -f docker/Dockerfile.caddy-naive -t proxy-control-caddy-naive:local .
-cid=$(docker create proxy-control-caddy-naive:local)
+cid=$(docker create --entrypoint /caddy proxy-control-caddy-naive:local version)
 docker cp "$cid:/caddy" /tmp/proxy-control-caddy
 docker rm "$cid"
 sudo install -o root -g root -m 0755 /tmp/proxy-control-caddy /usr/local/bin/caddy
