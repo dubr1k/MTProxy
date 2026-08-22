@@ -39,6 +39,46 @@ async def test_login_uses_opaque_server_side_session_and_security_headers(client
     assert dashboard.headers["x-content-type-options"] == "nosniff"
 
 
+async def test_authenticated_login_page_preserves_session_csrf_for_naive_access(
+    client, login_user, naive,
+):
+    naive.seed("phone", "secret-password")
+    await login_user(client)
+    csrf = client.cookies["panel_csrf"]
+
+    login_page = await client.get("/login", follow_redirects=False)
+
+    assert login_page.status_code == 200
+    assert client.cookies["panel_csrf"] == csrf
+    access = await client.post(
+        "/api/naive/users/phone/access",
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert access.status_code == 200
+
+
+async def test_poisoned_matching_csrf_cookie_invalidates_session_for_relogin(
+    client, login_user, naive,
+):
+    naive.seed("phone", "secret-password")
+    await login_user(client)
+    client.cookies.set(
+        "panel_csrf",
+        "poisoned-by-stale-login-page",
+        domain="testserver.local",
+        path="/",
+    )
+
+    access = await client.post(
+        "/api/naive/users/phone/access",
+        headers={"X-CSRF-Token": "poisoned-by-stale-login-page"},
+    )
+
+    assert access.status_code == 401
+    assert access.json() == {"detail": "session CSRF state invalid"}
+    assert (await client.get("/api/auth/me")).status_code == 401
+
+
 async def test_csrf_required_for_login_and_authenticated_mutations(client, login_user):
     assert (await client.post("/api/auth/login", json={"username": "owner", "password": "x"})).status_code == 403
     await login_user(client)

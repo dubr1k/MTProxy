@@ -24,11 +24,15 @@ class RequestContext:
             return value
 
         async def mutation(request: Request, user=Depends(current)):
-            if not self.app.state.store.csrf_valid(
-                user,
-                request.headers.get("X-CSRF-Token"),
-                request.cookies.get("panel_csrf"),
-            ):
+            supplied = request.headers.get("X-CSRF-Token")
+            cookie = request.cookies.get("panel_csrf")
+            if not self.app.state.store.csrf_valid(user, supplied, cookie):
+                if supplied and cookie and secrets.compare_digest(supplied, cookie):
+                    await asyncio.to_thread(
+                        self.app.state.store.delete_session,
+                        request.cookies.get("panel_session"),
+                    )
+                    raise HTTPException(401, "session CSRF state invalid")
                 raise HTTPException(403, "CSRF validation failed")
             return user
 

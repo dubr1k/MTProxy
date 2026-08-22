@@ -22,8 +22,19 @@ def register_auth_admin_audit_routes(
         return {"status": "ok"}
 
     @app.get("/login", response_class=HTMLResponse)
-    async def login_page(_request: Request):
+    async def login_page(request: Request):
+        session = await asyncio.to_thread(
+            app.state.store.session,
+            request.cookies.get("panel_session"),
+        )
+        existing_csrf = request.cookies.get("panel_csrf")
         token = secrets.token_urlsafe(32)
+        if (
+            session
+            and existing_csrf
+            and app.state.store.csrf_valid(session, existing_csrf, existing_csrf)
+        ):
+            token = existing_csrf
         response = HTMLResponse((static / "login.html").read_text())
         response.set_cookie(
             "panel_csrf",
