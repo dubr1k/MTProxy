@@ -322,6 +322,7 @@ export function createAccessDialogs(context) {
     const image = query(`#${prefix}-qr-image`, root);
     const empty = query(`#${prefix}-qr-empty`, root);
     const qrDownload = query(`#download-${prefix}-qr`, root);
+    if (!image || !empty || !qrDownload) return;
     image.hidden = !variant.qr;
     empty.hidden = Boolean(variant.qr);
     image.removeAttribute("src");
@@ -375,9 +376,9 @@ export function createAccessDialogs(context) {
     const current = dialogs[prefix];
     query(`#${prefix}-payload`, root).value = "";
     query(`#${prefix}-secondary-payload`, root).value = "";
-    query(`#${prefix}-qr-image`, root).removeAttribute("src");
+    query(`#${prefix}-qr-image`, root)?.removeAttribute("src");
     query(`#open-${prefix}-client`, root).removeAttribute("href");
-    query(`#download-${prefix}-qr`, root).removeAttribute("href");
+    query(`#download-${prefix}-qr`, root)?.removeAttribute("href");
     query(`#download-${prefix}-payload`, root).removeAttribute("href");
     query(`#${prefix}-client-tabs`, root).textContent = "";
     if (current.objectUrl) URL.revokeObjectURL(current.objectUrl);

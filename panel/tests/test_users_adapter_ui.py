@@ -308,7 +308,8 @@ async def test_ui_is_self_contained_russian_and_has_mobile_navigation_markers(cl
     assert 'id="create-user" type="button" disabled' in text
     assert 'data-view="naive"' in text and 'id="naive-modal"' in text
     assert 'id="naive-access-modal"' in text and 'id="naive-client-tabs"' in text
-    assert 'id="naive-payload"' in text and 'id="naive-qr-empty"' in text
+    assert 'id="naive-payload"' in text and 'class="access-layout no-qr"' in text
+    assert 'id="naive-qr-empty"' not in text and 'id="download-naive-qr"' not in text
     assert "normaliseAccessPayload" in modules["access"] and "showNaiveAccess" in modules["access"]
     assert 'class="protocol-overview"' in modules["dashboard"]
     assert (

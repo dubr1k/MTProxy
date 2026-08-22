@@ -186,18 +186,17 @@
     <form method="dialog">
       <div class="modal-head"><div><span class="eyebrow">NAIVEPROXY · КЛИЕНТ</span><h2 id="naive-access-title">Доступ NaiveProxy</h2></div><button class="icon-button close" value="cancel" formnovalidate aria-label="Закрыть">×</button></div>
       <div id="naive-client-tabs" class="client-tabs" role="tablist" aria-label="Клиент NaiveProxy"></div>
-      <div class="access-layout">
-        <div class="qr-wrap"><img id="naive-qr-image" alt="" hidden><div id="naive-qr-empty" class="qr-empty">Этот способ требует файл или ручной ввод — QR не используется.</div><span id="naive-qr-caption">QR выбранного клиента</span></div>
+      <div class="access-layout no-qr">
         <div class="access-details">
           <span class="status-pill active"><i></i> Данные готовы</span>
           <p id="naive-client-description"></p>
           <label><span id="naive-payload-label">Данные подключения</span><div class="copy-field payload-field"><textarea id="naive-payload" readonly aria-label="Данные подключения NaiveProxy"></textarea><button id="copy-naive-payload" type="button">Копировать</button></div></label>
           <label id="naive-secondary" hidden><span id="naive-secondary-label">Дополнительные данные</span><div class="copy-field payload-field"><textarea id="naive-secondary-payload" readonly aria-label="Дополнительные данные NaiveProxy"></textarea><button id="copy-naive-secondary" type="button">Копировать</button></div></label>
-          <div class="access-actions"><a class="primary button" id="open-naive-client" hidden>Открыть</a><a class="secondary button" id="download-naive-payload" hidden>Скачать конфигурацию</a><a class="secondary button" id="download-naive-qr" hidden>Скачать QR ссылки</a></div>
+          <div class="access-actions"><a class="primary button" id="open-naive-client" hidden>Открыть</a><a class="secondary button" id="download-naive-payload" hidden>Скачать конфигурацию</a></div>
           <p id="naive-unsupported" class="unsupported-client" hidden></p>
         </div>
       </div>
-      <div class="security-note">config.json, ссылка Karing и ручные поля содержат один пароль. Не публикуйте их и закройте окно после передачи.</div>
+      <div class="security-note">config.json, конфигурация Karing и ручные поля содержат один пароль. Не публикуйте их и закройте окно после передачи.</div>
       <footer><button class="secondary" value="cancel" formnovalidate>Закрыть</button></footer>
     </form>
   </dialog>

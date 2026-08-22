@@ -136,15 +136,15 @@ function fakeElement() {
   };
 }
 
-function fakeRoot(prefix) {
+function fakeRoot(prefix, { qr = true } = {}) {
   const ids = [
     `${prefix}-client-tabs`, `${prefix}-client-description`, `${prefix}-payload-label`,
     `${prefix}-payload`, `copy-${prefix}-payload`, `${prefix}-secondary`,
     `${prefix}-secondary-label`, `${prefix}-secondary-payload`, `copy-${prefix}-secondary`,
-    `open-${prefix}-client`, `download-${prefix}-payload`, `${prefix}-qr-image`,
-    `${prefix}-qr-empty`, `download-${prefix}-qr`, `${prefix}-qr-caption`,
+    `open-${prefix}-client`, `download-${prefix}-payload`,
     `${prefix}-unsupported`, `${prefix}-access-title`, `${prefix}-access-modal`,
   ];
+  if (qr) ids.push(`${prefix}-qr-image`, `${prefix}-qr-empty`, `download-${prefix}-qr`, `${prefix}-qr-caption`);
   const elements = Object.fromEntries(ids.map((id) => [`#${id}`, fakeElement()]));
   const tabs = elements[`#${prefix}-client-tabs`];
   tabs.buttons = [];
@@ -168,7 +168,7 @@ function fakeRoot(prefix) {
 }
 
 test("dialog renderer shows the Naive Karing sing-box outbound without a broken deep link or QR", () => {
-  const root = fakeRoot("naive");
+  const root = fakeRoot("naive", { qr: false });
   const opened = [];
   const dialogs = createAccessDialogs({
     root,
@@ -214,12 +214,11 @@ test("dialog renderer shows the Naive Karing sing-box outbound without a broken 
   }, "phone");
 
   assert.deepEqual(opened, ["#naive-access-modal"]);
-  assert.equal(root.elements["#naive-qr-image"].hidden, true);
+  assert.equal(root.elements["#naive-qr-image"], undefined);
   const karingTab = root.elements["#naive-client-tabs"].buttons.find(
     (button) => button.dataset.client === "karing",
   );
   root.elements["#naive-client-tabs"].listeners.click({ target: karingTab });
-  assert.equal(root.elements["#naive-qr-image"].hidden, true);
   assert.deepEqual(JSON.parse(root.elements["#naive-payload"].value), config);
   assert.equal(root.elements["#naive-client-description"].textContent, "sing-box outbound — подходит для Karing.");
   assert.notEqual(root.elements["#naive-payload"].value, endpoint);
